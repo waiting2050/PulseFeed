@@ -19,6 +19,9 @@ import (
 	feedhandl "pulsefeed/internal/feed/http"
 	feedinfra "pulsefeed/internal/feed/infra"
 	"pulsefeed/internal/httpapi"
+	interactionapp "pulsefeed/internal/interaction/app"
+	interactionhandl "pulsefeed/internal/interaction/http"
+	interactioninfra "pulsefeed/internal/interaction/infra"
 	"pulsefeed/internal/shared/cache"
 	"pulsefeed/internal/shared/config"
 	"pulsefeed/internal/shared/database"
@@ -56,6 +59,8 @@ func run() error {
 		&accountinfra.UserModel{},
 		&videoinfra.VideoModel{},
 		&videoinfra.VideoStatModel{},
+		&interactioninfra.ActionModel{},
+		&interactioninfra.CommentModel{},
 	); err != nil {
 		return fmt.Errorf("migrate schema: %w", err)
 	}
@@ -86,7 +91,11 @@ func run() error {
 	feedService := feedapp.NewService(feedRepo, feedCache, feedHotStore)
 	feedHandler := feedhandl.NewHandler(feedService, log)
 
-	router := httpapi.NewRouter(log, jwtManager, accountHandler, videoHandler, uploadHandler, feedHandler, cfg.UploadDir)
+	interactionRepo := interactioninfra.NewGormRepository(db)
+	interactionService := interactionapp.NewService(interactionRepo, feedHotStore)
+	interactionHandler := interactionhandl.NewHandler(interactionService, log)
+
+	router := httpapi.NewRouter(log, jwtManager, accountHandler, videoHandler, uploadHandler, feedHandler, interactionHandler, cfg.UploadDir)
 	server := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           router,

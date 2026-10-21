@@ -13,6 +13,7 @@ const (
 	CodeNotFound     = 1003
 	CodeConflict     = 1004
 	CodeInternal     = 1005
+	CodeForbidden    = 1006
 )
 
 type Response struct {
@@ -51,6 +52,10 @@ func NotFound(c *gin.Context, message string) {
 
 func Conflict(c *gin.Context, message string) {
 	Fail(c, http.StatusConflict, CodeConflict, message)
+}
+
+func Forbidden(c *gin.Context, message string) {
+	Fail(c, http.StatusForbidden, CodeForbidden, message)
 }
 
 func Internal(c *gin.Context, message string) {
