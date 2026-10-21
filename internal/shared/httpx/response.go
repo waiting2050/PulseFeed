@@ -14,6 +14,8 @@ const (
 	CodeConflict     = 1004
 	CodeInternal     = 1005
 	CodeForbidden    = 1006
+	CodeTooManyReqs  = 1007
+	CodeUnavailable  = 1008
 )
 
 type Response struct {
@@ -60,6 +62,14 @@ func Forbidden(c *gin.Context, message string) {
 
 func Internal(c *gin.Context, message string) {
 	Fail(c, http.StatusInternalServerError, CodeInternal, message)
+}
+
+func TooManyRequests(c *gin.Context, message string) {
+	Fail(c, http.StatusTooManyRequests, CodeTooManyReqs, message)
+}
+
+func ServiceUnavailable(c *gin.Context, message string) {
+	Fail(c, http.StatusServiceUnavailable, CodeUnavailable, message)
 }
 
 func BindJSON(c *gin.Context, dst any) bool {

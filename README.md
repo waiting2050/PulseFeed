@@ -22,7 +22,7 @@ PulseFeed 是一个短视频 Feed 系统，后端采用 Go 单体架构，按业
 - [x] 关系模块：关注、取关、关注流
 - [x] 推荐与曝光：多路召回、曝光去重、作者打散
 - [x] 消息通知：事件驱动、通知列表与未读数
-- [ ] 监控与治理
+- [x] 监控与治理：指标采集、请求追踪、健康检查、限流
 - [ ] Web 客户端
 
 ## 目录结构
@@ -30,7 +30,7 @@ PulseFeed 是一个短视频 Feed 系统，后端采用 Go 单体架构，按业
 ```text
 cmd/api/                    服务启动与依赖装配
 internal/
-  shared/                   配置、日志、数据库、Redis、JWT、响应、中间件、游标、事件总线
+  shared/                   配置、日志、数据库、Redis、JWT、响应、中间件、游标、事件总线、指标
   account/                  账户垂直切片
     domain/                 实体、领域错误、仓储接口
     app/                    注册、登录、资料更新用例
@@ -67,7 +67,7 @@ internal/
     infra/                  热榜/关注/时间线召回、Redis 曝光集合
     http/                   路由、DTO、Handler
   upload/                   文件上传
-  httpapi/                  Gin 引擎、健康检查、静态文件
+  httpapi/                  Gin 引擎、健康检查、指标端点、静态文件
 ```
 
 每个业务切片内部保持 `domain -> app -> infra/http` 的依赖方向，切片之间不直接依赖对方的 infra 实现。
@@ -85,7 +85,9 @@ docker compose up -d --build
 | 服务 | 地址 |
 | --- | --- |
 | API | `http://127.0.0.1:8080` |
-| 健康检查 | `http://127.0.0.1:8080/health` |
+| 存活检查 | `http://127.0.0.1:8080/health` |
+| 就绪检查 | `http://127.0.0.1:8080/ready` |
+| 指标 | `http://127.0.0.1:8080/metrics` |
 | MySQL | `127.0.0.1:3307` |
 | Redis | `127.0.0.1:6379` |
 
@@ -102,6 +104,14 @@ docker compose down -v
 ```bash
 go run ./cmd/api
 ```
+
+常用环境变量：
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `APP_ENV` | `dev` | `prod` 时输出 JSON 日志并关闭调试提示 |
+| `APP_VERSION` | `dev` | 写入 `pulsefeed_build_info` 指标 |
+| `RATE_LIMIT_PER_MINUTE` | `120` | 单 IP 每分钟请求上限，`0` 表示关闭限流 |
 
 ## API
 
@@ -182,6 +192,10 @@ curl -X POST http://127.0.0.1:8080/api/videos \
 - **关注流**：`user_relations` 以 `(follower_id, followee_id)` 唯一索引保证重复关注幂等；关注流先取当前用户的关注列表（最多 1000 人），再用 `author_id IN (...)` 回源视频并按发布时间游标翻页，不做整页缓存以反映关注关系的最新变化。
 - **推荐流**：热榜、关注作者作品、时间线三路各召回 50 条，合并去重后过滤 Redis 中 `recommend:exposed:v1:{userID}` 已曝光的视频，再按“单页同一作者最多 2 条”打散并截断到 `limit`；本页结果写回曝光集合（TTL 24 小时），Redis 不可用时自动跳过曝光过滤。
 - **消息通知**：点赞、收藏、评论、关注在状态真正变化后向进程内事件总线发布事件，消息模块订阅后写入 `notifications`，自己操作自己不产生通知；评论内容截断为 100 字摘要，通知列表按 `created_at DESC, id DESC` 游标分页，并回填操作者昵称与头像。
+- **可观测性**：请求 ID 中间件复用合法的 `X-Request-ID` 或重新生成，贯穿访问日志、panic 日志与响应头；访问日志输出 method、route、status、latency、user_id 等结构化字段，`/metrics` 按 Prometheus 文本格式暴露请求数、耗时直方图、并发数、限流次数与依赖状态，HTTP 指标以路由模板作为标签避免基数膨胀。
+- **健康检查**：`/health` 只表示进程存活，供容器存活探针使用；`/ready` 在 2 秒超时内探测 MySQL 与 Redis，任一异常返回 503 并输出各依赖状态，Redis 未启用时标记为 `disabled` 而不是失败。
+- **限流与自我保护**：`/api` 按客户端 IP 做固定窗口计数（Redis `INCR` + `EXPIRE`，默认 120 次/分钟），超限返回 429 与 `Retry-After`；Redis 不可用时放行请求，避免缓存故障放大为全站不可用；路由不信任代理头，防止伪造 `X-Forwarded-For` 影响限流维度。
+- **panic 恢复**：自定义 Recovery 捕获 panic 后记录堆栈与请求 ID，并返回统一错误响应，避免连接被直接断开。
 - **上传校验**：按业务类型限制扩展名和文件大小，文件名由服务端生成，避免路径注入。
 - **统一错误映射**：领域错误在 HTTP 层映射为对应状态码，内部错误只记录日志，不向外暴露细节。
 
@@ -197,4 +211,4 @@ docker compose config
 ## 后续路线
 
 1. 互动异步化：RabbitMQ 削峰、点赞评论异步落库
-2. 监控治理与 Web 客户端
+2. Web 客户端
