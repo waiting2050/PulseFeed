@@ -15,6 +15,9 @@ import (
 	accountapp "pulsefeed/internal/account/app"
 	accounthttp "pulsefeed/internal/account/http"
 	accountinfra "pulsefeed/internal/account/infra"
+	feedapp "pulsefeed/internal/feed/app"
+	feedhandl "pulsefeed/internal/feed/http"
+	feedinfra "pulsefeed/internal/feed/infra"
 	"pulsefeed/internal/httpapi"
 	"pulsefeed/internal/shared/cache"
 	"pulsefeed/internal/shared/config"
@@ -77,7 +80,13 @@ func run() error {
 	videoHandler := videohandl.NewHandler(videoService, log)
 	uploadHandler := upload.NewHandler(cfg.UploadDir, log)
 
-	router := httpapi.NewRouter(log, jwtManager, accountHandler, videoHandler, uploadHandler, cfg.UploadDir)
+	feedRepo := feedinfra.NewGormRepository(db)
+	feedCache := feedinfra.NewPageCache(rdb, log)
+	feedHotStore := feedinfra.NewHotStore(rdb)
+	feedService := feedapp.NewService(feedRepo, feedCache, feedHotStore)
+	feedHandler := feedhandl.NewHandler(feedService, log)
+
+	router := httpapi.NewRouter(log, jwtManager, accountHandler, videoHandler, uploadHandler, feedHandler, cfg.UploadDir)
 	server := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           router,

@@ -7,6 +7,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	accounthttp "pulsefeed/internal/account/http"
+	feedhandl "pulsefeed/internal/feed/http"
 	"pulsefeed/internal/shared/jwtx"
 	"pulsefeed/internal/shared/middleware"
 	"pulsefeed/internal/upload"
@@ -19,6 +20,7 @@ func NewRouter(
 	accountHandler *accounthttp.Handler,
 	videoHandler *videohandl.Handler,
 	uploadHandler *upload.Handler,
+	feedHandler *feedhandl.Handler,
 	uploadDir string,
 ) *gin.Engine {
 	router := gin.New()
@@ -35,6 +37,7 @@ func NewRouter(
 	accountHandler.RegisterRoutes(api, auth)
 	videoHandler.RegisterRoutes(api, auth)
 	uploadHandler.RegisterRoutes(api, auth)
+	feedHandler.RegisterRoutes(api)
 
 	return router
 }

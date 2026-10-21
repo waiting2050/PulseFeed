@@ -16,7 +16,7 @@ PulseFeed 是一个短视频 Feed 系统，后端采用 Go 单体架构，按业
 - [x] 账户模块：注册、登录、JWT、个人资料
 - [x] 视频模块：文件上传、发布、详情、幂等、作者作品列表
 - [x] Feed 模块：Timeline 游标分页、Redis 页缓存、统计字段组装
-- [ ] Hot Feed：Redis 分钟桶 ZSET、窗口合并
+- [x] Hot Feed：Redis 分钟桶 ZSET、窗口合并
 - [ ] 互动模块：点赞、收藏、评论、异步落库
 - [ ] 关系模块：关注、取关、关注流
 - [ ] 推荐与曝光
@@ -42,7 +42,7 @@ internal/
     http/                   路由、DTO、Handler
   feed/                     Feed 垂直切片
     domain/                 Feed 卡片实体、分页结果、仓储与缓存接口
-    app/                    Timeline 查询、游标编解码、页缓存读写
+    app/                    Timeline / Hot 查询、游标编解码、页缓存读写
     infra/                  GORM 回源查询、Redis 页缓存
     http/                   路由、DTO、Handler
   upload/                   文件上传
@@ -141,6 +141,7 @@ curl -X POST http://127.0.0.1:8080/api/videos \
 - **发布幂等**：`Idempotency-Key` 先查后建，并由数据库唯一索引兜底并发写入。
 - **游标分页**：作品列表与 Feed 都按 `published_at DESC, id DESC` 排序，游标编码最后一条的排序字段，翻页稳定。
 - **Feed 页缓存**：一页 Feed 以 `feed:page:v1:{scene}:{limit}:{cursor}` 整体写入 Redis，TTL 60 秒；未命中时回源 MySQL 一次取出 `limit+1` 条判断 `has_more`，Redis 不可用时自动退化为直查数据库。
+- **Hot Feed**：互动分数写入 `feed:hot:minute:v1:{yyyyMMddHHmm}` 分钟桶 ZSET，查询时把最近 60 个桶合并成临时 ZSET 取 TopN，游标编码 `(score, video_id)` 保证翻页稳定；Redis 未就绪时热榜返回空页。
 - **上传校验**：按业务类型限制扩展名和文件大小，文件名由服务端生成，避免路径注入。
 - **统一错误映射**：领域错误在 HTTP 层映射为对应状态码，内部错误只记录日志，不向外暴露细节。
 
@@ -155,8 +156,7 @@ docker compose config
 
 ## 后续路线
 
-1. Hot Feed：Redis 分钟桶 ZSET、窗口合并
-2. 互动：点赞、收藏、评论、计数缓存、RabbitMQ 异步落库
-3. 关系：关注、取关、关注流
-4. 推荐与曝光：召回、打散、曝光去重
-5. 消息、监控治理与 Web 客户端
+1. 互动：点赞、收藏、评论、计数缓存、RabbitMQ 异步落库
+2. 关系：关注、取关、关注流
+3. 推荐与曝光：召回、打散、曝光去重
+4. 消息、监控治理与 Web 客户端

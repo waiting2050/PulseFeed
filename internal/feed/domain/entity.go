@@ -5,7 +5,10 @@ import (
 	"time"
 )
 
-const SceneTimeline = "timeline"
+const (
+	SceneTimeline = "timeline"
+	SceneHot      = "hot"
+)
 
 var (
 	ErrInvalidScene  = errors.New("不支持的 Feed 场景")
@@ -25,8 +28,15 @@ type Item struct {
 	PublishedAt   time.Time `json:"published_at"`
 }
 
-// Page 是一页完整的 Feed 结果，缓存时连 has_more 一起保存，避免回源判断。
+// Page 是一页完整的 Feed 结果，缓存时连 has_more 和下一页游标一起保存。
 type Page struct {
-	Items   []*Item `json:"items"`
-	HasMore bool    `json:"has_more"`
+	Items      []*Item `json:"items"`
+	HasMore    bool    `json:"has_more"`
+	NextCursor string  `json:"next_cursor"`
+}
+
+// ScoreEntry 是热榜里的一条排名记录。
+type ScoreEntry struct {
+	VideoID int64   `json:"video_id"`
+	Score   float64 `json:"score"`
 }
