@@ -14,6 +14,7 @@ import (
 
 type memoryRepository struct {
 	videoExists bool
+	videoAuthor int64
 	actions     map[string]bool
 	comments    []*domain.Comment
 	nextID      int64
@@ -22,6 +23,7 @@ type memoryRepository struct {
 func newMemoryRepository() *memoryRepository {
 	return &memoryRepository{
 		videoExists: true,
+		videoAuthor: 2,
 		actions:     map[string]bool{},
 		nextID:      1,
 	}
@@ -122,7 +124,7 @@ func (h *memoryHotStore) AddScore(_ context.Context, videoID int64, delta float6
 func TestLikeIsIdempotent(t *testing.T) {
 	repo := newMemoryRepository()
 	hot := &memoryHotStore{}
-	service := NewService(repo, hot)
+	service := NewService(repo, hot, nil)
 	ctx := context.Background()
 
 	if err := service.Like(ctx, 1, 100); err != nil {
@@ -156,7 +158,7 @@ func TestLikeIsIdempotent(t *testing.T) {
 func TestFavoriteUsesHigherWeight(t *testing.T) {
 	repo := newMemoryRepository()
 	hot := &memoryHotStore{}
-	service := NewService(repo, hot)
+	service := NewService(repo, hot, nil)
 
 	if err := service.Favorite(context.Background(), 1, 100); err != nil {
 		t.Fatalf("favorite: %v", err)
@@ -170,7 +172,7 @@ func TestLikeMissingVideo(t *testing.T) {
 	repo := newMemoryRepository()
 	repo.videoExists = false
 	hot := &memoryHotStore{}
-	service := NewService(repo, hot)
+	service := NewService(repo, hot, nil)
 
 	if err := service.Like(context.Background(), 1, 100); err != domain.ErrVideoNotFound {
 		t.Fatalf("expected video not found, got %v", err)
@@ -183,7 +185,7 @@ func TestLikeMissingVideo(t *testing.T) {
 func TestCreateAndDeleteComment(t *testing.T) {
 	repo := newMemoryRepository()
 	hot := &memoryHotStore{}
-	service := NewService(repo, hot)
+	service := NewService(repo, hot, nil)
 	ctx := context.Background()
 
 	comment, err := service.CreateComment(ctx, 8, 100, "  你好  ")
@@ -213,7 +215,7 @@ func TestCreateAndDeleteComment(t *testing.T) {
 }
 
 func TestCreateCommentValidatesContent(t *testing.T) {
-	service := NewService(newMemoryRepository(), nil)
+	service := NewService(newMemoryRepository(), nil, nil)
 	ctx := context.Background()
 
 	if _, err := service.CreateComment(ctx, 1, 100, "   "); err != domain.ErrInvalidComment {
@@ -229,7 +231,7 @@ func TestCreateCommentValidatesContent(t *testing.T) {
 
 func TestListCommentsPagination(t *testing.T) {
 	repo := newMemoryRepository()
-	service := NewService(repo, nil)
+	service := NewService(repo, nil, nil)
 	ctx := context.Background()
 
 	for i := 1; i <= 3; i++ {
@@ -265,7 +267,7 @@ func TestListCommentsPagination(t *testing.T) {
 }
 
 func TestListCommentsRejectsInvalidCursor(t *testing.T) {
-	service := NewService(newMemoryRepository(), nil)
+	service := NewService(newMemoryRepository(), nil, nil)
 
 	if _, err := service.ListComments(context.Background(), 100, "not-base64", 10); err != domain.ErrInvalidCursor {
 		t.Fatalf("expected invalid cursor, got %v", err)
@@ -274,7 +276,7 @@ func TestListCommentsRejectsInvalidCursor(t *testing.T) {
 
 func TestCreateCommentTimestampIsUTC(t *testing.T) {
 	repo := newMemoryRepository()
-	service := NewService(repo, nil)
+	service := NewService(repo, nil, nil)
 
 	comment, err := service.CreateComment(context.Background(), 1, 100, "hello")
 	if err != nil {

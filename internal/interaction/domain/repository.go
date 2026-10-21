@@ -9,6 +9,7 @@ import (
 // Repository 保存互动行为与评论，计数变更与行为写入需要保持同一事务。
 type Repository interface {
 	VideoExists(ctx context.Context, videoID int64) (bool, error)
+	VideoAuthor(ctx context.Context, videoID int64) (int64, error)
 	AddAction(ctx context.Context, userID, videoID int64, action int) (bool, error)
 	RemoveAction(ctx context.Context, userID, videoID int64, action int) (bool, error)
 	CreateComment(ctx context.Context, comment *Comment) error

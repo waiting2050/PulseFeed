@@ -21,7 +21,7 @@ PulseFeed 是一个短视频 Feed 系统，后端采用 Go 单体架构，按业
 - [ ] 互动异步落库：RabbitMQ 削峰
 - [x] 关系模块：关注、取关、关注流
 - [x] 推荐与曝光：多路召回、曝光去重、作者打散
-- [ ] 消息通知
+- [x] 消息通知：事件驱动、通知列表与未读数
 - [ ] 监控与治理
 - [ ] Web 客户端
 
@@ -30,7 +30,7 @@ PulseFeed 是一个短视频 Feed 系统，后端采用 Go 单体架构，按业
 ```text
 cmd/api/                    服务启动与依赖装配
 internal/
-  shared/                   配置、日志、数据库、Redis、JWT、响应、中间件、游标
+  shared/                   配置、日志、数据库、Redis、JWT、响应、中间件、游标、事件总线
   account/                  账户垂直切片
     domain/                 实体、领域错误、仓储接口
     app/                    注册、登录、资料更新用例
@@ -55,6 +55,11 @@ internal/
     domain/                 关注关系实体与仓储接口
     app/                    关注、取关用例
     infra/                  GORM 仓储
+    http/                   路由、DTO、Handler
+  message/                  消息垂直切片
+    domain/                 通知实体与仓储接口
+    app/                    事件转通知、通知列表、未读数
+    infra/                  GORM 仓储、操作者信息回填
     http/                   路由、DTO、Handler
   recommend/                推荐垂直切片
     domain/                 召回源、曝光存储接口
@@ -137,6 +142,9 @@ go run ./cmd/api
 | DELETE | `/api/users/{userId}/follow` | 是 | 取消关注 |
 | GET | `/api/feed-items/following` | 是 | 关注流，支持 `cursor`、`limit` |
 | GET | `/api/feed-items/recommend` | 是 | 推荐 Feed，多路召回与曝光去重 |
+| GET | `/api/notifications` | 是 | 通知列表，游标分页 |
+| GET | `/api/notifications/unread-count` | 是 | 未读通知数 |
+| POST | `/api/notifications/read` | 是 | 全部标记已读 |
 
 ### 上传示例
 
@@ -173,6 +181,7 @@ curl -X POST http://127.0.0.1:8080/api/videos \
 - **互动与热榜联动**：只有行为真正发生变化时才写入热榜分数，权重为 like=1、favorite=2、comment=3，取消操作写负分；热榜写入失败不阻断互动主流程。
 - **关注流**：`user_relations` 以 `(follower_id, followee_id)` 唯一索引保证重复关注幂等；关注流先取当前用户的关注列表（最多 1000 人），再用 `author_id IN (...)` 回源视频并按发布时间游标翻页，不做整页缓存以反映关注关系的最新变化。
 - **推荐流**：热榜、关注作者作品、时间线三路各召回 50 条，合并去重后过滤 Redis 中 `recommend:exposed:v1:{userID}` 已曝光的视频，再按“单页同一作者最多 2 条”打散并截断到 `limit`；本页结果写回曝光集合（TTL 24 小时），Redis 不可用时自动跳过曝光过滤。
+- **消息通知**：点赞、收藏、评论、关注在状态真正变化后向进程内事件总线发布事件，消息模块订阅后写入 `notifications`，自己操作自己不产生通知；评论内容截断为 100 字摘要，通知列表按 `created_at DESC, id DESC` 游标分页，并回填操作者昵称与头像。
 - **上传校验**：按业务类型限制扩展名和文件大小，文件名由服务端生成，避免路径注入。
 - **统一错误映射**：领域错误在 HTTP 层映射为对应状态码，内部错误只记录日志，不向外暴露细节。
 
@@ -188,4 +197,4 @@ docker compose config
 ## 后续路线
 
 1. 互动异步化：RabbitMQ 削峰、点赞评论异步落库
-2. 消息、监控治理与 Web 客户端
+2. 监控治理与 Web 客户端

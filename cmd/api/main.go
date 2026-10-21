@@ -22,6 +22,9 @@ import (
 	interactionapp "pulsefeed/internal/interaction/app"
 	interactionhandl "pulsefeed/internal/interaction/http"
 	interactioninfra "pulsefeed/internal/interaction/infra"
+	messageapp "pulsefeed/internal/message/app"
+	messagehandl "pulsefeed/internal/message/http"
+	messageinfra "pulsefeed/internal/message/infra"
 	recommendapp "pulsefeed/internal/recommend/app"
 	recommenddomain "pulsefeed/internal/recommend/domain"
 	recommendhandl "pulsefeed/internal/recommend/http"
@@ -32,6 +35,7 @@ import (
 	"pulsefeed/internal/shared/cache"
 	"pulsefeed/internal/shared/config"
 	"pulsefeed/internal/shared/database"
+	"pulsefeed/internal/shared/event"
 	"pulsefeed/internal/shared/jwtx"
 	"pulsefeed/internal/shared/logger"
 	"pulsefeed/internal/upload"
@@ -69,6 +73,7 @@ func run() error {
 		&interactioninfra.ActionModel{},
 		&interactioninfra.CommentModel{},
 		&relationinfra.RelationModel{},
+		&messageinfra.NotificationModel{},
 	); err != nil {
 		return fmt.Errorf("migrate schema: %w", err)
 	}
@@ -83,6 +88,7 @@ func run() error {
 		defer rdb.Close()
 	}
 
+	bus := event.NewBus()
 	jwtManager := jwtx.NewManager(cfg.JWTSecret, cfg.JWTTTL)
 	accountRepo := accountinfra.NewGormRepository(db)
 	accountService := accountapp.NewService(accountRepo, jwtManager)
@@ -97,15 +103,24 @@ func run() error {
 	feedCache := feedinfra.NewPageCache(rdb, log)
 	feedHotStore := feedinfra.NewHotStore(rdb)
 	relationRepo := relationinfra.NewGormRepository(db)
-	relationService := relationapp.NewService(relationRepo)
+	relationService := relationapp.NewService(relationRepo, bus)
 	feedService := feedapp.NewService(feedRepo, feedCache, feedHotStore, relationService)
 	feedHandler := feedhandl.NewHandler(feedService, log)
 
 	interactionRepo := interactioninfra.NewGormRepository(db)
-	interactionService := interactionapp.NewService(interactionRepo, feedHotStore)
+	interactionService := interactionapp.NewService(interactionRepo, feedHotStore, bus)
 	interactionHandler := interactionhandl.NewHandler(interactionService, log)
 
 	relationHandler := relationhandl.NewHandler(relationService, log)
+
+	messageRepo := messageinfra.NewGormRepository(db)
+	messageService := messageapp.NewService(messageRepo)
+	bus.Subscribe(func(ctx context.Context, evt event.Event) {
+		if err := messageService.HandleEvent(ctx, evt); err != nil {
+			log.Error("notification event failed", "type", evt.Type, "error", err)
+		}
+	})
+	messageHandler := messagehandl.NewHandler(messageService, log)
 
 	recommendExposed := recommendinfra.NewExposedStore(rdb)
 	recommendService := recommendapp.NewService([]recommenddomain.RecallSource{
@@ -115,7 +130,7 @@ func run() error {
 	}, feedRepo, recommendExposed)
 	recommendHandler := recommendhandl.NewHandler(recommendService, log)
 
-	router := httpapi.NewRouter(log, jwtManager, accountHandler, videoHandler, uploadHandler, feedHandler, interactionHandler, relationHandler, recommendHandler, cfg.UploadDir)
+	router := httpapi.NewRouter(log, jwtManager, accountHandler, videoHandler, uploadHandler, feedHandler, interactionHandler, relationHandler, recommendHandler, messageHandler, cfg.UploadDir)
 	server := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           router,

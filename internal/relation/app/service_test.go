@@ -79,7 +79,7 @@ func (r *memoryRepository) ListFolloweeIDs(_ context.Context, followerID int64, 
 }
 
 func TestFollowRejectsSelf(t *testing.T) {
-	service := NewService(newMemoryRepository())
+	service := NewService(newMemoryRepository(), nil)
 
 	if err := service.Follow(context.Background(), 1, 1); err != domain.ErrCannotFollowSelf {
 		t.Fatalf("expected cannot follow self, got %v", err)
@@ -87,7 +87,7 @@ func TestFollowRejectsSelf(t *testing.T) {
 }
 
 func TestFollowMissingUser(t *testing.T) {
-	service := NewService(newMemoryRepository())
+	service := NewService(newMemoryRepository(), nil)
 
 	if err := service.Follow(context.Background(), 1, 999); err != domain.ErrUserNotFound {
 		t.Fatalf("expected user not found, got %v", err)
@@ -96,7 +96,7 @@ func TestFollowMissingUser(t *testing.T) {
 
 func TestFollowAndUnfollowAreIdempotent(t *testing.T) {
 	repo := newMemoryRepository()
-	service := NewService(repo)
+	service := NewService(repo, nil)
 	ctx := context.Background()
 
 	if err := service.Follow(ctx, 1, 2); err != nil {
@@ -123,7 +123,7 @@ func TestFollowAndUnfollowAreIdempotent(t *testing.T) {
 func TestListFolloweeIDsUsesFeedLimit(t *testing.T) {
 	repo := newMemoryRepository()
 	repo.relations[relationKey(1, 2)] = true
-	service := NewService(repo)
+	service := NewService(repo, nil)
 
 	ids, err := service.ListFolloweeIDs(context.Background(), 1)
 	if err != nil {

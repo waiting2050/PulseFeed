@@ -58,6 +58,22 @@ func (r *GormRepository) VideoExists(ctx context.Context, videoID int64) (bool, 
 	return count > 0, nil
 }
 
+func (r *GormRepository) VideoAuthor(ctx context.Context, videoID int64) (int64, error) {
+	var ids []int64
+	err := r.db.WithContext(ctx).
+		Table("videos").
+		Where("id = ? AND status = ?", videoID, videodomain.StatusPublished).
+		Limit(1).
+		Pluck("author_id", &ids).Error
+	if err != nil {
+		return 0, err
+	}
+	if len(ids) == 0 {
+		return 0, domain.ErrVideoNotFound
+	}
+	return ids[0], nil
+}
+
 func (r *GormRepository) AddAction(ctx context.Context, userID, videoID int64, action int) (bool, error) {
 	column, err := statColumn(action)
 	if err != nil {

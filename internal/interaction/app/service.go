@@ -8,6 +8,7 @@ import (
 
 	"pulsefeed/internal/interaction/domain"
 	"pulsefeed/internal/shared/cursor"
+	"pulsefeed/internal/shared/event"
 )
 
 const (
@@ -22,13 +23,19 @@ type CommentListResult struct {
 	HasMore    bool
 }
 
-type Service struct {
-	repo domain.Repository
-	hot  domain.HotStore
+// Publisher 发布互动事件，消息模块订阅后生成通知。
+type Publisher interface {
+	Publish(ctx context.Context, evt event.Event)
 }
 
-func NewService(repo domain.Repository, hot domain.HotStore) *Service {
-	return &Service{repo: repo, hot: hot}
+type Service struct {
+	repo      domain.Repository
+	hot       domain.HotStore
+	publisher Publisher
+}
+
+func NewService(repo domain.Repository, hot domain.HotStore, publisher Publisher) *Service {
+	return &Service{repo: repo, hot: hot, publisher: publisher}
 }
 
 func (s *Service) Like(ctx context.Context, userID, videoID int64) error {
@@ -56,11 +63,12 @@ func (s *Service) applyAction(ctx context.Context, userID, videoID int64, action
 	if err := s.ensureVideo(ctx, videoID); err != nil {
 		return err
 	}
+	authorID, err := s.repo.VideoAuthor(ctx, videoID)
+	if err != nil {
+		return err
+	}
 
-	var (
-		changed bool
-		err     error
-	)
+	var changed bool
 	if active {
 		changed, err = s.repo.AddAction(ctx, userID, videoID, action)
 	} else {
@@ -76,6 +84,14 @@ func (s *Service) applyAction(ctx context.Context, userID, videoID int64, action
 			delta = -delta
 		}
 		s.addScore(ctx, videoID, delta)
+		if active {
+			s.publish(ctx, event.Event{
+				Type:         eventType(action),
+				ActorID:      userID,
+				TargetUserID: authorID,
+				VideoID:      videoID,
+			})
+		}
 	}
 	return nil
 }
@@ -93,6 +109,10 @@ func (s *Service) CreateComment(ctx context.Context, userID, videoID int64, cont
 	if err := s.ensureVideo(ctx, videoID); err != nil {
 		return nil, err
 	}
+	authorID, err := s.repo.VideoAuthor(ctx, videoID)
+	if err != nil {
+		return nil, err
+	}
 
 	comment := &domain.Comment{
 		VideoID:   videoID,
@@ -104,6 +124,14 @@ func (s *Service) CreateComment(ctx context.Context, userID, videoID int64, cont
 		return nil, err
 	}
 	s.addScore(ctx, videoID, domain.HotScoreComment)
+	s.publish(ctx, event.Event{
+		Type:         event.TypeComment,
+		ActorID:      userID,
+		TargetUserID: authorID,
+		VideoID:      videoID,
+		CommentID:    comment.ID,
+		Content:      content,
+	})
 	return comment, nil
 }
 
@@ -195,4 +223,22 @@ func hotScore(action int) float64 {
 	default:
 		return 0
 	}
+}
+
+func eventType(action int) event.Type {
+	switch action {
+	case domain.ActionLike:
+		return event.TypeLike
+	case domain.ActionFavorite:
+		return event.TypeFavorite
+	default:
+		return ""
+	}
+}
+
+func (s *Service) publish(ctx context.Context, evt event.Event) {
+	if s.publisher == nil {
+		return
+	}
+	s.publisher.Publish(ctx, evt)
 }
