@@ -38,8 +38,11 @@ services:
       REDIS_ADDR: "redis:6379"
       JWT_SECRET: "pulsefeed-local-dev-secret"
       JWT_TTL: "24h"
+      UPLOAD_DIR: "/app/uploads"
     ports:
       - "8080:8080"
+    volumes:
+      - uploads_data:/app/uploads
     depends_on:
       mysql:
         condition: service_healthy
@@ -48,3 +51,4 @@ services:
 
 volumes:
   mysql_data:
+  uploads_data:

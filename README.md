@@ -1,0 +1,155 @@
+# PulseFeed
+
+PulseFeed 是一个短视频 Feed 系统，后端采用 Go 单体架构，按业务垂直切片组织代码。当前已完成账户鉴权、视频上传与发布能力，Feed 分发、互动、推荐等模块按里程碑继续推进。
+
+## 技术栈
+
+- Go 1.26、Gin
+- GORM、MySQL 8
+- Redis 7
+- JWT
+- Docker Compose
+
+## 当前进度
+
+- [x] 工程骨架：配置、日志、MySQL/Redis 连接、优雅退出
+- [x] 账户模块：注册、登录、JWT、个人资料
+- [x] 视频模块：文件上传、发布、详情、幂等、作者作品列表
+- [ ] Feed 模块：Timeline、Hot、游标分页、缓存
+- [ ] 互动模块：点赞、收藏、评论、异步落库
+- [ ] 关系模块：关注、取关、关注流
+- [ ] 推荐与曝光
+- [ ] 消息通知
+- [ ] 监控与治理
+- [ ] Web 客户端
+
+## 目录结构
+
+```text
+cmd/api/                    服务启动与依赖装配
+internal/
+  shared/                   配置、日志、数据库、Redis、JWT、响应、中间件、游标
+  account/                  账户垂直切片
+    domain/                 实体、领域错误、仓储接口
+    app/                    注册、登录、资料更新用例
+    infra/                  GORM 仓储
+    http/                   路由、DTO、Handler
+  video/                    视频垂直切片
+    domain/                 视频实体、统计实体、仓储接口
+    app/                    发布、详情、作品列表用例
+    infra/                  GORM 仓储
+    http/                   路由、DTO、Handler
+  upload/                   文件上传
+  httpapi/                  Gin 引擎、健康检查、静态文件
+```
+
+每个业务切片内部保持 `domain -> app -> infra/http` 的依赖方向，切片之间不直接依赖对方的 infra 实现。
+
+## 快速启动
+
+### Docker Compose
+
+```bash
+docker compose up -d --build
+```
+
+服务地址：
+
+| 服务 | 地址 |
+| --- | --- |
+| API | `http://127.0.0.1:8080` |
+| 健康检查 | `http://127.0.0.1:8080/health` |
+| MySQL | `127.0.0.1:3307` |
+| Redis | `127.0.0.1:6379` |
+
+停止并清理数据：
+
+```bash
+docker compose down -v
+```
+
+### 本地运行
+
+需要本地已有 MySQL 和 Redis，并创建 `pulsefeed` 数据库。复制 `.env.example` 为 `.env` 后按需修改，然后启动：
+
+```bash
+go run ./cmd/api
+```
+
+## API
+
+统一响应结构：
+
+```json
+{
+  "code": 0,
+  "message": "ok",
+  "data": {}
+}
+```
+
+已实现接口：
+
+| 方法 | 路径 | 鉴权 | 功能 |
+| --- | --- | --- | --- |
+| POST | `/api/users` | 否 | 注册 |
+| POST | `/api/sessions` | 否 | 登录并获取 JWT |
+| DELETE | `/api/sessions/current` | 是 | 退出登录 |
+| GET | `/api/users/me` | 是 | 当前用户资料 |
+| PATCH | `/api/users/me` | 是 | 更新昵称、头像、简介 |
+| GET | `/api/profiles/{userId}` | 否 | 公开用户资料 |
+| POST | `/api/uploads` | 是 | 上传视频、封面或头像 |
+| POST | `/api/videos` | 是 | 发布视频，支持 `Idempotency-Key` |
+| GET | `/api/videos/{videoId}` | 否 | 视频详情 |
+| GET | `/api/users/me/videos` | 是 | 我的作品列表 |
+| GET | `/api/profiles/{userId}/videos` | 否 | 指定用户的作品列表 |
+
+### 上传示例
+
+```bash
+curl -X POST http://127.0.0.1:8080/api/uploads \
+  -H "Authorization: Bearer <token>" \
+  -F "kind=video" \
+  -F "file=@demo.mp4"
+```
+
+返回的 `url` 可直接用于发布视频的 `media_url`。
+
+### 发布示例
+
+```bash
+curl -X POST http://127.0.0.1:8080/api/videos \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: publish-demo-1" \
+  -d '{"title":"第一条视频","media_url":"/uploads/video/demo.mp4"}'
+```
+
+相同的 `Idempotency-Key` 重复提交会返回同一条视频，不会重复创建。
+
+## 设计说明
+
+- **垂直切片**：每个业务模块自带 domain、app、infra、http，模块边界清晰，后续可独立拆分。
+- **JWT 鉴权**：HS256 签名，中间件解析后把用户 ID 注入请求上下文。
+- **发布幂等**：`Idempotency-Key` 先查后建，并由数据库唯一索引兜底并发写入。
+- **游标分页**：作品列表按 `published_at DESC, id DESC` 排序，游标编码最后一条的排序字段，翻页稳定。
+- **上传校验**：按业务类型限制扩展名和文件大小，文件名由服务端生成，避免路径注入。
+- **统一错误映射**：领域错误在 HTTP 层映射为对应状态码，内部错误只记录日志，不向外暴露细节。
+
+## 验证
+
+```bash
+go build ./...
+go test ./...
+go vet ./...
+docker compose config
+```
+
+## 后续路线
+
+1. Timeline Feed：游标分页、Redis 页缓存、批量组装卡片
+2. Hot Feed：Redis 分钟桶 ZSET、窗口合并
+3. 互动：点赞、收藏、评论、计数缓存、RabbitMQ 异步落库
+4. 关系：关注、取关、关注流
+5. 推荐与曝光：召回、打散、曝光去重
+6. 消息、监控治理与 Web 客户端

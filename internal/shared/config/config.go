@@ -18,6 +18,7 @@ type Config struct {
 	RedisDB       int
 	JWTSecret     string
 	JWTTTL        time.Duration
+	UploadDir     string
 }
 
 func Load() (*Config, error) {
@@ -40,6 +41,7 @@ func Load() (*Config, error) {
 		RedisDB:       redisDB,
 		JWTSecret:     env("JWT_SECRET", defaultJWTSecret),
 		JWTTTL:        jwtTTL,
+		UploadDir:     env("UPLOAD_DIR", "uploads"),
 	}
 
 	if cfg.AppEnv == "prod" && cfg.JWTSecret == defaultJWTSecret {

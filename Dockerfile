@@ -11,6 +11,7 @@ FROM alpine:3.21
 RUN apk add --no-cache ca-certificates tzdata
 WORKDIR /app
 COPY --from=builder /out/pulsefeed ./pulsefeed
+RUN mkdir -p /app/uploads && chown -R nobody:nobody /app
 
 EXPOSE 8080
 USER nobody

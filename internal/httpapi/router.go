@@ -9,18 +9,32 @@ import (
 	accounthttp "pulsefeed/internal/account/http"
 	"pulsefeed/internal/shared/jwtx"
 	"pulsefeed/internal/shared/middleware"
+	"pulsefeed/internal/upload"
+	videohandl "pulsefeed/internal/video/http"
 )
 
-func NewRouter(logger *slog.Logger, jwtManager *jwtx.Manager, accountHandler *accounthttp.Handler) *gin.Engine {
+func NewRouter(
+	logger *slog.Logger,
+	jwtManager *jwtx.Manager,
+	accountHandler *accounthttp.Handler,
+	videoHandler *videohandl.Handler,
+	uploadHandler *upload.Handler,
+	uploadDir string,
+) *gin.Engine {
 	router := gin.New()
+	router.MaxMultipartMemory = 16 << 20
 	router.Use(gin.Recovery(), requestLogger(logger))
 
 	router.GET("/health", func(c *gin.Context) {
 		c.JSON(200, gin.H{"status": "ok", "service": "pulsefeed"})
 	})
+	router.Static("/uploads", uploadDir)
 
+	auth := middleware.Auth(jwtManager)
 	api := router.Group("/api")
-	accountHandler.RegisterRoutes(api, middleware.Auth(jwtManager))
+	accountHandler.RegisterRoutes(api, auth)
+	videoHandler.RegisterRoutes(api, auth)
+	uploadHandler.RegisterRoutes(api, auth)
 
 	return router
 }

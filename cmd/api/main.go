@@ -13,14 +13,18 @@ import (
 	"github.com/gin-gonic/gin"
 
 	accountapp "pulsefeed/internal/account/app"
-	accountinfra "pulsefeed/internal/account/infra"
 	accounthttp "pulsefeed/internal/account/http"
+	accountinfra "pulsefeed/internal/account/infra"
 	"pulsefeed/internal/httpapi"
 	"pulsefeed/internal/shared/cache"
 	"pulsefeed/internal/shared/config"
 	"pulsefeed/internal/shared/database"
 	"pulsefeed/internal/shared/jwtx"
 	"pulsefeed/internal/shared/logger"
+	"pulsefeed/internal/upload"
+	videoapp "pulsefeed/internal/video/app"
+	videohandl "pulsefeed/internal/video/http"
+	videoinfra "pulsefeed/internal/video/infra"
 )
 
 func main() {
@@ -45,8 +49,12 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	if err := db.AutoMigrate(&accountinfra.UserModel{}); err != nil {
-		return fmt.Errorf("migrate account schema: %w", err)
+	if err := db.AutoMigrate(
+		&accountinfra.UserModel{},
+		&videoinfra.VideoModel{},
+		&videoinfra.VideoStatModel{},
+	); err != nil {
+		return fmt.Errorf("migrate schema: %w", err)
 	}
 
 	rdb, err := cache.OpenRedis(cfg.RedisAddr, cfg.RedisPassword, cfg.RedisDB)
@@ -64,7 +72,12 @@ func run() error {
 	accountService := accountapp.NewService(accountRepo, jwtManager)
 	accountHandler := accounthttp.NewHandler(accountService, log)
 
-	router := httpapi.NewRouter(log, jwtManager, accountHandler)
+	videoRepo := videoinfra.NewGormRepository(db)
+	videoService := videoapp.NewService(videoRepo)
+	videoHandler := videohandl.NewHandler(videoService, log)
+	uploadHandler := upload.NewHandler(cfg.UploadDir, log)
+
+	router := httpapi.NewRouter(log, jwtManager, accountHandler, videoHandler, uploadHandler, cfg.UploadDir)
 	server := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           router,
