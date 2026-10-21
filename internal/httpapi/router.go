@@ -9,6 +9,7 @@ import (
 	accounthttp "pulsefeed/internal/account/http"
 	feedhandl "pulsefeed/internal/feed/http"
 	interactionhttp "pulsefeed/internal/interaction/http"
+	recommendhttp "pulsefeed/internal/recommend/http"
 	relationhttp "pulsefeed/internal/relation/http"
 	"pulsefeed/internal/shared/jwtx"
 	"pulsefeed/internal/shared/middleware"
@@ -25,6 +26,7 @@ func NewRouter(
 	feedHandler *feedhandl.Handler,
 	interactionHandler *interactionhttp.Handler,
 	relationHandler *relationhttp.Handler,
+	recommendHandler *recommendhttp.Handler,
 	uploadDir string,
 ) *gin.Engine {
 	router := gin.New()
@@ -44,6 +46,7 @@ func NewRouter(
 	feedHandler.RegisterRoutes(api, auth)
 	interactionHandler.RegisterRoutes(api, auth)
 	relationHandler.RegisterRoutes(api, auth)
+	recommendHandler.RegisterRoutes(api, auth)
 
 	return router
 }

@@ -22,6 +22,10 @@ import (
 	interactionapp "pulsefeed/internal/interaction/app"
 	interactionhandl "pulsefeed/internal/interaction/http"
 	interactioninfra "pulsefeed/internal/interaction/infra"
+	recommendapp "pulsefeed/internal/recommend/app"
+	recommenddomain "pulsefeed/internal/recommend/domain"
+	recommendhandl "pulsefeed/internal/recommend/http"
+	recommendinfra "pulsefeed/internal/recommend/infra"
 	relationapp "pulsefeed/internal/relation/app"
 	relationhandl "pulsefeed/internal/relation/http"
 	relationinfra "pulsefeed/internal/relation/infra"
@@ -103,7 +107,15 @@ func run() error {
 
 	relationHandler := relationhandl.NewHandler(relationService, log)
 
-	router := httpapi.NewRouter(log, jwtManager, accountHandler, videoHandler, uploadHandler, feedHandler, interactionHandler, relationHandler, cfg.UploadDir)
+	recommendExposed := recommendinfra.NewExposedStore(rdb)
+	recommendService := recommendapp.NewService([]recommenddomain.RecallSource{
+		recommendinfra.NewHotRecall(feedHotStore),
+		recommendinfra.NewFollowingRecall(relationService, feedRepo),
+		recommendinfra.NewTimelineRecall(feedRepo),
+	}, feedRepo, recommendExposed)
+	recommendHandler := recommendhandl.NewHandler(recommendService, log)
+
+	router := httpapi.NewRouter(log, jwtManager, accountHandler, videoHandler, uploadHandler, feedHandler, interactionHandler, relationHandler, recommendHandler, cfg.UploadDir)
 	server := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           router,
