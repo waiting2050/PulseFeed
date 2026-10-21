@@ -26,13 +26,14 @@ type ListResult struct {
 }
 
 type Service struct {
-	repo  domain.Repository
-	cache domain.PageCache
-	hot   domain.HotStore
+	repo      domain.Repository
+	cache     domain.PageCache
+	hot       domain.HotStore
+	relations domain.RelationReader
 }
 
-func NewService(repo domain.Repository, cache domain.PageCache, hot domain.HotStore) *Service {
-	return &Service{repo: repo, cache: cache, hot: hot}
+func NewService(repo domain.Repository, cache domain.PageCache, hot domain.HotStore, relations domain.RelationReader) *Service {
+	return &Service{repo: repo, cache: cache, hot: hot, relations: relations}
 }
 
 func (s *Service) List(ctx context.Context, scene, cursorValue string, limit int) (*ListResult, error) {
@@ -46,6 +47,8 @@ func (s *Service) List(ctx context.Context, scene, cursorValue string, limit int
 		return s.listTimeline(ctx, cursorValue, limit)
 	case domain.SceneHot:
 		return s.listHot(ctx, cursorValue, limit)
+	case domain.SceneFollowing:
+		return nil, domain.ErrLoginRequired
 	default:
 		return nil, domain.ErrInvalidScene
 	}
@@ -73,23 +76,45 @@ func (s *Service) listTimeline(ctx context.Context, cursorValue string, limit in
 		return nil, err
 	}
 
-	hasMore := len(items) > limit
-	if hasMore {
-		items = items[:limit]
-	}
-	if items == nil {
-		items = []*domain.Item{}
-	}
-
-	result := &domain.Page{Items: items, HasMore: hasMore}
-	if hasMore && len(items) > 0 {
-		last := items[len(items)-1]
-		result.NextCursor = cursor.Encode(last.PublishedAt, last.VideoID)
-	}
+	result := paginate(items, limit)
 	if s.cache != nil {
 		s.cache.Set(ctx, key, result, pageCacheTTL)
 	}
 	return toResult(result), nil
+}
+
+// ListFollowing 只回源当前用户关注的人，关注关系变化频繁，因此不做整页缓存。
+func (s *Service) ListFollowing(ctx context.Context, userID int64, cursorValue string, limit int) (*ListResult, error) {
+	if userID <= 0 {
+		return nil, domain.ErrLoginRequired
+	}
+	limit = clampLimit(limit)
+
+	var page *cursor.Page
+	if cursorValue != "" {
+		decoded, err := cursor.Decode(cursorValue)
+		if err != nil {
+			return nil, domain.ErrInvalidCursor
+		}
+		page = decoded
+	}
+
+	if s.relations == nil {
+		return &ListResult{Items: []*domain.Item{}}, nil
+	}
+	authorIDs, err := s.relations.ListFolloweeIDs(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	if len(authorIDs) == 0 {
+		return &ListResult{Items: []*domain.Item{}}, nil
+	}
+
+	items, err := s.repo.ListFollowing(ctx, authorIDs, page, limit+1)
+	if err != nil {
+		return nil, err
+	}
+	return toResult(paginate(items, limit)), nil
 }
 
 func (s *Service) listHot(ctx context.Context, cursorValue string, limit int) (*ListResult, error) {
@@ -153,6 +178,23 @@ func clampLimit(limit int) int {
 		return maxPageSize
 	}
 	return limit
+}
+
+func paginate(items []*domain.Item, limit int) *domain.Page {
+	hasMore := len(items) > limit
+	if hasMore {
+		items = items[:limit]
+	}
+	if items == nil {
+		items = []*domain.Item{}
+	}
+
+	page := &domain.Page{Items: items, HasMore: hasMore}
+	if hasMore && len(items) > 0 {
+		last := items[len(items)-1]
+		page.NextCursor = cursor.Encode(last.PublishedAt, last.VideoID)
+	}
+	return page
 }
 
 func entriesAfter(entries []domain.ScoreEntry, rank *cursor.Rank) []domain.ScoreEntry {

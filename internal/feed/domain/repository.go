@@ -10,7 +10,13 @@ import (
 // Repository 提供 Feed 卡片数据，返回条数由调用方控制。
 type Repository interface {
 	ListTimeline(ctx context.Context, page *cursor.Page, limit int) ([]*Item, error)
+	ListFollowing(ctx context.Context, authorIDs []int64, page *cursor.Page, limit int) ([]*Item, error)
 	ListByIDs(ctx context.Context, ids []int64) ([]*Item, error)
+}
+
+// RelationReader 提供当前用户关注的人，用于关注流召回。
+type RelationReader interface {
+	ListFolloweeIDs(ctx context.Context, followerID int64) ([]int64, error)
 }
 
 // HotStore 提供热榜读写，热榜分数由互动行为累加。

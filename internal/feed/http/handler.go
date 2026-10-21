@@ -10,6 +10,7 @@ import (
 	"pulsefeed/internal/feed/app"
 	"pulsefeed/internal/feed/domain"
 	"pulsefeed/internal/shared/httpx"
+	"pulsefeed/internal/shared/middleware"
 )
 
 type Handler struct {
@@ -21,8 +22,12 @@ func NewHandler(service *app.Service, logger *slog.Logger) *Handler {
 	return &Handler{service: service, logger: logger}
 }
 
-func (h *Handler) RegisterRoutes(api gin.IRouter) {
+func (h *Handler) RegisterRoutes(api gin.IRouter, auth gin.HandlerFunc) {
 	api.GET("/feed-items", h.List)
+
+	protected := api.Group("")
+	protected.Use(auth)
+	protected.GET("/feed-items/following", h.Following)
 }
 
 func (h *Handler) List(c *gin.Context) {
@@ -32,7 +37,26 @@ func (h *Handler) List(c *gin.Context) {
 		h.respondError(c, err)
 		return
 	}
+	h.respondList(c, result)
+}
 
+func (h *Handler) Following(c *gin.Context) {
+	userID, ok := middleware.CurrentUserID(c)
+	if !ok {
+		httpx.Unauthorized(c, "未登录")
+		return
+	}
+
+	limit, _ := strconv.Atoi(c.Query("limit"))
+	result, err := h.service.ListFollowing(c.Request.Context(), userID, c.Query("cursor"), limit)
+	if err != nil {
+		h.respondError(c, err)
+		return
+	}
+	h.respondList(c, result)
+}
+
+func (h *Handler) respondList(c *gin.Context, result *app.ListResult) {
 	items := make([]feedItemResponse, 0, len(result.Items))
 	for _, item := range result.Items {
 		items = append(items, feedItemResponse{
@@ -57,6 +81,8 @@ func (h *Handler) List(c *gin.Context) {
 
 func (h *Handler) respondError(c *gin.Context, err error) {
 	switch {
+	case errors.Is(err, domain.ErrLoginRequired):
+		httpx.Unauthorized(c, err.Error())
 	case errors.Is(err, domain.ErrInvalidScene), errors.Is(err, domain.ErrInvalidCursor):
 		httpx.BadRequest(c, err.Error())
 	default:

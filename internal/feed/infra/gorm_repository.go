@@ -57,6 +57,31 @@ func (r *GormRepository) ListTimeline(ctx context.Context, page *cursor.Page, li
 	return toItems(rows), nil
 }
 
+func (r *GormRepository) ListFollowing(ctx context.Context, authorIDs []int64, page *cursor.Page, limit int) ([]*domain.Item, error) {
+	if len(authorIDs) == 0 {
+		return nil, nil
+	}
+
+	query := r.db.WithContext(ctx).
+		Table("videos AS v").
+		Select(itemColumns).
+		Joins("LEFT JOIN video_stats AS st ON st.video_id = v.id").
+		Where("v.status = ? AND v.author_id IN ?", videodomain.StatusPublished, authorIDs)
+
+	if page != nil {
+		query = query.Where(
+			"(v.published_at < ? OR (v.published_at = ? AND v.id < ?))",
+			page.PublishedAt, page.PublishedAt, page.ID,
+		)
+	}
+
+	var rows []timelineRow
+	if err := query.Order("v.published_at DESC, v.id DESC").Limit(limit).Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	return toItems(rows), nil
+}
+
 func (r *GormRepository) ListByIDs(ctx context.Context, ids []int64) ([]*domain.Item, error) {
 	if len(ids) == 0 {
 		return nil, nil

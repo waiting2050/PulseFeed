@@ -6,13 +6,15 @@ import (
 )
 
 const (
-	SceneTimeline = "timeline"
-	SceneHot      = "hot"
+	SceneTimeline  = "timeline"
+	SceneHot       = "hot"
+	SceneFollowing = "following"
 )
 
 var (
 	ErrInvalidScene  = errors.New("不支持的 Feed 场景")
 	ErrInvalidCursor = errors.New("游标不合法")
+	ErrLoginRequired = errors.New("请先登录")
 )
 
 // Item 是 Feed 页里的一张视频卡片，字段直接对应组装结果。
