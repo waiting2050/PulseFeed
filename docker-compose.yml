@@ -1,0 +1,50 @@
+name: pulsefeed
+
+services:
+  mysql:
+    image: mysql:8.4
+    container_name: pulsefeed-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: pulsefeed
+    ports:
+      - "3307:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-proot"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    container_name: pulsefeed-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build: .
+    container_name: pulsefeed-api
+    environment:
+      APP_ENV: dev
+      HTTP_ADDR: ":8080"
+      MYSQL_DSN: "root:root@tcp(mysql:3306)/pulsefeed?charset=utf8mb4&parseTime=True&loc=Local"
+      REDIS_ADDR: "redis:6379"
+      JWT_SECRET: "pulsefeed-local-dev-secret"
+      JWT_TTL: "24h"
+    ports:
+      - "8080:8080"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  mysql_data:
