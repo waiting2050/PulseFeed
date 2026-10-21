@@ -23,7 +23,7 @@ PulseFeed 是一个短视频 Feed 系统，后端采用 Go 单体架构，按业
 - [x] 推荐与曝光：多路召回、曝光去重、作者打散
 - [x] 消息通知：事件驱动、通知列表与未读数
 - [x] 监控与治理：指标采集、请求追踪、健康检查、限流
-- [ ] Web 客户端
+- [x] Web 客户端：原生单页、Feed 无限滚动、发布、互动与通知
 
 ## 目录结构
 
@@ -68,6 +68,7 @@ internal/
     http/                   路由、DTO、Handler
   upload/                   文件上传
   httpapi/                  Gin 引擎、健康检查、指标端点、静态文件
+web/                        Web 客户端（原生 HTML/CSS/JS，由 API 服务托管）
 ```
 
 每个业务切片内部保持 `domain -> app -> infra/http` 的依赖方向，切片之间不直接依赖对方的 infra 实现。
@@ -84,7 +85,8 @@ docker compose up -d --build
 
 | 服务 | 地址 |
 | --- | --- |
-| API | `http://127.0.0.1:8080` |
+| Web 客户端 | `http://127.0.0.1:8080/` |
+| API | `http://127.0.0.1:8080/api` |
 | 存活检查 | `http://127.0.0.1:8080/health` |
 | 就绪检查 | `http://127.0.0.1:8080/ready` |
 | 指标 | `http://127.0.0.1:8080/metrics` |
@@ -111,6 +113,7 @@ go run ./cmd/api
 | --- | --- | --- |
 | `APP_ENV` | `dev` | `prod` 时输出 JSON 日志并关闭调试提示 |
 | `APP_VERSION` | `dev` | 写入 `pulsefeed_build_info` 指标 |
+| `WEB_DIR` | `web` | Web 客户端静态目录，置空则不托管前端 |
 | `RATE_LIMIT_PER_MINUTE` | `120` | 单 IP 每分钟请求上限，`0` 表示关闭限流 |
 
 ## API
@@ -196,6 +199,7 @@ curl -X POST http://127.0.0.1:8080/api/videos \
 - **健康检查**：`/health` 只表示进程存活，供容器存活探针使用；`/ready` 在 2 秒超时内探测 MySQL 与 Redis，任一异常返回 503 并输出各依赖状态，Redis 未启用时标记为 `disabled` 而不是失败。
 - **限流与自我保护**：`/api` 按客户端 IP 做固定窗口计数（Redis `INCR` + `EXPIRE`，默认 120 次/分钟），超限返回 429 与 `Retry-After`；Redis 不可用时放行请求，避免缓存故障放大为全站不可用；路由不信任代理头，防止伪造 `X-Forwarded-For` 影响限流维度。
 - **panic 恢复**：自定义 Recovery 捕获 panic 后记录堆栈与请求 ID，并返回统一错误响应，避免连接被直接断开。
+- **Web 客户端**：`web/` 下为无构建步骤的原生 HTML/CSS/JS 单页，由 Go 服务通过 `/web` 静态目录与根路径托管；前端统一封装 `fetch` 处理 `{code,message,data}`、401 清理登录态与 204 空响应，Feed 按游标做无限滚动并用请求序号丢弃过期结果，点赞/收藏先乐观更新再以接口返回值校正。
 - **上传校验**：按业务类型限制扩展名和文件大小，文件名由服务端生成，避免路径注入。
 - **统一错误映射**：领域错误在 HTTP 层映射为对应状态码，内部错误只记录日志，不向外暴露细节。
 
@@ -211,4 +215,3 @@ docker compose config
 ## 后续路线
 
 1. 互动异步化：RabbitMQ 削峰、点赞评论异步落库
-2. Web 客户端

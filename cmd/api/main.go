@@ -38,6 +38,7 @@ import (
 	"pulsefeed/internal/shared/event"
 	"pulsefeed/internal/shared/jwtx"
 	"pulsefeed/internal/shared/logger"
+	"pulsefeed/internal/shared/metrics"
 	"pulsefeed/internal/upload"
 	videoapp "pulsefeed/internal/video/app"
 	videohandl "pulsefeed/internal/video/http"
@@ -77,6 +78,12 @@ func run() error {
 	); err != nil {
 		return fmt.Errorf("migrate schema: %w", err)
 	}
+
+	sqlDB, err := db.DB()
+	if err != nil {
+		return fmt.Errorf("get sql db: %w", err)
+	}
+	defer sqlDB.Close()
 
 	rdb, err := cache.OpenRedis(cfg.RedisAddr, cfg.RedisPassword, cfg.RedisDB)
 	if err != nil {
@@ -130,7 +137,27 @@ func run() error {
 	}, feedRepo, recommendExposed)
 	recommendHandler := recommendhandl.NewHandler(recommendService, log)
 
-	router := httpapi.NewRouter(log, jwtManager, accountHandler, videoHandler, uploadHandler, feedHandler, interactionHandler, relationHandler, recommendHandler, messageHandler, cfg.UploadDir)
+	registry := metrics.New(cfg.AppVersion, cfg.AppEnv)
+
+	router := httpapi.NewRouter(httpapi.Deps{
+		Logger:             log,
+		JWT:                jwtManager,
+		Metrics:            registry,
+		Database:           sqlDB,
+		Redis:              rdb,
+		UploadDir:          cfg.UploadDir,
+		WebDir:             cfg.WebDir,
+		RateLimitPerMinute: cfg.RateLimitPerMinute,
+		AccountHandler:     accountHandler,
+		VideoHandler:       videoHandler,
+		UploadHandler:      uploadHandler,
+		FeedHandler:        feedHandler,
+		InteractionHandler: interactionHandler,
+		RelationHandler:    relationHandler,
+		RecommendHandler:   recommendHandler,
+		MessageHandler:     messageHandler,
+	})
+
 	server := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           router,
@@ -164,9 +191,5 @@ func run() error {
 		}
 	}
 
-	sqlDB, err := db.DB()
-	if err == nil {
-		_ = sqlDB.Close()
-	}
 	return nil
 }

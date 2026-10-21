@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PulseFeed</title>
+  <link rel="stylesheet" href="/web/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/">
+      <span class="brand-mark">P</span>
+      <span>PulseFeed</span>
+    </a>
+    <div class="topbar-actions">
+      <button id="btn-notifications" class="ghost-btn" hidden>
+        通知
+        <span id="unread-badge" class="badge" hidden>0</span>
+      </button>
+      <button id="btn-publish" class="primary-btn" hidden>发布</button>
+      <div id="session-area" class="session-area"></div>
+    </div>
+  </header>
+
+  <main class="shell">
+    <nav id="scenes" class="scenes">
+      <button class="scene active" data-scene="recommend">推荐</button>
+      <button class="scene" data-scene="hot">热门</button>
+      <button class="scene" data-scene="timeline">最新</button>
+      <button class="scene" data-scene="following">关注</button>
+    </nav>
+    <section id="feed-list" class="feed"></section>
+    <div id="feed-state" class="feed-state"></div>
+  </main>
+
+  <div id="modal-auth" class="modal" hidden>
+    <div class="modal-panel">
+      <div class="modal-head">
+        <h2 id="auth-title">登录</h2>
+        <button class="close-btn" data-close="modal-auth" aria-label="关闭">关闭</button>
+      </div>
+      <div class="tabs">
+        <button id="tab-login" class="tab active" data-mode="login">登录</button>
+        <button id="tab-register" class="tab" data-mode="register">注册</button>
+      </div>
+      <form id="auth-form" class="form">
+        <label class="field">
+          <span>账号</span>
+          <input id="auth-account" autocomplete="username" required />
+        </label>
+        <label class="field">
+          <span>密码</span>
+          <input id="auth-password" type="password" autocomplete="current-password" required />
+        </label>
+        <label id="nickname-field" class="field" hidden>
+          <span>昵称</span>
+          <input id="auth-nickname" autocomplete="nickname" />
+        </label>
+        <p id="auth-hint" class="hint"></p>
+        <button id="auth-submit" class="primary-btn wide" type="submit">登录</button>
+      </form>
+    </div>
+  </div>
+
+  <div id="modal-publish" class="modal" hidden>
+    <div class="modal-panel">
+      <div class="modal-head">
+        <h2>发布视频</h2>
+        <button class="close-btn" data-close="modal-publish" aria-label="关闭">关闭</button>
+      </div>
+      <form id="publish-form" class="form">
+        <label class="field">
+          <span>视频文件（mp4 / mov / webm，不超过 200MB）</span>
+          <input id="publish-file" type="file" accept="video/mp4,video/quicktime,video/webm" required />
+        </label>
+        <label class="field">
+          <span>封面（可选，jpg / png / webp）</span>
+          <input id="publish-cover" type="file" accept="image/jpeg,image/png,image/webp" />
+        </label>
+        <label class="field">
+          <span>标题</span>
+          <input id="publish-title" maxlength="80" required />
+        </label>
+        <p id="publish-progress" class="hint"></p>
+        <button id="publish-submit" class="primary-btn wide" type="submit">上传并发布</button>
+      </form>
+    </div>
+  </div>
+
+  <div id="modal-notifications" class="modal" hidden>
+    <div class="modal-panel">
+      <div class="modal-head">
+        <h2>通知</h2>
+        <div class="modal-head-actions">
+          <button id="mark-read" class="ghost-btn">全部已读</button>
+          <button class="close-btn" data-close="modal-notifications" aria-label="关闭">关闭</button>
+        </div>
+      </div>
+      <div id="notification-list" class="notification-list"></div>
+      <button id="notification-more" class="ghost-btn wide" hidden>加载更多</button>
+    </div>
+  </div>
+
+  <div id="toasts" class="toasts"></div>
+  <script src="/web/app.js"></script>
+</body>
+</html>

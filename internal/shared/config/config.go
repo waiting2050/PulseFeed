@@ -20,6 +20,7 @@ type Config struct {
 	JWTSecret     string
 	JWTTTL        time.Duration
 	UploadDir     string
+	WebDir        string
 	// RateLimitPerMinute 为每个客户端每分钟允许的请求数，0 表示关闭限流。
 	RateLimitPerMinute int
 }
@@ -51,6 +52,7 @@ func Load() (*Config, error) {
 		JWTSecret:          env("JWT_SECRET", defaultJWTSecret),
 		JWTTTL:             jwtTTL,
 		UploadDir:          env("UPLOAD_DIR", "uploads"),
+		WebDir:             env("WEB_DIR", "web"),
 		RateLimitPerMinute: rateLimit,
 	}
 

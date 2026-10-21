@@ -40,6 +40,7 @@ services:
       JWT_SECRET: "pulsefeed-local-dev-secret"
       JWT_TTL: "24h"
       UPLOAD_DIR: "/app/uploads"
+      WEB_DIR: "/app/web"
       RATE_LIMIT_PER_MINUTE: "120"
     ports:
       - "8080:8080"
