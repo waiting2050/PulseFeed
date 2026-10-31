@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 
+	infraaccount "pulsefeed/internal/infra/persistence/account"
 	"pulsefeed/internal/infra/persistence/migration"
 
 	"github.com/gin-gonic/gin"
@@ -50,9 +51,12 @@ func Register(engine *gin.Engine, db *sql.DB) error {
 	return nil
 }
 
-// migrateModels 返回参与 AutoMigrate 的模型切片；各阶段在此登记新表模型，当前为空。
+// migrateModels 返回参与 AutoMigrate 的模型切片；各阶段在此登记新表模型。
 func migrateModels() []any {
-	return []any{}
+	return []any{
+		&infraaccount.UserModel{},
+		&infraaccount.UserProfileModel{},
+	}
 }
 
 // health 返回服务健康状态。
