@@ -28,7 +28,7 @@ func main() {
 	defer db.Close()
 
 	server := httpgin.New()
-	if err := router.Register(server.Engine(), db); err != nil {
+	if err := router.Register(server.Engine(), cfg, db); err != nil {
 		log.Fatalf("路由装配失败: %v", err)
 	}
 

@@ -1,4 +1,4 @@
-// router.go 是组合根：复用 *sql.DB 打开 GORM、执行迁移，并注册健康检查与指标路由。
+// router.go 是组合根：复用 *sql.DB 打开 GORM、执行迁移，装配账号认证链路并注册全部路由。
 package router
 
 import (
@@ -8,8 +8,13 @@ import (
 	"net/http"
 	"strconv"
 
+	appaccount "pulsefeed/internal/application/account"
+	"pulsefeed/internal/infra/config"
+	infrajwt "pulsefeed/internal/infra/jwt"
 	infraaccount "pulsefeed/internal/infra/persistence/account"
 	"pulsefeed/internal/infra/persistence/migration"
+	httpaccount "pulsefeed/internal/interfaces/http/account"
+	"pulsefeed/internal/interfaces/http/middleware"
 
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus"
@@ -18,8 +23,8 @@ import (
 	"gorm.io/gorm"
 )
 
-// Register 完成迁移装配，并将健康检查和指标路由挂载到给定的 Gin 引擎上。
-func Register(engine *gin.Engine, db *sql.DB) error {
+// Register 完成迁移与依赖装配，并将健康检查、指标与业务路由挂载到给定的 Gin 引擎上。
+func Register(engine *gin.Engine, cfg *config.Config, db *sql.DB) error {
 	// 复用连接池打开 GORM，避免重复建连；SkipInitializeWithVersion 兼容更多 MySQL 版本。
 	gormDB, err := gorm.Open(gormmysql.New(gormmysql.Config{Conn: db}), &gorm.Config{})
 	if err != nil {
@@ -30,6 +35,28 @@ func Register(engine *gin.Engine, db *sql.DB) error {
 		return fmt.Errorf("数据库迁移失败: %w", err)
 	}
 	log.Printf("migrate done (models=%d)", len(migrateModels()))
+
+	// 认证链路：JWT 签发器 → 仓储 → 应用服务 → 处理器 → 路由。
+	issuer, err := infrajwt.New(cfg.JWT.Secret, cfg.JWT.AccessTTL)
+	if err != nil {
+		return fmt.Errorf("初始化 JWT 签发器失败: %w", err)
+	}
+	accountRepo := infraaccount.New(gormDB)
+	accountService := appaccount.New(accountRepo, appaccount.WithTokenIssuer(issuer))
+	accountHandler := httpaccount.New(accountService)
+
+	jwtAuth := middleware.NewJWTAuth(issuer)
+
+	api := engine.Group("/api")
+	api.POST("/users", accountHandler.Register)
+	api.POST("/sessions", accountHandler.Login)
+	api.GET("/users/:userId", accountHandler.GetByID)
+
+	authed := api.Group("", jwtAuth)
+	authed.DELETE("/sessions/current", accountHandler.Logout)
+	authed.GET("/users/me", accountHandler.Me)
+	authed.PATCH("/users/me", accountHandler.UpdateMe)
+
 	registry := prometheus.NewRegistry()
 
 	requests := prometheus.NewCounterVec(prometheus.CounterOpts{
