@@ -1,8 +1,0 @@
-.env
-*.log
-bin/
-dist/
-uploads/
-coverage.out
-.idea/
-.vscode/
