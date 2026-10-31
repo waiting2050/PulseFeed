@@ -1,4 +1,4 @@
-// main.go 是 API 服务的主入口，负责加载配置、初始化引擎、注册路由并启动服务。
+// main.go 是 API 服务的主入口，负责加载配置、初始化数据库连接池、装配路由并启动服务。
 package main
 
 import (
@@ -7,6 +7,7 @@ import (
 	"log"
 
 	"pulsefeed/internal/infra/config"
+	infradatabase "pulsefeed/internal/infra/database"
 	"pulsefeed/internal/infra/httpgin"
 	"pulsefeed/internal/interfaces/http/router"
 )
@@ -20,8 +21,16 @@ func main() {
 		log.Fatalf("加载配置失败: %v", err)
 	}
 
+	db, err := infradatabase.New(cfg.Database)
+	if err != nil {
+		log.Fatalf("数据库初始化失败: %v", err)
+	}
+	defer db.Close()
+
 	server := httpgin.New()
-	router.Register(server.Engine())
+	if err := router.Register(server.Engine(), db); err != nil {
+		log.Fatalf("路由装配失败: %v", err)
+	}
 
 	addr := fmt.Sprintf(":%d", cfg.Port)
 	log.Printf("API 服务启动，监听 %s", addr)
