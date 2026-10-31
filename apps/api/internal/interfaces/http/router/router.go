@@ -9,11 +9,14 @@ import (
 	"strconv"
 
 	appaccount "pulsefeed/internal/application/account"
+	appclip "pulsefeed/internal/application/clip"
 	"pulsefeed/internal/infra/config"
 	infrajwt "pulsefeed/internal/infra/jwt"
 	infraaccount "pulsefeed/internal/infra/persistence/account"
+	infraclip "pulsefeed/internal/infra/persistence/clip"
 	"pulsefeed/internal/infra/persistence/migration"
 	httpaccount "pulsefeed/internal/interfaces/http/account"
+	httpclip "pulsefeed/internal/interfaces/http/clip"
 	"pulsefeed/internal/interfaces/http/middleware"
 
 	"github.com/gin-gonic/gin"
@@ -45,17 +48,27 @@ func Register(engine *gin.Engine, cfg *config.Config, db *sql.DB) error {
 	accountService := appaccount.New(accountRepo, appaccount.WithTokenIssuer(issuer))
 	accountHandler := httpaccount.New(accountService)
 
+	// clip 链路：仓储 → 应用服务 → 处理器；clip.published 事件发布器待 S10 MQ 基座接入。
+	clipRepo := infraclip.New(gormDB)
+	clipService := appclip.New(clipRepo)
+	clipHandler := httpclip.New(clipService)
+
 	jwtAuth := middleware.NewJWTAuth(issuer)
 
 	api := engine.Group("/api")
 	api.POST("/users", accountHandler.Register)
 	api.POST("/sessions", accountHandler.Login)
 	api.GET("/users/:userId", accountHandler.GetByID)
+	api.GET("/users/:userId/clips", clipHandler.ListByCreator)
+	api.GET("/clips/:clipId", clipHandler.GetByID)
 
 	authed := api.Group("", jwtAuth)
 	authed.DELETE("/sessions/current", accountHandler.Logout)
 	authed.GET("/users/me", accountHandler.Me)
 	authed.PATCH("/users/me", accountHandler.UpdateMe)
+	authed.GET("/users/me/clips", clipHandler.ListMine)
+	authed.POST("/clips", clipHandler.Publish)
+	authed.DELETE("/clips/:clipId", clipHandler.Delete)
 
 	registry := prometheus.NewRegistry()
 
@@ -83,6 +96,8 @@ func migrateModels() []any {
 	return []any{
 		&infraaccount.UserModel{},
 		&infraaccount.UserProfileModel{},
+		&infraclip.ClipModel{},
+		&infraclip.ClipStatsModel{},
 	}
 }
 
