@@ -10,13 +10,16 @@ import (
 
 	appaccount "pulsefeed/internal/application/account"
 	appclip "pulsefeed/internal/application/clip"
+	appfeed "pulsefeed/internal/application/feed"
 	"pulsefeed/internal/infra/config"
 	infrajwt "pulsefeed/internal/infra/jwt"
 	infraaccount "pulsefeed/internal/infra/persistence/account"
 	infraclip "pulsefeed/internal/infra/persistence/clip"
+	infrafeed "pulsefeed/internal/infra/persistence/feed"
 	"pulsefeed/internal/infra/persistence/migration"
 	httpaccount "pulsefeed/internal/interfaces/http/account"
 	httpclip "pulsefeed/internal/interfaces/http/clip"
+	httpfeed "pulsefeed/internal/interfaces/http/feed"
 	"pulsefeed/internal/interfaces/http/middleware"
 	httpupload "pulsefeed/internal/interfaces/http/upload"
 
@@ -57,7 +60,13 @@ func Register(engine *gin.Engine, cfg *config.Config, db *sql.DB) error {
 	// upload 链路：文件落盘 ./uploads 并经静态路由回读，上传端点要求登录。
 	uploadHandler := httpupload.New("./uploads")
 
+	// feed 链路：latest 场景纯 DB 复合游标分页；页缓存与 singleflight 待 S8 接入。
+	feedRepo := infrafeed.New(gormDB)
+	feedService := appfeed.New(feedRepo)
+	feedHandler := httpfeed.New(feedService)
+
 	jwtAuth := middleware.NewJWTAuth(issuer)
+	optionalAuth := middleware.NewOptionalJWTAuth(issuer)
 
 	api := engine.Group("/api")
 	api.POST("/users", accountHandler.Register)
@@ -65,6 +74,9 @@ func Register(engine *gin.Engine, cfg *config.Config, db *sql.DB) error {
 	api.GET("/users/:userId", accountHandler.GetByID)
 	api.GET("/users/:userId/clips", clipHandler.ListByCreator)
 	api.GET("/clips/:clipId", clipHandler.GetByID)
+	// Feed 读取允许未登录，携带合法 token 时回显读者互动状态（S9 生效）。
+	api.GET("/feed", optionalAuth, feedHandler.GetFeed)
+	api.POST("/feed-search", optionalAuth, feedHandler.SearchFeed)
 
 	authed := api.Group("", jwtAuth)
 	authed.DELETE("/sessions/current", accountHandler.Logout)
