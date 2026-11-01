@@ -18,6 +18,7 @@ import (
 	httpaccount "pulsefeed/internal/interfaces/http/account"
 	httpclip "pulsefeed/internal/interfaces/http/clip"
 	"pulsefeed/internal/interfaces/http/middleware"
+	httpupload "pulsefeed/internal/interfaces/http/upload"
 
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus"
@@ -53,6 +54,9 @@ func Register(engine *gin.Engine, cfg *config.Config, db *sql.DB) error {
 	clipService := appclip.New(clipRepo)
 	clipHandler := httpclip.New(clipService)
 
+	// upload 链路：文件落盘 ./uploads 并经静态路由回读，上传端点要求登录。
+	uploadHandler := httpupload.New("./uploads")
+
 	jwtAuth := middleware.NewJWTAuth(issuer)
 
 	api := engine.Group("/api")
@@ -69,6 +73,10 @@ func Register(engine *gin.Engine, cfg *config.Config, db *sql.DB) error {
 	authed.GET("/users/me/clips", clipHandler.ListMine)
 	authed.POST("/clips", clipHandler.Publish)
 	authed.DELETE("/clips/:clipId", clipHandler.Delete)
+	authed.POST("/uploads", uploadHandler.Upload)
+
+	// 上传产物静态回读：GET/HEAD /uploads/<kind>/<filename>。
+	engine.Static("/uploads", "./uploads")
 
 	registry := prometheus.NewRegistry()
 
