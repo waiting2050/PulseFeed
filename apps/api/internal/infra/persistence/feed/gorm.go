@@ -196,6 +196,19 @@ func (r *Repository) CountFollowers(ctx context.Context, creatorID int64) (int64
 	return counts[0], nil
 }
 
+// ListFollowerIDs 返回创作者的全部有效粉丝 ID（pf_follows 有效关注行），供发布扇出按批推送。
+func (r *Repository) ListFollowerIDs(ctx context.Context, creatorID int64) ([]int64, error) {
+	var ids []int64
+	err := r.db.WithContext(ctx).
+		Table("pf_follows").
+		Where("target_user_id = ? AND status = ?", creatorID, domrelation.StatusFollowing).
+		Pluck("user_id", &ids).Error
+	if err != nil {
+		return nil, err
+	}
+	return ids, nil
+}
+
 // ListCreatorRecentClips 返回创作者最近发布的 N 条可见 clip（含计数），按 (published_at, id) 递减。
 func (r *Repository) ListCreatorRecentClips(ctx context.Context, creatorID int64, limit int) ([]*domfeed.FeedEntry, error) {
 	var rows []latestRow

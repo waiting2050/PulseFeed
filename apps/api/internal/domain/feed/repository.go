@@ -15,6 +15,8 @@ type Repository interface {
 	ListFollowedCreators(ctx context.Context, viewerID int64) ([]*FollowedCreator, error)
 	// CountFollowers 返回创作者的有效粉丝数（pf_user_stats 维护值），供大 V 判定与扇出阈值使用。
 	CountFollowers(ctx context.Context, creatorID int64) (int64, error)
+	// ListFollowerIDs 返回创作者的全部有效粉丝 ID，供发布扇出按批写粉丝 inbox（S12 接入）。
+	ListFollowerIDs(ctx context.Context, creatorID int64) ([]int64, error)
 	// ListCreatorRecentClips 返回创作者最近发布的 N 条可见 clip，供关注回填取数（S11 接入）。
 	ListCreatorRecentClips(ctx context.Context, creatorID int64, limit int) ([]*FeedEntry, error)
 	// BatchGetEntries 按 ID 批量读取条目（不含计数），供卡片缓存回源使用（S11 起消费）。

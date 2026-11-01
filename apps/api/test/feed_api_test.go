@@ -95,6 +95,11 @@ func (f *fakeFeedRepository) CountFollowers(_ context.Context, _ int64) (int64, 
 	return 0, nil
 }
 
+// ListFollowerIDs 返回空集，fake 简化实现（测试不涉及发布扇出）。
+func (f *fakeFeedRepository) ListFollowerIDs(_ context.Context, _ int64) ([]int64, error) {
+	return nil, nil
+}
+
 // ListCreatorRecentClips 返回空集，fake 简化实现（测试不涉及关注回填）。
 func (f *fakeFeedRepository) ListCreatorRecentClips(_ context.Context, _ int64, _ int) ([]*domfeed.FeedEntry, error) {
 	return nil, nil
