@@ -65,19 +65,39 @@ func (f *fakeFeedRepository) ListLatestPage(_ context.Context, cursor *domfeed.C
 	return result, nil
 }
 
-// BatchGetEntries 返回空集，与 S7 的 GORM 空实现一致。
+// BatchGetEntries 返回空集，fake 简化实现（测试不消费批量卡片）。
 func (f *fakeFeedRepository) BatchGetEntries(_ context.Context, _ []int64) (map[int64]*domfeed.FeedEntry, error) {
 	return map[int64]*domfeed.FeedEntry{}, nil
 }
 
-// BatchGetStats 返回空集，与 S7 的 GORM 空实现一致。
+// BatchGetStats 返回空集，fake 简化实现（测试不消费批量计数）。
 func (f *fakeFeedRepository) BatchGetStats(_ context.Context, _ []int64) (map[int64]*domfeed.EntryStats, error) {
 	return map[int64]*domfeed.EntryStats{}, nil
 }
 
-// BatchGetViewerStates 返回空集，与 S7 的 GORM 空实现一致。
+// BatchGetViewerStates 返回空集，fake 简化实现（测试不消费读者状态）。
 func (f *fakeFeedRepository) BatchGetViewerStates(_ context.Context, _ int64, _ []int64) (map[int64]*domfeed.ViewerState, error) {
 	return map[int64]*domfeed.ViewerState{}, nil
+}
+
+// ListFollowingPage 返回空集，fake 简化实现（测试不涉及 following 场景）。
+func (f *fakeFeedRepository) ListFollowingPage(_ context.Context, _ int64, _ *domfeed.Cursor, _ int) ([]*domfeed.FeedEntry, error) {
+	return nil, nil
+}
+
+// ListFollowedCreators 返回空集，fake 简化实现（测试不涉及大 V 判定）。
+func (f *fakeFeedRepository) ListFollowedCreators(_ context.Context, _ int64) ([]*domfeed.FollowedCreator, error) {
+	return nil, nil
+}
+
+// CountFollowers 返回 0，fake 简化实现（测试不涉及关注回填）。
+func (f *fakeFeedRepository) CountFollowers(_ context.Context, _ int64) (int64, error) {
+	return 0, nil
+}
+
+// ListCreatorRecentClips 返回空集，fake 简化实现（测试不涉及关注回填）。
+func (f *fakeFeedRepository) ListCreatorRecentClips(_ context.Context, _ int64, _ int) ([]*domfeed.FeedEntry, error) {
+	return nil, nil
 }
 
 // feedTestServer 装配内存 fake 的 Feed 端点。

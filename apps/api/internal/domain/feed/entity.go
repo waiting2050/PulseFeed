@@ -15,12 +15,14 @@ const (
 	DefaultFeedLimit = 20
 )
 
-// Scene 是 Feed 场景标识；S7 仅支持 latest，其余场景在后续阶段接入。
+// Scene 是 Feed 场景标识；S7 支持 latest，S11 接入 following，其余场景在后续阶段接入。
 type Scene string
 
 const (
 	// SceneLatest 按发布时间严格递减的全站最新 Feed。
 	SceneLatest Scene = "latest"
+	// SceneFollowing 仅含当前读者关注创作者的 Feed（inbox + 大 V outbox 合并，S11 接入）。
+	SceneFollowing Scene = "following"
 )
 
 // ParseScene 解析场景字符串；不支持的场景返回 ErrUnsupportedScene。
@@ -28,6 +30,8 @@ func ParseScene(s string) (Scene, error) {
 	switch Scene(s) {
 	case SceneLatest:
 		return SceneLatest, nil
+	case SceneFollowing:
+		return SceneFollowing, nil
 	default:
 		return "", ErrUnsupportedScene
 	}
@@ -57,6 +61,20 @@ type FeedEntry struct {
 	PublishedAt time.Time
 	Stats       EntryStats
 	Viewer      ViewerState
+}
+
+// InboxEntry 是关注流收件箱/发件箱中的轻量条目，仅携带排序与归属字段；
+// 完整卡片与计数由组装阶段经卡片/计数缓存与批量回源补齐。
+type InboxEntry struct {
+	ClipID      int64
+	CreatorID   int64
+	PublishedAt time.Time
+}
+
+// FollowedCreator 是读者关注中的一名创作者及其粉丝数，供大 V outbox 判定。
+type FollowedCreator struct {
+	CreatorID     int64
+	FollowerCount int64
 }
 
 // Cursor 是按 (published_at, clip_id) 复合键严格递减翻页的游标；

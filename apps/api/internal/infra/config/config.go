@@ -62,9 +62,10 @@ func (c *Config) validate() error {
 	requireString("database.password", c.Database.Password)
 	requireString("database.name", c.Database.Name)
 
-	requireString("redis.addr", c.Redis.Addr)
+	// redis.addr 允许为空：空 addr 表示禁用缓存，Feed 等链路降级为纯 DB（S8 验收要求）。
 
-	requireString("rabbitmq.url", c.RabbitMQ.URL)
+	// rabbitmq.url 允许为空：空 url 表示禁用 MQ，互动链路降级为同步落库（S10 验收要求）；
+	// Worker 组合根会额外校验 url 非空。
 	requireString("rabbitmq.clip_exchange", c.RabbitMQ.ClipExchange)
 	requireString("rabbitmq.clip_published_queue", c.RabbitMQ.ClipPublishedQueue)
 	requireString("rabbitmq.clip_published_routing", c.RabbitMQ.ClipPublishedRouting)

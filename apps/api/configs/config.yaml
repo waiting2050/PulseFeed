@@ -20,7 +20,7 @@ redis:
   db: 0
 
 rabbitmq:
-  url: amqp://placeholder:placeholder@127.0.0.1:5672/
+  url: amqp://guest:guest@127.0.0.1:5672/
   clip_exchange: pulsefeed.clip
   clip_published_queue: pulsefeed.clip.published
   clip_published_routing: clip.published
