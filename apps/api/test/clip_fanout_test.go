@@ -31,6 +31,10 @@ func (f *fanoutFakeRepository) ListFollowingPage(_ context.Context, _ int64, _ *
 	return nil, nil
 }
 
+func (f *fanoutFakeRepository) ListHotPage(_ context.Context, _ *domfeed.Cursor, _ int) ([]*domfeed.FeedEntry, error) {
+	return nil, nil
+}
+
 func (f *fanoutFakeRepository) ListFollowedCreators(_ context.Context, _ int64) ([]*domfeed.FollowedCreator, error) {
 	return nil, nil
 }

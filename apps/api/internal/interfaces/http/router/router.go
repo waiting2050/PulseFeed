@@ -101,11 +101,13 @@ func Register(engine *gin.Engine, cfg *config.Config, db *sql.DB) error {
 	embeddingRepo := infraembedding.New(gormDB)
 	recommendationRepo := infrarecommendation.New(gormDB)
 	recommendationService := apprecommendation.New(recommendationRepo, embeddingRepo)
-	// following 场景策略：合并读者 inbox 与大 V outbox，Redis 缺失/禁用自动回源 DB。
+	// following 场景策略：合并读者 inbox 与大 V outbox，Redis 缺失/禁用自动回源 DB；
+	// hot 场景策略：合并最近 60 个分钟桶的互动增量，窗口为空/不可用自动回源 DB。
 	feedService := appfeed.New(feedRepo,
 		appfeed.WithFeedCache(feedCache),
 		appfeed.WithFollowingStrategy(feedCache),
 		appfeed.WithForYouStrategy(recommendationService),
+		appfeed.WithHotStrategy(feedCache),
 	)
 	feedHandler := httpfeed.New(feedService)
 	recommendationHandler := httprecommendation.New(recommendationService)
@@ -119,8 +121,10 @@ func Register(engine *gin.Engine, cfg *config.Config, db *sql.DB) error {
 
 	// 互动链路：Redis 与 MQ 均可用时启用异步流水线（Redis 先写 → MQ → Worker 落库），
 	// 否则回退 S9 的同步落库路径；评论始终同步处理。
+	// 计数真正变化时同步累加 Redis 热度分钟桶（S15 hot 场景数据源），缓存禁用时实现自身跳过。
 	actionRepo := infraaction.New(gormDB)
-	actionOpts := make([]appaction.Option, 0, 1)
+	actionOpts := make([]appaction.Option, 0, 2)
+	actionOpts = append(actionOpts, appaction.WithHotScoreRecorder(feedCache))
 	if feedCache.Enabled() && mqClient != nil {
 		actionOpts = append(actionOpts, appaction.WithAsyncActionPipeline(feedCache, mqClient))
 		log.Printf("互动异步链路已启用 (queue=%s)", cfg.RabbitMQ.ActionChangedQueue)

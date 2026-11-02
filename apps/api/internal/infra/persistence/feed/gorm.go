@@ -1,9 +1,11 @@
-// gorm.go 实现 feed 领域仓储端口：latest/following 场景复合游标分页、卡片与计数批量读取、
-// 关注集与大 V 判定直读（S11 起 BatchGetEntries/BatchGetStats 由空实现转为真实查询）。
+// gorm.go 实现 feed 领域仓储端口：latest/following/hot 场景分页、卡片与计数批量读取、
+// 关注集与大 V 判定直读（S15 起 hot 场景按计算出的热度分回源排序）。
 package infrafeed
 
 import (
 	"context"
+	"fmt"
+	"time"
 
 	domclip "pulsefeed/internal/domain/clip"
 	domfeed "pulsefeed/internal/domain/feed"
@@ -63,6 +65,71 @@ func (r *Repository) ListLatestPage(ctx context.Context, cursor *domfeed.Cursor,
 		entries = append(entries, toEntry(&rows[i]))
 	}
 	return entries, nil
+}
+
+// ListHotPage 按热度分严格递减分页返回可见 clip 条目，是 hot 场景 Redis 不可用或窗口为空时的回源路径。
+// 热度分在 SQL 中按 ScoreHot 同一公式计算（互动权重 + 小时年龄幂衰减），不在表内新增预计算列；
+// 复合游标为 (hot_score, id) 严格小于上一页最后一条。
+func (r *Repository) ListHotPage(ctx context.Context, cursor *domfeed.Cursor, limit int) ([]*domfeed.FeedEntry, error) {
+	expr := hotScoreExpression()
+	now := time.Now()
+
+	query := r.db.WithContext(ctx).
+		Table("pf_clips AS c").
+		Select("c.id, c.creator_id, c.title, c.video_url, c.cover_url, c.published_at, "+
+			"s.like_count, s.save_count, s.comment_count, s.play_count, "+
+			expr+" AS hot_score", now).
+		Joins("LEFT JOIN pf_clip_stats s ON s.clip_id = c.id").
+		Where("c.status = ?", domclip.StatusPublished)
+	if cursor != nil {
+		// 复合游标：严格小于上一页最后一条的 (hot_score, id)。
+		query = query.Where(
+			expr+" < ? OR ("+expr+" = ? AND c.id < ?)",
+			now, cursor.Score, now, cursor.Score, cursor.ClipID,
+		)
+	}
+
+	var rows []hotRow
+	err := query.
+		Order("hot_score DESC, c.id DESC").
+		Limit(limit).
+		Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+
+	entries := make([]*domfeed.FeedEntry, 0, len(rows))
+	for i := range rows {
+		entry := &domfeed.FeedEntry{
+			ClipID:      rows[i].ID,
+			CreatorID:   rows[i].CreatorID,
+			Title:       rows[i].Title,
+			VideoURL:    rows[i].VideoURL,
+			CoverURL:    rows[i].CoverURL,
+			PublishedAt: rows[i].PublishedAt,
+			Stats: domfeed.EntryStats{
+				LikeCount:    rows[i].LikeCount,
+				SaveCount:    rows[i].SaveCount,
+				CommentCount: rows[i].CommentCount,
+				PlayCount:    rows[i].PlayCount,
+			},
+			Score: rows[i].HotScore,
+		}
+		entries = append(entries, entry)
+	}
+	return entries, nil
+}
+
+// hotScoreExpression 构造与 domfeed.ScoreHot 等价的 SQL 热度表达式：
+// （点赞*3 + 收藏*4 + 评论*5 + 播放*1）/ (小时年龄 + 2)^1.5，未来发布时间按 0 年龄截断；
+// 表达式内含一个 ? 占位符，由调用方绑定查询时刻。
+func hotScoreExpression() string {
+	return fmt.Sprintf(
+		"((COALESCE(s.like_count, 0) * %d + COALESCE(s.save_count, 0) * %d + "+
+			"COALESCE(s.comment_count, 0) * %d + COALESCE(s.play_count, 0) * %d) / "+
+			"POW(GREATEST(TIMESTAMPDIFF(SECOND, c.published_at, ?), 0) / 3600.0 + 2, 1.5))",
+		domfeed.HotWeightLike, domfeed.HotWeightSave, domfeed.HotWeightComment, domfeed.HotWeightPlay,
+	)
 }
 
 // BatchGetEntries 按 ID 批量读取卡片（clip 视图，不含计数）；

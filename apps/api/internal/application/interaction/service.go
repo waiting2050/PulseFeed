@@ -7,6 +7,7 @@ import (
 	"log"
 	"time"
 
+	domfeed "pulsefeed/internal/domain/feed"
 	dominteraction "pulsefeed/internal/domain/interaction"
 )
 
@@ -38,6 +39,12 @@ type ActionEventPublisher interface {
 	PublishActionChanged(ctx context.Context, event ActionChanged) error
 }
 
+// HotScoreRecorder 是热度分钟桶写入端口，由 infra/cache 实现（S15）。
+// 仅在互动计数真正变化时累加，递减/幂等命中不写桶。
+type HotScoreRecorder interface {
+	RecordHotScore(ctx context.Context, clipID int64, delta float64)
+}
+
 // Option 用于装配可选依赖。
 type Option func(*Service)
 
@@ -50,11 +57,17 @@ func WithAsyncActionPipeline(states ActionStateCache, publisher ActionEventPubli
 	}
 }
 
+// WithHotScoreRecorder 注入热度分钟桶写入器；缓存未启用时注入的实现自身静默跳过。
+func WithHotScoreRecorder(recorder HotScoreRecorder) Option {
+	return func(s *Service) { s.hotScores = recorder }
+}
+
 // Service 提供互动相关用例。
 type Service struct {
 	repo       dominteraction.Repository
 	stateCache ActionStateCache
 	publisher  ActionEventPublisher
+	hotScores  HotScoreRecorder
 }
 
 // New 创建互动应用服务。
@@ -87,35 +100,55 @@ func (s *Service) Unsave(ctx context.Context, userID, clipID int64, idempotencyK
 }
 
 // setAction 是四类状态变更的公共入口；异步链路任一环节失败时回退仓储同步落库。
+// 无论走哪条路径，只要状态真正翻转（新增启用或启用↔取消），都按行为类型累加热度分钟桶。
 func (s *Service) setAction(ctx context.Context, userID, clipID int64, actionType dominteraction.ActionType, active bool, idempotencyKey string) (*dominteraction.ActionResult, error) {
 	if clipID <= 0 {
 		return nil, dominteraction.ErrClipNotFound
 	}
+	var result *dominteraction.ActionResult
+	var err error
 	if s.stateCache != nil && s.publisher != nil {
-		if result, ok := s.tryAsyncAction(ctx, userID, clipID, actionType, active, idempotencyKey); ok {
-			return result, nil
-		}
+		result, err = s.tryAsyncAction(ctx, userID, clipID, actionType, active, idempotencyKey)
 	}
-	return s.repo.SetAction(ctx, userID, clipID, actionType, active, idempotencyKey)
+	if result == nil && err == nil {
+		result, err = s.repo.SetAction(ctx, userID, clipID, actionType, active, idempotencyKey)
+	}
+	if err != nil {
+		return nil, err
+	}
+	s.recordHotScore(ctx, clipID, actionType, result)
+	return result, nil
 }
 
-// tryAsyncAction 依次写 Redis、发布事件；前置校验失败或任一步出错都返回 ok=false 让调用方回退同步落库。
-func (s *Service) tryAsyncAction(ctx context.Context, userID, clipID int64, actionType dominteraction.ActionType, active bool, idempotencyKey string) (*dominteraction.ActionResult, bool) {
+// recordHotScore 在行为计数真正变化时把对应权重累加进热度分钟桶（S15 hot 场景数据源）。
+func (s *Service) recordHotScore(ctx context.Context, clipID int64, actionType dominteraction.ActionType, result *dominteraction.ActionResult) {
+	if s.hotScores == nil || result == nil || !result.Changed {
+		return
+	}
+	weight := float64(domfeed.HotWeightLike)
+	if actionType == dominteraction.ActionSave {
+		weight = float64(domfeed.HotWeightSave)
+	}
+	s.hotScores.RecordHotScore(ctx, clipID, weight)
+}
+
+// tryAsyncAction 依次写 Redis、发布事件；前置校验失败或任一步出错都返回 nil 让调用方回退同步落库。
+func (s *Service) tryAsyncAction(ctx context.Context, userID, clipID int64, actionType dominteraction.ActionType, active bool, idempotencyKey string) (*dominteraction.ActionResult, error) {
 	// 缓存不校验 clip 是否存在，先在 DB 做一次轻量前置校验，保持不存在时仍返回 404。
 	exists, err := s.repo.ExistsPublished(ctx, clipID)
 	if err != nil {
 		log.Printf("warning: 互动异步链路前置校验失败，回退同步落库 (clip_id=%d): %v", clipID, err)
-		return nil, false
+		return nil, nil
 	}
 	if !exists {
 		// 不存在交给同步路径返回统一 ErrClipNotFound。
-		return nil, false
+		return nil, nil
 	}
 
 	result, err := s.stateCache.SetActionState(ctx, userID, clipID, actionType, active)
 	if err != nil {
 		log.Printf("warning: 互动状态写缓存失败，回退同步落库 (user_id=%d clip_id=%d): %v", userID, clipID, err)
-		return nil, false
+		return nil, nil
 	}
 
 	event := ActionChanged{
@@ -128,9 +161,10 @@ func (s *Service) tryAsyncAction(ctx context.Context, userID, clipID int64, acti
 	}
 	if err := s.publisher.PublishActionChanged(ctx, event); err != nil {
 		log.Printf("warning: action_changed 投递失败，回退同步落库 (user_id=%d clip_id=%d): %v", userID, clipID, err)
-		return nil, false
+		// 缓存已写入但事件未投递：状态由后续同键重试或读路径补偿，本次回退同步落库保证接口不丢写。
+		return nil, nil
 	}
-	return result, true
+	return result, nil
 }
 
 // CreateComment 发表评论：内容校验后写入并返回评论与最新评论数。

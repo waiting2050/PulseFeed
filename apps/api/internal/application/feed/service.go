@@ -112,6 +112,14 @@ func WithForYouStrategy(recommender Recommender) Option {
 	}
 }
 
+// WithHotStrategy 注册 hot 场景策略；缓存不可用/窗口为空时策略内部回源 DB。
+func WithHotStrategy(cache HotCache) Option {
+	return func(s *Service) {
+		strategy := NewHotStrategy(s.repo, cache)
+		s.strategies[strategy.Scene()] = strategy
+	}
+}
+
 // Service 提供 Feed 读取用例。
 type Service struct {
 	repo       domfeed.Repository

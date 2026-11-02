@@ -11,6 +11,9 @@ type Repository interface {
 	// ListFollowingPage 按同一复合游标返回读者关注创作者的可见 clip 条目（含计数），
 	// 是 following 场景在缓存不可用时的 DB 回源路径（S11 接入）。
 	ListFollowingPage(ctx context.Context, viewerID int64, cursor *Cursor, limit int) ([]*FeedEntry, error)
+	// ListHotPage 按计算出的热度分严格递减返回可见 clip 条目（含计数与分数），
+	// 是 hot 场景 Redis 分钟桶不可用/为空时的 DB 回源路径（S15 接入）。
+	ListHotPage(ctx context.Context, cursor *Cursor, limit int) ([]*FeedEntry, error)
 	// ListFollowedCreators 返回读者关注中的创作者及其粉丝数，供大 V outbox 合并判定（S11 接入）。
 	ListFollowedCreators(ctx context.Context, viewerID int64) ([]*FollowedCreator, error)
 	// CountFollowers 返回创作者的有效粉丝数（pf_user_stats 维护值），供大 V 判定与扇出阈值使用。

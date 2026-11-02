@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log"
 	"math/big"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -41,6 +42,13 @@ const (
 
 	// inboxMaxEntries 是 inbox/outbox 裁剪上限：只保留按分值（发布时间）最新的 N 条。
 	inboxMaxEntries = 1000
+
+	// hotWindowBuckets 是 hot 场景合并的分钟桶数量（最近 60 个桶，即约 1 小时）。
+	hotWindowBuckets = 60
+	// hotBucketTTL 是单个分钟桶的保留时长，略大于窗口跨度以便跨桶合并时尾部桶仍然可读。
+	hotBucketTTL = 65 * time.Minute
+	// hotWindowLimit 是合并窗口后参与排序的 clip 上限，防止超热时段单次读取过大。
+	hotWindowLimit = 500
 )
 
 // ErrActionStateUnavailable 表示 Redis 未启用，异步互动链路应回退同步落库。
@@ -48,6 +56,9 @@ var ErrActionStateUnavailable = errors.New("互动状态缓存不可用")
 
 // ErrFeedBoxUnavailable 表示 Redis 未启用，following 场景应回源 DB。
 var ErrFeedBoxUnavailable = errors.New("关注流缓存不可用")
+
+// ErrHotWindowUnavailable 表示 Redis 未启用，hot 场景应回源 DB。
+var ErrHotWindowUnavailable = errors.New("热度窗口缓存不可用")
 
 // FeedCache 是 Feed 三级缓存的 Redis 实现；client 为 nil 表示缓存禁用。
 type FeedCache struct {
@@ -217,6 +228,7 @@ func (c *FeedCache) SetActionState(ctx context.Context, userID, clipID int64, ac
 	}
 
 	var lastErr error
+	changed := false
 	for attempt := 0; attempt < actionStateAttempts; attempt++ {
 		err := c.client.Watch(ctx, func(tx *redis.Tx) error {
 			raw, getErr := tx.Get(ctx, stateKey).Result()
@@ -253,11 +265,16 @@ func (c *FeedCache) SetActionState(ctx context.Context, userID, clipID int64, ac
 				}
 				return nil
 			})
-			return txErr
+			if txErr != nil {
+				return txErr
+			}
+			changed = true
+			return nil
 		}, stateKey)
 		if errors.Is(err, redis.TxFailedErr) {
 			// 并发写入同一状态键：重新 WATCH 后按最新状态重算增量。
 			lastErr = err
+			changed = false
 			continue
 		}
 		if err != nil {
@@ -272,6 +289,7 @@ func (c *FeedCache) SetActionState(ctx context.Context, userID, clipID int64, ac
 			ClipID:     clipID,
 			ActionType: actionType,
 			Active:     active,
+			Changed:    changed,
 			LikeCount:  likeCount,
 			SaveCount:  saveCount,
 		}, nil
@@ -331,6 +349,73 @@ func (c *FeedCache) sumActionCounts(ctx context.Context, clipID int64) (int64, i
 		}
 	}
 	return like, save, nil
+}
+
+// RecordHotScore 按 clip ID 与当前分钟把热度增量累加到分钟桶 ZSET（ZINCRBY）：
+// 桶键形如 pf:v1:feed:hot:202601021504（分钟内若干次小增量合并为桶内累计值）。
+func (c *FeedCache) RecordHotScore(ctx context.Context, clipID int64, delta float64) {
+	if !c.Enabled() || clipID <= 0 || delta <= 0 {
+		return
+	}
+	key := hotBucketKey(time.Now())
+	if err := c.client.ZIncrBy(ctx, key, delta, strconv.FormatInt(clipID, 10)).Err(); err != nil {
+		log.Printf("warning: 热度分钟桶写入失败 (clip_id=%d): %v", clipID, err)
+		return
+	}
+	if err := c.client.Expire(ctx, key, hotBucketTTL).Err(); err != nil {
+		log.Printf("warning: 热度分钟桶 TTL 设置失败 (clip_id=%d): %v", clipID, err)
+	}
+}
+
+// ListHotWindow 合并最近 hotWindowBuckets 个分钟桶，返回按累计热度递减排序的 HotItem 列表。
+// Redis 未启用时返回 ErrHotWindowUnavailable，由 hot 策略回源 DB。
+func (c *FeedCache) ListHotWindow(ctx context.Context) ([]domfeed.HotItem, error) {
+	if !c.Enabled() {
+		return nil, ErrHotWindowUnavailable
+	}
+
+	// 取最近 N 个分钟桶，统一格式化为 yyyyMMddHHmm（分钟精度）。
+	now := time.Now()
+	keys := make([]string, 0, hotWindowBuckets)
+	for i := 0; i < hotWindowBuckets; i++ {
+		keys = append(keys, hotBucketKey(now.Add(-time.Duration(i)*time.Minute)))
+	}
+
+	// 内存合并：逐桶 ZRANGE（分值降序）累计各 clip 增量，之后统一排序并截断。
+	acc := make(map[string]float64, hotWindowLimit)
+	for _, key := range keys {
+		values, err := c.client.ZRangeWithScores(ctx, key, 0, -1).Result()
+		if err != nil && !errors.Is(err, redis.Nil) {
+			log.Printf("warning: 热度分钟桶读取失败 (key=%s): %v", key, err)
+			continue
+		}
+		for _, value := range values {
+			member, ok := value.Member.(string)
+			if !ok {
+				continue
+			}
+			acc[member] += value.Score
+		}
+	}
+
+	items := make([]domfeed.HotItem, 0, len(acc))
+	for member, score := range acc {
+		clipID, err := strconv.ParseInt(member, 10, 64)
+		if err != nil {
+			continue
+		}
+		items = append(items, domfeed.HotItem{ClipID: clipID, Score: score})
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].Score != items[j].Score {
+			return items[i].Score > items[j].Score
+		}
+		return items[i].ClipID > items[j].ClipID
+	})
+	if len(items) > hotWindowLimit {
+		items = items[:hotWindowLimit]
+	}
+	return items, nil
 }
 
 // AddInboxEntries 将条目推入读者 inbox（ZSET，score=published_at 秒），并裁剪到最近 1000 条；
@@ -468,6 +553,11 @@ func cardKey(clipID int64) string {
 // statsKey 返回计数缓存键。
 func statsKey(clipID int64) string {
 	return fmt.Sprintf("%s:feed:stats:%d", keyPrefix, clipID)
+}
+
+// hotBucketKey 返回按分钟切分的热度桶键：同一分钟内的热度增量累加在同一个 ZSET。
+func hotBucketKey(t time.Time) string {
+	return fmt.Sprintf("%s:feed:hot:%s", keyPrefix, t.Format("200601021504"))
 }
 
 // jitter 给基础 TTL 叠加 10%–20% 的随机正向抖动，避免大量键同刻过期引发击穿；

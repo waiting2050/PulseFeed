@@ -53,11 +53,13 @@ type Action struct {
 	IdempotencyKey string
 }
 
-// ActionResult 是行为状态变更后的回执，携带该 clip 的最新计数。
+// ActionResult 是行为状态变更后的回执，携带该 clip 的最新计数；
+// Changed 标记本次调用是否真正发生了状态翻转，供热度桶只在计数变化时累加。
 type ActionResult struct {
 	ClipID     int64
 	ActionType ActionType
 	Active     bool
+	Changed    bool
 	LikeCount  int64
 	SaveCount  int64
 }

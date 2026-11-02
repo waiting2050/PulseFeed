@@ -85,6 +85,11 @@ func (f *fakeFeedRepository) ListFollowingPage(_ context.Context, _ int64, _ *do
 	return nil, nil
 }
 
+// ListHotPage 返回空集，fake 简化实现（测试不涉及 hot 场景）。
+func (f *fakeFeedRepository) ListHotPage(_ context.Context, _ *domfeed.Cursor, _ int) ([]*domfeed.FeedEntry, error) {
+	return nil, nil
+}
+
 // ListFollowedCreators 返回空集，fake 简化实现（测试不涉及大 V 判定）。
 func (f *fakeFeedRepository) ListFollowedCreators(_ context.Context, _ int64) ([]*domfeed.FollowedCreator, error) {
 	return nil, nil

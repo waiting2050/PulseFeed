@@ -74,6 +74,7 @@ func (r *Repository) SetAction(ctx context.Context, userID, clipID int64, action
 				if err := adjustStats(tx, stats, actionType, 1); err != nil {
 					return err
 				}
+				result.Changed = true
 			}
 		case err != nil:
 			return err
@@ -101,6 +102,7 @@ func (r *Repository) SetAction(ctx context.Context, userID, clipID int64, action
 				if err := adjustStats(tx, stats, actionType, delta); err != nil {
 					return err
 				}
+				result.Changed = true
 			}
 		}
 

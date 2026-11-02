@@ -42,3 +42,18 @@ type followedCreatorRow struct {
 	CreatorID     int64 `gorm:"column:creator_id"`
 	FollowerCount int64 `gorm:"column:follower_count"`
 }
+
+// hotRow 是 hot 场景 DB 回源的行映射：clip 视图 + 计数 + 计算出的热度分。
+type hotRow struct {
+	ID           int64     `gorm:"column:id"`
+	CreatorID    int64     `gorm:"column:creator_id"`
+	Title        string    `gorm:"column:title"`
+	VideoURL     string    `gorm:"column:video_url"`
+	CoverURL     string    `gorm:"column:cover_url"`
+	PublishedAt  time.Time `gorm:"column:published_at"`
+	LikeCount    int64     `gorm:"column:like_count"`
+	SaveCount    int64     `gorm:"column:save_count"`
+	CommentCount int64     `gorm:"column:comment_count"`
+	PlayCount    int64     `gorm:"column:play_count"`
+	HotScore     float64   `gorm:"column:hot_score"`
+}
