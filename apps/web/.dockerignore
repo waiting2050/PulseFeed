@@ -1,0 +1,3 @@
+# 只保留构建所需文件，避免把 node_modules 与本地构建产物送进构建上下文。
+node_modules
+dist

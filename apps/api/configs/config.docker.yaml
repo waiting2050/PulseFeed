@@ -1,17 +1,18 @@
+# Docker Compose 专用配置：服务名即主机名（mysql/redis/rabbitmq），账号与 compose 环境变量保持一致。
 port: 8090
 
 jwt:
-  secret: placeholder-secret
+  secret: pulsefeed-docker-secret
   access_ttl: 15m
 
 internal:
-  token: placeholder-internal-token
+  token: pulsefeed-internal-token
 
 database:
   host: mysql
   port: 3306
-  user: placeholder
-  password: placeholder
+  user: pulsefeed
+  password: pulsefeed
   name: PulseFeed
 
 redis:
@@ -20,7 +21,7 @@ redis:
   db: 0
 
 rabbitmq:
-  url: amqp://placeholder:placeholder@rabbitmq:5672/
+  url: amqp://pulsefeed:pulsefeed@rabbitmq:5672/
   clip_exchange: pulsefeed.clip
   clip_published_queue: pulsefeed.clip.published
   clip_published_routing: clip.published
