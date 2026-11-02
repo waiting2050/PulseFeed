@@ -41,7 +41,9 @@ services:
       - "5673:5672"
       - "15673:15672"
     healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      # ping 只证明 Erlang 节点存活；check_port_connectivity 额外确认 AMQP 监听端口可连接，
+      # 避免 Worker 在 5672 尚未就绪时启动并因 connection refused 退出。
+      test: ["CMD-SHELL", "rabbitmq-diagnostics -q check_running && rabbitmq-diagnostics -q check_port_connectivity"]
       interval: 10s
       timeout: 10s
       retries: 12
@@ -75,6 +77,8 @@ services:
       context: ./api
       dockerfile: Dockerfile
     command: ["/app/pulsefeed-worker", "-config", "/app/configs/config.docker.yaml", "-metrics-addr", ":9092"]
+    # 第二道保险：即使 MQ 初始化仍偶发失败，容器也会自动重启而不是停在 Exited。
+    restart: unless-stopped
     depends_on:
       # Worker 也执行 AutoMigrate；等待 API 迁移完成后再启动，避免并发建表触发 1050。
       api:
