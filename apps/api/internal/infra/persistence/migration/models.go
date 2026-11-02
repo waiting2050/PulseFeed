@@ -7,6 +7,8 @@ import (
 	infraembedding "pulsefeed/internal/infra/persistence/embedding"
 	infraimpression "pulsefeed/internal/infra/persistence/impression"
 	infraaction "pulsefeed/internal/infra/persistence/interaction"
+	inframessage "pulsefeed/internal/infra/persistence/message"
+	infraplayback "pulsefeed/internal/infra/persistence/playback"
 	infrarelation "pulsefeed/internal/infra/persistence/relation"
 )
 
@@ -24,5 +26,9 @@ func Models() []any {
 		&infraimpression.PlayEventModel{},
 		&infraimpression.ImpressionModel{},
 		&infraembedding.ClipEmbeddingModel{},
+		// S16 新增：消息、播放配置与 QoS 两张表。
+		&inframessage.MessageModel{},
+		&infraplayback.ConfigModel{},
+		&infraplayback.QoSReportModel{},
 	}
 }

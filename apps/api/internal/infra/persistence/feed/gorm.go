@@ -299,6 +299,22 @@ func (r *Repository) ListCreatorRecentClips(ctx context.Context, creatorID int64
 	return entries, nil
 }
 
+// ListLatestClipIDs 按 (published_at, id) 递减返回最近发布的 N 个可见 clip_id；
+// 供 playback 预加载列表使用（S16 接入）。
+func (r *Repository) ListLatestClipIDs(ctx context.Context, limit int) ([]int64, error) {
+	var ids []int64
+	err := r.db.WithContext(ctx).
+		Table("pf_clips").
+		Where("status = ?", domclip.StatusPublished).
+		Order("published_at DESC, id DESC").
+		Limit(limit).
+		Pluck("id", &ids).Error
+	if err != nil {
+		return nil, err
+	}
+	return ids, nil
+}
+
 // BatchGetViewerStates 批量读取读者对条目的互动状态：
 // 只取 pf_actions 中有效（status=1）的行为，按类型分别置 liked/saved。
 func (r *Repository) BatchGetViewerStates(ctx context.Context, viewerID int64, clipIDs []int64) (map[int64]*domfeed.ViewerState, error) {

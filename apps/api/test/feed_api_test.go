@@ -110,6 +110,11 @@ func (f *fakeFeedRepository) ListCreatorRecentClips(_ context.Context, _ int64, 
 	return nil, nil
 }
 
+// ListLatestClipIDs 返回空集，fake 简化实现（测试不涉及 playback 预加载）。
+func (f *fakeFeedRepository) ListLatestClipIDs(_ context.Context, _ int) ([]int64, error) {
+	return nil, nil
+}
+
 // feedTestServer 装配内存 fake 的 Feed 端点。
 func feedTestServer(repo domfeed.Repository) *gin.Engine {
 	gin.SetMode(gin.TestMode)

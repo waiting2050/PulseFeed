@@ -2,6 +2,7 @@
 package router
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"log"
@@ -13,6 +14,8 @@ import (
 	appfeed "pulsefeed/internal/application/feed"
 	appimpression "pulsefeed/internal/application/impression"
 	appaction "pulsefeed/internal/application/interaction"
+	appmessage "pulsefeed/internal/application/message"
+	appplayback "pulsefeed/internal/application/playback"
 	apprecommendation "pulsefeed/internal/application/recommendation"
 	apprelation "pulsefeed/internal/application/relation"
 	infracache "pulsefeed/internal/infra/cache"
@@ -25,7 +28,9 @@ import (
 	infrafeed "pulsefeed/internal/infra/persistence/feed"
 	infraimpression "pulsefeed/internal/infra/persistence/impression"
 	infraaction "pulsefeed/internal/infra/persistence/interaction"
+	inframessage "pulsefeed/internal/infra/persistence/message"
 	"pulsefeed/internal/infra/persistence/migration"
+	infraplayback "pulsefeed/internal/infra/persistence/playback"
 	infrarecommendation "pulsefeed/internal/infra/persistence/recommendation"
 	infrarelation "pulsefeed/internal/infra/persistence/relation"
 	httpaccount "pulsefeed/internal/interfaces/http/account"
@@ -33,7 +38,9 @@ import (
 	httpfeed "pulsefeed/internal/interfaces/http/feed"
 	httpimpression "pulsefeed/internal/interfaces/http/impression"
 	httpaction "pulsefeed/internal/interfaces/http/interaction"
+	httpmsg "pulsefeed/internal/interfaces/http/message"
 	"pulsefeed/internal/interfaces/http/middleware"
+	httpplayback "pulsefeed/internal/interfaces/http/playback"
 	httprecommendation "pulsefeed/internal/interfaces/http/recommendation"
 	httprelation "pulsefeed/internal/interfaces/http/relation"
 	httpupload "pulsefeed/internal/interfaces/http/upload"
@@ -112,10 +119,27 @@ func Register(engine *gin.Engine, cfg *config.Config, db *sql.DB) error {
 	feedHandler := httpfeed.New(feedService)
 	recommendationHandler := httprecommendation.New(recommendationService)
 
-	// relation 链路：关注/取关与列表；关注状态迁移时经 feed 回填器同步回填读者 inbox。
+	// message 链路：站内消息表、未读数与标记已读；服务同时实现 relation 的 FollowEventMessenger 端口（S16 接入）。
+	messageRepo := inframessage.New(gormDB)
+	messageService := appmessage.New(messageRepo)
+	messageHandler := httpmsg.New(messageService)
+
+	// playback 链路：播放配置（预加载条数/QoS 采样率）与 QoS 幂等上报；
+	// 预加载列表数据源复用 feedRepo.ListLatestClipIDs，通过 adapter 桥接接口签名。
+	playbackRepo := infraplayback.New(gormDB)
+	playbackService := appplayback.New(playbackRepo, appplayback.ClipProviderFunc(
+		func(ctx context.Context, limit int) ([]int64, error) {
+			return feedRepo.ListLatestClipIDs(ctx, limit)
+		},
+	))
+	playbackHandler := httpplayback.New(playbackService)
+
+	// relation 链路：关注/取关与列表；关注状态迁移时经 feed 回填器同步回填读者 inbox、
+	// 并经 message service 向被关注者发送站内消息（S16 接入）。
 	relationRepo := infrarelation.New(gormDB)
 	relationService := apprelation.New(relationRepo,
 		apprelation.WithFollowFeedBackfiller(appfeed.NewInboxBackfiller(feedRepo, feedCache)),
+		apprelation.WithFollowEventMessenger(messageService),
 	)
 	relationHandler := httprelation.New(relationService)
 
@@ -181,12 +205,23 @@ func Register(engine *gin.Engine, cfg *config.Config, db *sql.DB) error {
 	authed.DELETE("/users/me/following/:targetUserId", relationHandler.Unfollow)
 	authed.GET("/users/me/following", relationHandler.ListFollowing)
 	authed.GET("/users/me/followers", relationHandler.ListFollowers)
+	// 站内消息端点：列表、未读数与全部标记已读，均要求登录（S16 接入）。
+	authed.GET("/messages", messageHandler.ListMessages)
+	authed.GET("/message-stats/unread", messageHandler.GetUnreadCount)
+	authed.PATCH("/messages", messageHandler.MarkAllRead)
+	// 播放配置与 QoS 上报端点：登录用户读取/更新配置、取预加载列表、幂等上报 QoS（S16 接入）。
+	authed.GET("/playback-config", playbackHandler.GetConfig)
+	authed.PUT("/playback-config", playbackHandler.UpdateConfig)
+	authed.GET("/preload-clips", playbackHandler.GetPreload)
+	authed.POST("/playback-qos-reports", playbackHandler.ReportQoS)
 
-	// 内部接口：X-Internal-Token 鉴权，供推荐排查与曝光决策核对。
+	// 内部接口：X-Internal-Token 鉴权，供推荐排查、曝光决策、向量链路核对与消息/QoS 主动投递（S16 接入）。
 	internal := engine.Group("/internal", middleware.NewInternalTokenAuth(cfg.Internal.Token))
 	internal.POST("/recommendation-candidates", recommendationHandler.ListCandidates)
 	internal.GET("/impression-decisions", recommendationHandler.ImpressionDecision)
 	internal.GET("/impressions", recommendationHandler.ListImpressions)
+	internal.POST("/messages", messageHandler.CreateMessageInternal)
+	internal.POST("/playback-qos-reports", playbackHandler.ReportQoSInternal)
 
 	// 上传产物静态回读：GET/HEAD /uploads/<kind>/<filename>。
 	engine.Static("/uploads", "./uploads")

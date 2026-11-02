@@ -51,6 +51,10 @@ func (f *fanoutFakeRepository) ListCreatorRecentClips(_ context.Context, _ int64
 	return nil, nil
 }
 
+func (f *fanoutFakeRepository) ListLatestClipIDs(_ context.Context, _ int) ([]int64, error) {
+	return nil, nil
+}
+
 func (f *fanoutFakeRepository) BatchGetEntries(_ context.Context, ids []int64) (map[int64]*domfeed.FeedEntry, error) {
 	result := make(map[int64]*domfeed.FeedEntry, len(ids))
 	for _, id := range ids {
