@@ -11,6 +11,7 @@ import (
 	appaccount "pulsefeed/internal/application/account"
 	appclip "pulsefeed/internal/application/clip"
 	appfeed "pulsefeed/internal/application/feed"
+	appimpression "pulsefeed/internal/application/impression"
 	appaction "pulsefeed/internal/application/interaction"
 	apprelation "pulsefeed/internal/application/relation"
 	infracache "pulsefeed/internal/infra/cache"
@@ -20,12 +21,14 @@ import (
 	infraaccount "pulsefeed/internal/infra/persistence/account"
 	infraclip "pulsefeed/internal/infra/persistence/clip"
 	infrafeed "pulsefeed/internal/infra/persistence/feed"
+	infraimpression "pulsefeed/internal/infra/persistence/impression"
 	infraaction "pulsefeed/internal/infra/persistence/interaction"
 	"pulsefeed/internal/infra/persistence/migration"
 	infrarelation "pulsefeed/internal/infra/persistence/relation"
 	httpaccount "pulsefeed/internal/interfaces/http/account"
 	httpclip "pulsefeed/internal/interfaces/http/clip"
 	httpfeed "pulsefeed/internal/interfaces/http/feed"
+	httpimpression "pulsefeed/internal/interfaces/http/impression"
 	httpaction "pulsefeed/internal/interfaces/http/interaction"
 	"pulsefeed/internal/interfaces/http/middleware"
 	httprelation "pulsefeed/internal/interfaces/http/relation"
@@ -117,6 +120,16 @@ func Register(engine *gin.Engine, cfg *config.Config, db *sql.DB) error {
 	actionService := appaction.New(actionRepo, actionOpts...)
 	actionHandler := httpaction.New(actionService)
 
+	// 曝光链路：播放事件幂等落库 + 当日曝光聚合；MQ 可用时投递 play.recorded 供 Worker 补偿。
+	impressionRepo := infraimpression.New(gormDB)
+	impressionOpts := make([]appimpression.Option, 0, 1)
+	if mqClient != nil {
+		impressionOpts = append(impressionOpts, appimpression.WithPublisher(mqClient))
+		log.Printf("播放事件异步链路已启用 (queue=%s)", cfg.RabbitMQ.PlayEventRecordedQueue)
+	}
+	impressionService := appimpression.New(impressionRepo, impressionOpts...)
+	impressionHandler := httpimpression.New(impressionService)
+
 	jwtAuth := middleware.NewJWTAuth(issuer)
 	optionalAuth := middleware.NewOptionalJWTAuth(issuer)
 
@@ -147,6 +160,8 @@ func Register(engine *gin.Engine, cfg *config.Config, db *sql.DB) error {
 	authed.DELETE("/clips/:clipId/save", actionHandler.Unsave)
 	authed.POST("/clips/:clipId/comments", actionHandler.CreateComment)
 	authed.DELETE("/comments/:commentId", actionHandler.DeleteComment)
+	// 播放事件上报：登录用户上报一次播放行为，幂等落库并聚合当日曝光。
+	authed.POST("/clip-play-events", impressionHandler.RecordPlayEvent)
 	// 关注关系端点：关注/取关与关注/粉丝列表，均要求登录。
 	authed.PUT("/users/me/following/:targetUserId", relationHandler.Follow)
 	authed.DELETE("/users/me/following/:targetUserId", relationHandler.Unfollow)

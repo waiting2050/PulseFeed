@@ -10,6 +10,7 @@ import (
 	"time"
 
 	appclip "pulsefeed/internal/application/clip"
+	appimpression "pulsefeed/internal/application/impression"
 	appaction "pulsefeed/internal/application/interaction"
 	"pulsefeed/internal/infra/config"
 
@@ -134,9 +135,9 @@ func (c *Client) PublishActionChanged(ctx context.Context, event appaction.Actio
 	return c.publish(ctx, c.cfg.InteractionExchange, c.cfg.ActionChangedRouting, event)
 }
 
-// PublishPlayRecorded 投递 impression.play_recorded 事件；载荷由 S13 的播放事件用例定义。
-func (c *Client) PublishPlayRecorded(ctx context.Context, payload any) error {
-	return c.publish(ctx, c.cfg.ImpressionExchange, c.cfg.PlayEventRecordedRouting, payload)
+// PublishPlayRecorded 投递 impression.play_recorded 事件，由 PlayEventWorker 消费做曝光补偿。
+func (c *Client) PublishPlayRecorded(ctx context.Context, event appimpression.PlayRecorded) error {
+	return c.publish(ctx, c.cfg.ImpressionExchange, c.cfg.PlayEventRecordedRouting, event)
 }
 
 // publish 将载荷序列化为 JSON 并以持久化消息投递；调用方需保证事件已落库或可重放。

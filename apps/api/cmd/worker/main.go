@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	appclip "pulsefeed/internal/application/clip"
+	appimpression "pulsefeed/internal/application/impression"
 	appaction "pulsefeed/internal/application/interaction"
 	infracache "pulsefeed/internal/infra/cache"
 	"pulsefeed/internal/infra/config"
@@ -17,6 +18,7 @@ import (
 	inframetrics "pulsefeed/internal/infra/metrics"
 	inframq "pulsefeed/internal/infra/mq"
 	infrafeed "pulsefeed/internal/infra/persistence/feed"
+	infraimpression "pulsefeed/internal/infra/persistence/impression"
 	infraaction "pulsefeed/internal/infra/persistence/interaction"
 	"pulsefeed/internal/infra/persistence/migration"
 
@@ -66,6 +68,9 @@ func main() {
 
 	actionWorker := appaction.NewActionWorker(infraaction.New(gormDB))
 
+	// 播放事件消费链路：对 API 同步链路未完成曝光聚合的事件做二次 upsert 补偿（D7 修正）。
+	playEventWorker := appimpression.NewPlayEventWorker(infraimpression.New(gormDB))
+
 	// 发布扇出链路：复用与 API 相同的 Redis 缓存实现，把新 clip 推入粉丝 inbox 或大 V outbox。
 	redisClient := infracache.New(cfg.Redis)
 	feedCache := infracache.NewFeedCache(redisClient)
@@ -80,15 +85,19 @@ func main() {
 		}
 	}()
 
-	// 两个消费者各自持有独立 AMQP 通道并发消费；任一异常退出即终止进程。
+	// 三个消费者各自持有独立 AMQP 通道并发消费；任一异常退出即终止进程。
 	log.Printf("worker 已启动: %s (queue=%s)", actionWorker.Name(), cfg.RabbitMQ.ActionChangedQueue)
 	log.Printf("worker 已启动: %s (queue=%s)", fanoutWorker.Name(), cfg.RabbitMQ.ClipPublishedQueue)
-	errCh := make(chan error, 2)
+	log.Printf("worker 已启动: %s (queue=%s)", playEventWorker.Name(), cfg.RabbitMQ.PlayEventRecordedQueue)
+	errCh := make(chan error, 3)
 	go func() {
 		errCh <- mqClient.Consume(ctx, cfg.RabbitMQ.ActionChangedQueue, actionWorker.Handle)
 	}()
 	go func() {
 		errCh <- mqClient.Consume(ctx, cfg.RabbitMQ.ClipPublishedQueue, fanoutWorker.Handle)
+	}()
+	go func() {
+		errCh <- mqClient.Consume(ctx, cfg.RabbitMQ.PlayEventRecordedQueue, playEventWorker.Handle)
 	}()
 	if err := <-errCh; err != nil {
 		log.Fatalf("Worker 消费异常退出: %v", err)
