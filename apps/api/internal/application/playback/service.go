@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 
+	appobservability "pulsefeed/internal/application/observability"
 	domplayback "pulsefeed/internal/domain/playback"
 )
 
@@ -23,13 +24,28 @@ func (f ClipProviderFunc) ListLatestIDs(ctx context.Context, limit int) ([]int64
 
 // Service 提供 playback 应用用例。
 type Service struct {
-	repo  domplayback.Repository
-	clips ClipProvider
+	repo    domplayback.Repository
+	clips   ClipProvider
+	metrics appobservability.Metrics
+}
+
+// Option 是 playback 服务的可选装配项。
+type Option func(*Service)
+
+// WithMetrics 注入可观测性端口；nil 表示不采集指标。
+func WithMetrics(metrics appobservability.Metrics) Option {
+	return func(s *Service) {
+		s.metrics = metrics
+	}
 }
 
 // New 创建 playback 应用服务。repo 由组合根注入，clips 可为 nil 但 GetPreload 会返回空列表。
-func New(repo domplayback.Repository, clips ClipProvider) *Service {
-	return &Service{repo: repo, clips: clips}
+func New(repo domplayback.Repository, clips ClipProvider, opts ...Option) *Service {
+	s := &Service{repo: repo, clips: clips}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // GetConfig 按用户 ID 读取播放配置；未命中返回归一化后的默认值。
@@ -88,5 +104,16 @@ func (s *Service) ReportQoS(ctx context.Context, reporterID int64, report *dompl
 	if err := report.Validate(); err != nil {
 		return false, err
 	}
-	return s.repo.CreateQoS(ctx, report)
+	inserted, err = s.repo.CreateQoS(ctx, report)
+	if s.metrics != nil {
+		result := "duplicate"
+		switch {
+		case err != nil:
+			result = "error"
+		case inserted:
+			result = "inserted"
+		}
+		s.metrics.ObserveQoS(result, report.LatencyMS, report.StallCount, report.Completed)
+	}
+	return inserted, err
 }

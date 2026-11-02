@@ -10,7 +10,8 @@ type Repository interface {
 	// UpsertConfig 写入或更新用户播放配置；返回最终落库值。
 	UpsertConfig(ctx context.Context, cfg *Config) (*Config, error)
 	// CreateQoS 插入一条 QoS 上报；唯一索引 uk_event_id 已存在时静默忽略（幂等）。
-	// inserted=true 表示本次真正写入了新行。
+	// inserted=true 表示本次真正写入了新行，并在同一事务内按「播放开始」口径
+	// 累加 pf_clip_stats.play_count（同 event_id 已在播放事件表出现时跳过）。
 	CreateQoS(ctx context.Context, report *QoSReport) (inserted bool, err error)
 }
 

@@ -1,4 +1,5 @@
-// gorm.go 实现 playback 领域仓储端口：配置 upsert 与 QoS 幂等插入。
+// gorm.go 实现 playback 领域仓储端口：配置 upsert、QoS 幂等插入，
+// 并在 QoS 首次落库时按「播放开始」口径累加 pf_clip_stats.play_count。
 package infraplayback
 
 import (
@@ -64,7 +65,8 @@ func (r *Repository) UpsertConfig(ctx context.Context, cfg *domplayback.Config) 
 	return cfg, nil
 }
 
-// CreateQoS 走 ON CONFLICT DO NOTHING 幂等插入；inserted=true 仅当新行落库。
+// CreateQoS 走 ON CONFLICT DO NOTHING 幂等插入；inserted=true 仅当新行落库，
+// 新行在同一事务内累加播放计数，重复上报不会重复累加。
 func (r *Repository) CreateQoS(ctx context.Context, report *domplayback.QoSReport) (bool, error) {
 	if report == nil {
 		return false, domplayback.ErrInvalidReportTarget
@@ -81,9 +83,37 @@ func (r *Repository) CreateQoS(ctx context.Context, report *domplayback.QoSRepor
 		Completed:  report.Completed,
 		ClientInfo: report.ClientInfo,
 	}
-	res := r.db.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).Create(&row)
-	if res.Error != nil {
-		return false, res.Error
+	inserted := false
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		res := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&row)
+		if res.Error != nil {
+			return res.Error
+		}
+		inserted = res.RowsAffected == 1
+		if !inserted {
+			return nil
+		}
+		return incrementPlayCount(tx, report.EventID, report.ClipID)
+	})
+	if err != nil {
+		return false, err
 	}
-	return res.RowsAffected == 1, nil
+	return inserted, nil
+}
+
+// incrementPlayCount 按「播放开始」口径累加 pf_clip_stats.play_count：
+// 同一 event_id 已在播放事件表出现时视为同一次播放的重复信号，不再二次计数。
+func incrementPlayCount(tx *gorm.DB, eventID string, clipID int64) error {
+	var playRows int64
+	if err := tx.Table("pf_play_events").
+		Where("event_id = ? AND clip_id = ?", eventID, clipID).
+		Count(&playRows).Error; err != nil {
+		return err
+	}
+	if playRows > 0 {
+		return nil
+	}
+	return tx.Table("pf_clip_stats").
+		Where("clip_id = ?", clipID).
+		UpdateColumn("play_count", gorm.Expr("play_count + 1")).Error
 }

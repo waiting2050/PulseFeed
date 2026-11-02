@@ -1,5 +1,6 @@
 // gorm.go 实现曝光领域仓储端口：播放事件按 event_id 幂等写入，
-// 首次写入时同步 upsert 当日曝光聚合；Worker 可二次调用 UpsertImpression 做补偿。
+// 首次写入时同步 upsert 当日曝光聚合并累加 pf_clip_stats.play_count；
+// Worker 可二次调用 UpsertImpression 做补偿。
 package infraimpression
 
 import (
@@ -58,8 +59,11 @@ func (r *Repository) RecordPlayEvent(ctx context.Context, event *domimpression.P
 			return nil
 		}
 
-		// 新事件：同步 upsert 当日曝光聚合。
+		// 新事件：同步 upsert 当日曝光聚合，并按「播放开始」口径累加 clip 播放计数。
 		if err := upsertImpression(tx, event); err != nil {
+			return err
+		}
+		if err := incrementPlayCount(tx, event.EventID, event.ClipID); err != nil {
 			return err
 		}
 		isNew = true
@@ -98,6 +102,24 @@ func upsertImpression(tx *gorm.DB, event *domimpression.PlayEvent) error {
 			last_played_at = GREATEST(last_played_at, ?)
 	`, event.ViewerID, event.ClipID, day, completedDelta, event.CreatedAt, event.CreatedAt,
 		completedDelta, event.CreatedAt).Error
+}
+
+// incrementPlayCount 按「播放开始」口径累加 pf_clip_stats.play_count：
+// 同一 event_id 已在 QoS 上报表出现时视为同一次播放的重复信号，不再二次计数；
+// 计数行随 clip 发布创建，UPDATE 影响 0 行说明 clip 未登记统计，按无副作用处理。
+func incrementPlayCount(tx *gorm.DB, eventID string, clipID int64) error {
+	var qosRows int64
+	if err := tx.Table("pf_playback_qos_reports").
+		Where("event_id = ? AND clip_id = ?", eventID, clipID).
+		Count(&qosRows).Error; err != nil {
+		return err
+	}
+	if qosRows > 0 {
+		return nil
+	}
+	return tx.Table("pf_clip_stats").
+		Where("clip_id = ?", clipID).
+		UpdateColumn("play_count", gorm.Expr("play_count + 1")).Error
 }
 
 // MarkEventSynced 把播放事件标记为已完成曝光聚合。

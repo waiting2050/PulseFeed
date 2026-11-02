@@ -6,9 +6,9 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"fmt"
-	"log"
-	"sync/atomic"
+	"time"
 
+	appobservability "pulsefeed/internal/application/observability"
 	domfeed "pulsefeed/internal/domain/feed"
 
 	"golang.org/x/sync/singleflight"
@@ -120,15 +120,18 @@ func WithHotStrategy(cache HotCache) Option {
 	}
 }
 
+// WithMetrics 注入可观测性端口，记录 Feed 场景结果与页缓存命中情况。
+func WithMetrics(metrics appobservability.Metrics) Option {
+	return func(s *Service) { s.metrics = metrics }
+}
+
 // Service 提供 Feed 读取用例。
 type Service struct {
 	repo       domfeed.Repository
 	strategies map[domfeed.Scene]Strategy
 	cache      FeedCache
 	group      singleflight.Group
-	// 缓存命中/未命中计数，先打日志，S17 统一换指标。
-	cacheHits   atomic.Int64
-	cacheMisses atomic.Int64
+	metrics    appobservability.Metrics
 }
 
 // New 创建 feed 应用服务，默认注册 latest 策略；其余场景策略随后续阶段接入。
@@ -144,8 +147,22 @@ func New(repo domfeed.Repository, opts ...Option) *Service {
 	return s
 }
 
-// GetFeed 按场景分发读取一页 Feed：解析场景与游标、校验页大小、判定 has_more 并组装条目。
+// GetFeed 记录场景结果与耗时后调用 getFeed。
 func (s *Service) GetFeed(ctx context.Context, req *FeedRequest) (*FeedResult, error) {
+	start := time.Now()
+	result, err := s.getFeed(ctx, req)
+	if s.metrics != nil {
+		outcome := "ok"
+		if err != nil {
+			outcome = "error"
+		}
+		s.metrics.ObserveFeed(req.Scene, outcome, time.Since(start))
+	}
+	return result, err
+}
+
+// getFeed 按场景分发读取一页 Feed：解析场景与游标、校验页大小、判定 has_more 并组装条目。
+func (s *Service) getFeed(ctx context.Context, req *FeedRequest) (*FeedResult, error) {
 	scene, err := domfeed.ParseScene(req.Scene)
 	if err != nil {
 		return nil, err
@@ -189,18 +206,17 @@ func (s *Service) GetFeed(ctx context.Context, req *FeedRequest) (*FeedResult, e
 // 仓储读出后回填缓存；缓存未启用/不可用或场景声明不缓存（following）时降级为纯仓储读取。
 func (s *Service) loadFeedPage(ctx context.Context, strategy Strategy, req *FeedRequest, cursor *domfeed.Cursor, count int) (*Page, error) {
 	if s.cache == nil || !s.cache.Enabled() || !strategy.Cacheable() {
+		s.observeCache("disabled")
 		return strategy.Load(ctx, req, cursor, count)
 	}
 
 	// count 比页大小多 1，key 还原为页大小以符合 C5 的 limit 语义。
 	digest := pageDigest(strategy.Scene(), req.ViewerID, req.Cursor, count-1)
 	if entries, ok := s.cache.GetPage(ctx, digest); ok {
-		hits := s.cacheHits.Add(1)
-		log.Printf("feed page cache=hit key=%s hits=%d misses=%d", digest, hits, s.cacheMisses.Load())
+		s.observeCache("hit")
 		return &Page{Entries: entries}, nil
 	}
-	misses := s.cacheMisses.Add(1)
-	log.Printf("feed page cache=miss key=%s hits=%d misses=%d", digest, s.cacheHits.Load(), misses)
+	s.observeCache("miss")
 
 	value, err, _ := s.group.Do(digest, func() (any, error) {
 		// 单飞窗口内二次读缓存：等待期间可能已有并发请求回填。
@@ -218,6 +234,13 @@ func (s *Service) loadFeedPage(ctx context.Context, strategy Strategy, req *Feed
 		return nil, err
 	}
 	return value.(*Page), nil
+}
+
+// observeCache 记录一次页缓存访问结果；未注入指标时静默跳过。
+func (s *Service) observeCache(result string) {
+	if s.metrics != nil {
+		s.metrics.ObserveCache(result)
+	}
 }
 
 // pageDigest 按 C5 约定计算页缓存键摘要：sha1(scene|viewer|cursor|limit) 取前 16 位 hex。

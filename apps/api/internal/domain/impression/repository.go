@@ -6,7 +6,8 @@ import "context"
 // Repository 描述播放事件落库与曝光聚合的持久化能力，由 infra 层实现。
 type Repository interface {
 	// RecordPlayEvent 幂等写入一条播放事件：同 EventID 已存在时为 no-op；
-	// 仅首次写入时同步把曝光计数 upsert 到 pf_impressions，返回是否为新事件。
+	// 仅首次写入时同步把曝光计数 upsert 到 pf_impressions，并按「播放开始」口径
+	// 累加 pf_clip_stats.play_count（同 event_id 已在 QoS 表出现时跳过），返回是否为新事件。
 	// clip 不存在或非发布态返回 ErrClipNotFound。
 	RecordPlayEvent(ctx context.Context, event *PlayEvent) (isNew bool, err error)
 	// UpsertImpression 把一条播放事件的贡献累加进 (viewer_id, clip_id, day) 聚合行，

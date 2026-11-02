@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"time"
 
 	appaccount "pulsefeed/internal/application/account"
 	appclip "pulsefeed/internal/application/clip"
@@ -21,6 +22,7 @@ import (
 	infracache "pulsefeed/internal/infra/cache"
 	"pulsefeed/internal/infra/config"
 	infrajwt "pulsefeed/internal/infra/jwt"
+	inframetrics "pulsefeed/internal/infra/metrics"
 	inframq "pulsefeed/internal/infra/mq"
 	infraaccount "pulsefeed/internal/infra/persistence/account"
 	infraclip "pulsefeed/internal/infra/persistence/clip"
@@ -46,8 +48,6 @@ import (
 	httpupload "pulsefeed/internal/interfaces/http/upload"
 
 	"github.com/gin-gonic/gin"
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	gormmysql "gorm.io/driver/mysql"
 	"gorm.io/gorm"
 )
@@ -64,6 +64,11 @@ func Register(engine *gin.Engine, cfg *config.Config, db *sql.DB) error {
 		return fmt.Errorf("数据库迁移失败: %w", err)
 	}
 	log.Printf("migrate done (models=%d)", len(migration.Models()))
+
+	// 可观测性：API 进程独立指标注册表，HTTP 中间件与应用服务共用同一实例。
+	// 中间件必须在路由注册前启用，Gin 的 Use 不会回溯作用于已注册路由。
+	apiMetrics := inframetrics.New("api")
+	engine.Use(observeHTTP(apiMetrics))
 
 	// 认证链路：JWT 签发器 → 仓储 → 应用服务 → 处理器 → 路由。
 	issuer, err := infrajwt.New(cfg.JWT.Secret, cfg.JWT.AccessTTL)
@@ -115,6 +120,7 @@ func Register(engine *gin.Engine, cfg *config.Config, db *sql.DB) error {
 		appfeed.WithFollowingStrategy(feedCache),
 		appfeed.WithForYouStrategy(recommendationService),
 		appfeed.WithHotStrategy(feedCache),
+		appfeed.WithMetrics(apiMetrics),
 	)
 	feedHandler := httpfeed.New(feedService)
 	recommendationHandler := httprecommendation.New(recommendationService)
@@ -131,7 +137,7 @@ func Register(engine *gin.Engine, cfg *config.Config, db *sql.DB) error {
 		func(ctx context.Context, limit int) ([]int64, error) {
 			return feedRepo.ListLatestClipIDs(ctx, limit)
 		},
-	))
+	), appplayback.WithMetrics(apiMetrics))
 	playbackHandler := httpplayback.New(playbackService)
 
 	// relation 链路：关注/取关与列表；关注状态迁移时经 feed 回填器同步回填读者 inbox、
@@ -226,24 +232,8 @@ func Register(engine *gin.Engine, cfg *config.Config, db *sql.DB) error {
 	// 上传产物静态回读：GET/HEAD /uploads/<kind>/<filename>。
 	engine.Static("/uploads", "./uploads")
 
-	registry := prometheus.NewRegistry()
-
-	requests := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "pulsefeed_http_requests_total",
-		Help: "HTTP 请求总数，按请求方法与状态码区分。",
-	}, []string{"method", "status"})
-
-	serviceUp := prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "pulsefeed_service_up",
-		Help: "服务运行状态，1 表示可用。",
-	})
-	serviceUp.Set(1)
-
-	registry.MustRegister(requests, serviceUp)
-
-	engine.Use(countRequests(requests))
 	engine.GET("/health", health)
-	engine.GET("/metrics", gin.WrapH(promhttp.HandlerFor(registry, promhttp.HandlerOpts{})))
+	engine.GET("/metrics", gin.WrapH(apiMetrics.Handler()))
 	return nil
 }
 
@@ -258,11 +248,11 @@ func health(c *gin.Context) {
 	})
 }
 
-// countRequests 统计每个请求的方法与响应状态码。
-func countRequests(counter *prometheus.CounterVec) gin.HandlerFunc {
+// observeHTTP 记录每个请求的方法、状态码与耗时。
+func observeHTTP(metrics *inframetrics.Metrics) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		start := time.Now()
 		c.Next()
-
-		counter.WithLabelValues(c.Request.Method, strconv.Itoa(c.Writer.Status())).Inc()
+		metrics.ObserveHTTP(c.Request.Method, strconv.Itoa(c.Writer.Status()), time.Since(start))
 	}
 }

@@ -28,11 +28,9 @@ import (
 	"gorm.io/gorm"
 )
 
-// workerMetricsAddr 是 Worker 独立指标端口，与 API 的 8090 分离。
-const workerMetricsAddr = ":9092"
-
 func main() {
 	configPath := flag.String("config", "configs/config.yaml", "配置文件路径")
+	metricsAddr := flag.String("metrics-addr", ":9092", "Worker 独立指标监听地址，9092 被系统保留时可改用 :9093")
 	flag.Parse()
 
 	cfg, err := config.Load(*configPath)
@@ -84,8 +82,10 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// 指标注册表与 API 进程隔离；监听地址可由 -metrics-addr 覆盖（Windows 端口保留段场景）。
+	workerMetrics := inframetrics.New("worker")
 	go func() {
-		if err := inframetrics.RunServer(workerMetricsAddr); err != nil {
+		if err := inframetrics.RunServer(*metricsAddr, workerMetrics.Registry()); err != nil {
 			log.Printf("Worker metrics 端口异常退出: %v", err)
 		}
 	}()
@@ -97,20 +97,37 @@ func main() {
 	log.Printf("worker 已启动: %s (queue=%s)", playEventWorker.Name(), cfg.RabbitMQ.PlayEventRecordedQueue)
 	errCh := make(chan error, 4)
 	go func() {
-		errCh <- mqClient.Consume(ctx, cfg.RabbitMQ.ActionChangedQueue, actionWorker.Handle)
+		errCh <- mqClient.Consume(ctx, cfg.RabbitMQ.ActionChangedQueue,
+			observeWorker(workerMetrics, actionWorker.Name(), actionWorker.Handle))
 	}()
 	go func() {
-		errCh <- mqClient.Consume(ctx, cfg.RabbitMQ.ClipPublishedQueue, fanoutWorker.Handle)
+		errCh <- mqClient.Consume(ctx, cfg.RabbitMQ.ClipPublishedQueue,
+			observeWorker(workerMetrics, fanoutWorker.Name(), fanoutWorker.Handle))
 	}()
 	go func() {
-		errCh <- mqClient.Consume(ctx, cfg.RabbitMQ.ClipEmbeddingQueue, embeddingWorker.Handle)
+		errCh <- mqClient.Consume(ctx, cfg.RabbitMQ.ClipEmbeddingQueue,
+			observeWorker(workerMetrics, embeddingWorker.Name(), embeddingWorker.Handle))
 	}()
 	go func() {
-		errCh <- mqClient.Consume(ctx, cfg.RabbitMQ.PlayEventRecordedQueue, playEventWorker.Handle)
+		errCh <- mqClient.Consume(ctx, cfg.RabbitMQ.PlayEventRecordedQueue,
+			observeWorker(workerMetrics, playEventWorker.Name(), playEventWorker.Handle))
 	}()
 	if err := <-errCh; err != nil {
 		log.Fatalf("Worker 消费异常退出: %v", err)
 	}
 
-	log.Printf("worker 收到退出信号，已停止消费（metrics 端口 %s）", workerMetricsAddr)
+	log.Printf("worker 收到退出信号，已停止消费（metrics 端口 %s）", *metricsAddr)
+}
+
+// observeWorker 包装消息处理器，按 Worker 名称记录 ok/error 计数。
+func observeWorker(metrics *inframetrics.Metrics, name string, handler func(context.Context, []byte) error) func(context.Context, []byte) error {
+	return func(ctx context.Context, body []byte) error {
+		err := handler(ctx, body)
+		result := "ok"
+		if err != nil {
+			result = "error"
+		}
+		metrics.ObserveWorker(name, result)
+		return err
+	}
 }
