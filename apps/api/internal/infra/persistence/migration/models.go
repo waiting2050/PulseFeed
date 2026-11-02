@@ -4,7 +4,11 @@ package migration
 import (
 	infraaccount "pulsefeed/internal/infra/persistence/account"
 	infraclip "pulsefeed/internal/infra/persistence/clip"
+	infraembedding "pulsefeed/internal/infra/persistence/embedding"
+	infraimpression "pulsefeed/internal/infra/persistence/impression"
 	infraaction "pulsefeed/internal/infra/persistence/interaction"
+	inframessage "pulsefeed/internal/infra/persistence/message"
+	infraplayback "pulsefeed/internal/infra/persistence/playback"
 	infrarelation "pulsefeed/internal/infra/persistence/relation"
 )
 
@@ -19,5 +23,12 @@ func Models() []any {
 		&infraaction.CommentModel{},
 		&infrarelation.FollowModel{},
 		&infrarelation.UserStatsModel{},
+		&infraimpression.PlayEventModel{},
+		&infraimpression.ImpressionModel{},
+		&infraembedding.ClipEmbeddingModel{},
+		// S16 新增：消息、播放配置与 QoS 两张表。
+		&inframessage.MessageModel{},
+		&infraplayback.ConfigModel{},
+		&infraplayback.QoSReportModel{},
 	}
 }

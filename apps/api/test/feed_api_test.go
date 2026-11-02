@@ -85,6 +85,11 @@ func (f *fakeFeedRepository) ListFollowingPage(_ context.Context, _ int64, _ *do
 	return nil, nil
 }
 
+// ListHotPage 返回空集，fake 简化实现（测试不涉及 hot 场景）。
+func (f *fakeFeedRepository) ListHotPage(_ context.Context, _ *domfeed.Cursor, _ int) ([]*domfeed.FeedEntry, error) {
+	return nil, nil
+}
+
 // ListFollowedCreators 返回空集，fake 简化实现（测试不涉及大 V 判定）。
 func (f *fakeFeedRepository) ListFollowedCreators(_ context.Context, _ int64) ([]*domfeed.FollowedCreator, error) {
 	return nil, nil
@@ -102,6 +107,11 @@ func (f *fakeFeedRepository) ListFollowerIDs(_ context.Context, _ int64) ([]int6
 
 // ListCreatorRecentClips 返回空集，fake 简化实现（测试不涉及关注回填）。
 func (f *fakeFeedRepository) ListCreatorRecentClips(_ context.Context, _ int64, _ int) ([]*domfeed.FeedEntry, error) {
+	return nil, nil
+}
+
+// ListLatestClipIDs 返回空集，fake 简化实现（测试不涉及 playback 预加载）。
+func (f *fakeFeedRepository) ListLatestClipIDs(_ context.Context, _ int) ([]int64, error) {
 	return nil, nil
 }
 

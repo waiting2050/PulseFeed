@@ -29,6 +29,15 @@ type FeedResult struct {
 	HasMore    bool
 }
 
+// Page 是一页策略读取结果。
+// NextCursor 非空表示策略自行决定下一页游标（for-you 需携带 snapshot_at 与排序分数）；
+// 为空时由 GetFeed 按 (published_at, clip_id) 兜底生成。
+type Page struct {
+	Entries    []*domfeed.FeedEntry
+	NextCursor string
+	HasMore    bool
+}
+
 // Strategy 描述一个 Feed 场景的取数策略，由 GetFeed 按场景分发。
 type Strategy interface {
 	// Scene 返回策略对应的场景标识。
@@ -36,7 +45,7 @@ type Strategy interface {
 	// Cacheable 报告该场景是否使用页缓存；following 等实时性场景返回 false 绕过页缓存。
 	Cacheable() bool
 	// Load 按游标读取一页条目（含多取的一条），count 已含 +1。
-	Load(ctx context.Context, req *FeedRequest, cursor *domfeed.Cursor, count int) ([]*domfeed.FeedEntry, error)
+	Load(ctx context.Context, req *FeedRequest, cursor *domfeed.Cursor, count int) (*Page, error)
 }
 
 // LatestStrategy 是 latest 场景策略：纯数据库按 (published_at, id) 递减分页。
@@ -60,8 +69,12 @@ func (s *LatestStrategy) Cacheable() bool {
 }
 
 // Load 走仓储按复合游标读取一页。
-func (s *LatestStrategy) Load(ctx context.Context, _ *FeedRequest, cursor *domfeed.Cursor, count int) ([]*domfeed.FeedEntry, error) {
-	return s.repo.ListLatestPage(ctx, cursor, count)
+func (s *LatestStrategy) Load(ctx context.Context, _ *FeedRequest, cursor *domfeed.Cursor, count int) (*Page, error) {
+	entries, err := s.repo.ListLatestPage(ctx, cursor, count)
+	if err != nil {
+		return nil, err
+	}
+	return &Page{Entries: entries}, nil
 }
 
 // FeedCache 描述 Feed 页缓存能力，由 infra/cache 实现；未注入或不可用时降级为纯 DB。
@@ -87,6 +100,22 @@ func WithFeedCache(c FeedCache) Option {
 func WithFollowingStrategy(cache FollowingCache) Option {
 	return func(s *Service) {
 		strategy := NewFollowingStrategy(s.repo, cache)
+		s.strategies[strategy.Scene()] = strategy
+	}
+}
+
+// WithForYouStrategy 注册 for-you 场景策略；推荐服务由组合根注入，策略负责卡片水合。
+func WithForYouStrategy(recommender Recommender) Option {
+	return func(s *Service) {
+		strategy := NewForYouStrategy(s.repo, recommender)
+		s.strategies[strategy.Scene()] = strategy
+	}
+}
+
+// WithHotStrategy 注册 hot 场景策略；缓存不可用/窗口为空时策略内部回源 DB。
+func WithHotStrategy(cache HotCache) Option {
+	return func(s *Service) {
+		strategy := NewHotStrategy(s.repo, cache)
 		s.strategies[strategy.Scene()] = strategy
 	}
 }
@@ -135,17 +164,19 @@ func (s *Service) GetFeed(ctx context.Context, req *FeedRequest) (*FeedResult, e
 
 	strategy := s.strategies[scene]
 	// 多取一条用于判定是否还有下一页，返回前截断。
-	entries, err := s.loadFeedPage(ctx, strategy, req, cursor, limit+1)
+	page, err := s.loadFeedPage(ctx, strategy, req, cursor, limit+1)
 	if err != nil {
 		return nil, err
 	}
 
-	result := &FeedResult{Items: entries}
-	if len(entries) > limit {
+	result := &FeedResult{Items: page.Entries, NextCursor: page.NextCursor, HasMore: page.HasMore}
+	if len(result.Items) > limit {
 		result.HasMore = true
-		result.Items = entries[:limit]
-		last := result.Items[len(result.Items)-1]
-		result.NextCursor = domfeed.EncodeCursor(&domfeed.Cursor{PublishedAt: last.PublishedAt, ClipID: last.ClipID})
+		result.Items = result.Items[:limit]
+		if result.NextCursor == "" {
+			last := result.Items[len(result.Items)-1]
+			result.NextCursor = domfeed.EncodeCursor(&domfeed.Cursor{PublishedAt: last.PublishedAt, ClipID: last.ClipID})
+		}
 	}
 
 	if err := s.assembleFeedEntries(ctx, req.ViewerID, result.Items); err != nil {
@@ -156,7 +187,7 @@ func (s *Service) GetFeed(ctx context.Context, req *FeedRequest) (*FeedResult, e
 
 // loadFeedPage 读取一页条目：可缓存场景缓存命中直接返回，未命中经 singleflight 合并并发回源，
 // 仓储读出后回填缓存；缓存未启用/不可用或场景声明不缓存（following）时降级为纯仓储读取。
-func (s *Service) loadFeedPage(ctx context.Context, strategy Strategy, req *FeedRequest, cursor *domfeed.Cursor, count int) ([]*domfeed.FeedEntry, error) {
+func (s *Service) loadFeedPage(ctx context.Context, strategy Strategy, req *FeedRequest, cursor *domfeed.Cursor, count int) (*Page, error) {
 	if s.cache == nil || !s.cache.Enabled() || !strategy.Cacheable() {
 		return strategy.Load(ctx, req, cursor, count)
 	}
@@ -166,7 +197,7 @@ func (s *Service) loadFeedPage(ctx context.Context, strategy Strategy, req *Feed
 	if entries, ok := s.cache.GetPage(ctx, digest); ok {
 		hits := s.cacheHits.Add(1)
 		log.Printf("feed page cache=hit key=%s hits=%d misses=%d", digest, hits, s.cacheMisses.Load())
-		return entries, nil
+		return &Page{Entries: entries}, nil
 	}
 	misses := s.cacheMisses.Add(1)
 	log.Printf("feed page cache=miss key=%s hits=%d misses=%d", digest, s.cacheHits.Load(), misses)
@@ -174,19 +205,19 @@ func (s *Service) loadFeedPage(ctx context.Context, strategy Strategy, req *Feed
 	value, err, _ := s.group.Do(digest, func() (any, error) {
 		// 单飞窗口内二次读缓存：等待期间可能已有并发请求回填。
 		if entries, ok := s.cache.GetPage(ctx, digest); ok {
-			return entries, nil
+			return &Page{Entries: entries}, nil
 		}
-		entries, err := strategy.Load(ctx, req, cursor, count)
+		page, err := strategy.Load(ctx, req, cursor, count)
 		if err != nil {
 			return nil, err
 		}
-		s.cache.SetPage(ctx, digest, entries, cursor == nil)
-		return entries, nil
+		s.cache.SetPage(ctx, digest, page.Entries, cursor == nil)
+		return page, nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	return value.([]*domfeed.FeedEntry), nil
+	return value.(*Page), nil
 }
 
 // pageDigest 按 C5 约定计算页缓存键摘要：sha1(scene|viewer|cursor|limit) 取前 16 位 hex。

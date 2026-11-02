@@ -1,0 +1,22 @@
+// repository.go 定义 playback 领域的仓储端口，应用层只依赖该接口。
+package domplayback
+
+import "context"
+
+// Repository 描述播放配置与 QoS 上报的持久化能力。
+type Repository interface {
+	// GetOrCreateConfig 按用户 ID 读取播放配置；未命中时返回默认配置（不落库）。
+	GetOrCreateConfig(ctx context.Context, userID int64) (*Config, error)
+	// UpsertConfig 写入或更新用户播放配置；返回最终落库值。
+	UpsertConfig(ctx context.Context, cfg *Config) (*Config, error)
+	// CreateQoS 插入一条 QoS 上报；唯一索引 uk_event_id 已存在时静默忽略（幂等）。
+	// inserted=true 表示本次真正写入了新行。
+	CreateQoS(ctx context.Context, report *QoSReport) (inserted bool, err error)
+}
+
+// ClipReader 描述应用层从 feed 域取预加载 clip ID 列表的端口；
+// 放在 playback 域接口中避免 playback 反向依赖 feed 仓储。
+type ClipReader interface {
+	// ListLatestIDs 按 (published_at, id) 递减返回上限 limit 条 clip_id，供预加载。
+	ListLatestIDs(ctx context.Context, limit int) ([]int64, error)
+}

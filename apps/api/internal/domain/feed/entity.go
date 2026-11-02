@@ -15,7 +15,7 @@ const (
 	DefaultFeedLimit = 20
 )
 
-// Scene 是 Feed 场景标识；S7 支持 latest，S11 接入 following，其余场景在后续阶段接入。
+// Scene 是 Feed 场景标识；S7 支持 latest，S11 接入 following，S14 接入 for-you，S15 接入 hot。
 type Scene string
 
 const (
@@ -23,6 +23,10 @@ const (
 	SceneLatest Scene = "latest"
 	// SceneFollowing 仅含当前读者关注创作者的 Feed（inbox + 大 V outbox 合并，S11 接入）。
 	SceneFollowing Scene = "following"
+	// SceneForYou 按推荐分数排序的个性化 Feed（S14 接入，要求登录）。
+	SceneForYou Scene = "for-you"
+	// SceneHot 按热度分（互动权重 / 时间衰减）排序的热榜（S15 接入）。
+	SceneHot Scene = "hot"
 )
 
 // ParseScene 解析场景字符串；不支持的场景返回 ErrUnsupportedScene。
@@ -32,10 +36,23 @@ func ParseScene(s string) (Scene, error) {
 		return SceneLatest, nil
 	case SceneFollowing:
 		return SceneFollowing, nil
+	case SceneForYou:
+		return SceneForYou, nil
+	case SceneHot:
+		return SceneHot, nil
 	default:
 		return "", ErrUnsupportedScene
 	}
 }
+
+// 热度权重与 ScoreHot 公式、Redis 分钟桶增量共用同一组常量，避免两套权重漂移：
+// 点赞 3、收藏 4、评论 5、播放 1；HotWeight 为未类型化常量，可直接参与整型与浮点运算。
+const (
+	HotWeightLike    = 3
+	HotWeightSave    = 4
+	HotWeightComment = 5
+	HotWeightPlay    = 1
+)
 
 // EntryStats 是 Feed 条目的互动计数，随 clip 发布创建为 0 值行。
 type EntryStats struct {
@@ -61,6 +78,15 @@ type FeedEntry struct {
 	PublishedAt time.Time
 	Stats       EntryStats
 	Viewer      ViewerState
+	// Score 是 hot 场景的排序分数（Redis 分钟桶累计或 DB 回源计算值）；
+	// 其余场景恒为 0，不参与展示，仅供生成 hot 游标锚点。
+	Score float64
+}
+
+// HotItem 是热度窗口（最近 60 个分钟桶合并）中的一条 clip 及其累计热度增量。
+type HotItem struct {
+	ClipID int64
+	Score  float64
 }
 
 // InboxEntry 是关注流收件箱/发件箱中的轻量条目，仅携带排序与归属字段；
@@ -77,11 +103,17 @@ type FollowedCreator struct {
 	FollowerCount int64
 }
 
-// Cursor 是按 (published_at, clip_id) 复合键严格递减翻页的游标；
-// 推荐场景的 snapshot_at 修正（D6）在 S14 扩展该结构。
+// Cursor 是 Feed 翻页游标：
+// latest/following 使用 (published_at, clip_id) 严格递减；
+// for-you 额外携带排序分数 score 与候选池快照 snapshot_at（D6 修正），保证跨分钟翻页稳定；
+// hot 使用 (score, clip_id) 严格递减，PublishedAt 不参与。
 type Cursor struct {
 	PublishedAt time.Time `json:"p"`
 	ClipID      int64     `json:"c"`
+	// Score 是推荐/热榜场景的排序分数，与 ClipID 组成 (score, clip_id) 严格小于过滤键。
+	Score float64 `json:"s,omitempty"`
+	// SnapshotAt 是推荐场景首屏固定下来的候选池快照时间，仅 for-you 游标携带。
+	SnapshotAt *time.Time `json:"t,omitempty"`
 }
 
 // EncodeCursor 将游标编码为 URL 安全字符串；nil 游标编码为空串。
@@ -113,9 +145,10 @@ func DecodeCursor(s string) (*Cursor, error) {
 }
 
 // ScoreHot 计算 clip 热度分：互动计数按行为加权后，按发布时间的小时年龄做幂衰减。
-// S15 hot 场景按该公式回源排序；权重与衰减指数随 S15 验收固定。
+// S15 hot 场景的 Redis 分钟桶增量与 DB 回源排序共用同一组权重（HotWeight* 常量）。
 func ScoreHot(stats EntryStats, publishedAt, now time.Time) float64 {
-	weight := float64(stats.LikeCount*3 + stats.SaveCount*4 + stats.CommentCount*5 + stats.PlayCount)
+	weight := float64(stats.LikeCount*HotWeightLike + stats.SaveCount*HotWeightSave +
+		stats.CommentCount*HotWeightComment + stats.PlayCount*HotWeightPlay)
 	ageHours := now.Sub(publishedAt).Hours()
 	if ageHours < 0 {
 		ageHours = 0

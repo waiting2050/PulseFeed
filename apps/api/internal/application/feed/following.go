@@ -59,22 +59,34 @@ func (s *FollowingStrategy) Cacheable() bool {
 }
 
 // Load 读取一页 following 条目：未登录读者返回 ErrViewerRequired；缓存不可用时回源 DB。
-func (s *FollowingStrategy) Load(ctx context.Context, req *FeedRequest, cursor *domfeed.Cursor, count int) ([]*domfeed.FeedEntry, error) {
+func (s *FollowingStrategy) Load(ctx context.Context, req *FeedRequest, cursor *domfeed.Cursor, count int) (*Page, error) {
 	if req.ViewerID <= 0 {
 		return nil, domfeed.ErrViewerRequired
 	}
 	if s.cache == nil || !s.cache.Enabled() {
-		return s.repo.ListFollowingPage(ctx, req.ViewerID, cursor, count)
+		entries, err := s.repo.ListFollowingPage(ctx, req.ViewerID, cursor, count)
+		if err != nil {
+			return nil, err
+		}
+		return &Page{Entries: entries}, nil
 	}
 
 	merged, err := s.loadMergedInbox(ctx, req.ViewerID)
 	if err != nil {
 		// 缓存读失败回源 DB 联查，保证关注流可用性。
-		return s.repo.ListFollowingPage(ctx, req.ViewerID, cursor, count)
+		entries, fallbackErr := s.repo.ListFollowingPage(ctx, req.ViewerID, cursor, count)
+		if fallbackErr != nil {
+			return nil, fallbackErr
+		}
+		return &Page{Entries: entries}, nil
 	}
 
 	page := paginateInbox(merged, cursor, count)
-	return s.hydrate(ctx, page)
+	entries, err := s.hydrate(ctx, page)
+	if err != nil {
+		return nil, err
+	}
+	return &Page{Entries: entries}, nil
 }
 
 // loadMergedInbox 读取读者 inbox 与关注中大 V 的 outbox 并合并：

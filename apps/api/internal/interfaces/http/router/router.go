@@ -2,6 +2,7 @@
 package router
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"log"
@@ -11,7 +12,11 @@ import (
 	appaccount "pulsefeed/internal/application/account"
 	appclip "pulsefeed/internal/application/clip"
 	appfeed "pulsefeed/internal/application/feed"
+	appimpression "pulsefeed/internal/application/impression"
 	appaction "pulsefeed/internal/application/interaction"
+	appmessage "pulsefeed/internal/application/message"
+	appplayback "pulsefeed/internal/application/playback"
+	apprecommendation "pulsefeed/internal/application/recommendation"
 	apprelation "pulsefeed/internal/application/relation"
 	infracache "pulsefeed/internal/infra/cache"
 	"pulsefeed/internal/infra/config"
@@ -19,15 +24,24 @@ import (
 	inframq "pulsefeed/internal/infra/mq"
 	infraaccount "pulsefeed/internal/infra/persistence/account"
 	infraclip "pulsefeed/internal/infra/persistence/clip"
+	infraembedding "pulsefeed/internal/infra/persistence/embedding"
 	infrafeed "pulsefeed/internal/infra/persistence/feed"
+	infraimpression "pulsefeed/internal/infra/persistence/impression"
 	infraaction "pulsefeed/internal/infra/persistence/interaction"
+	inframessage "pulsefeed/internal/infra/persistence/message"
 	"pulsefeed/internal/infra/persistence/migration"
+	infraplayback "pulsefeed/internal/infra/persistence/playback"
+	infrarecommendation "pulsefeed/internal/infra/persistence/recommendation"
 	infrarelation "pulsefeed/internal/infra/persistence/relation"
 	httpaccount "pulsefeed/internal/interfaces/http/account"
 	httpclip "pulsefeed/internal/interfaces/http/clip"
 	httpfeed "pulsefeed/internal/interfaces/http/feed"
+	httpimpression "pulsefeed/internal/interfaces/http/impression"
 	httpaction "pulsefeed/internal/interfaces/http/interaction"
+	httpmsg "pulsefeed/internal/interfaces/http/message"
 	"pulsefeed/internal/interfaces/http/middleware"
+	httpplayback "pulsefeed/internal/interfaces/http/playback"
+	httprecommendation "pulsefeed/internal/interfaces/http/recommendation"
 	httprelation "pulsefeed/internal/interfaces/http/relation"
 	httpupload "pulsefeed/internal/interfaces/http/upload"
 
@@ -90,24 +104,51 @@ func Register(engine *gin.Engine, cfg *config.Config, db *sql.DB) error {
 		log.Printf("redis.addr 为空，缓存已禁用，Feed 走 DB")
 	}
 	feedRepo := infrafeed.New(gormDB)
-	// following 场景策略：合并读者 inbox 与大 V outbox，Redis 缺失/禁用自动回源 DB。
+	// 向量与推荐链路：embedding 仓储同时服务推荐兴趣向量聚合，Worker 侧负责生成向量。
+	embeddingRepo := infraembedding.New(gormDB)
+	recommendationRepo := infrarecommendation.New(gormDB)
+	recommendationService := apprecommendation.New(recommendationRepo, embeddingRepo)
+	// following 场景策略：合并读者 inbox 与大 V outbox，Redis 缺失/禁用自动回源 DB；
+	// hot 场景策略：合并最近 60 个分钟桶的互动增量，窗口为空/不可用自动回源 DB。
 	feedService := appfeed.New(feedRepo,
 		appfeed.WithFeedCache(feedCache),
 		appfeed.WithFollowingStrategy(feedCache),
+		appfeed.WithForYouStrategy(recommendationService),
+		appfeed.WithHotStrategy(feedCache),
 	)
 	feedHandler := httpfeed.New(feedService)
+	recommendationHandler := httprecommendation.New(recommendationService)
 
-	// relation 链路：关注/取关与列表；关注状态迁移时经 feed 回填器同步回填读者 inbox。
+	// message 链路：站内消息表、未读数与标记已读；服务同时实现 relation 的 FollowEventMessenger 端口（S16 接入）。
+	messageRepo := inframessage.New(gormDB)
+	messageService := appmessage.New(messageRepo)
+	messageHandler := httpmsg.New(messageService)
+
+	// playback 链路：播放配置（预加载条数/QoS 采样率）与 QoS 幂等上报；
+	// 预加载列表数据源复用 feedRepo.ListLatestClipIDs，通过 adapter 桥接接口签名。
+	playbackRepo := infraplayback.New(gormDB)
+	playbackService := appplayback.New(playbackRepo, appplayback.ClipProviderFunc(
+		func(ctx context.Context, limit int) ([]int64, error) {
+			return feedRepo.ListLatestClipIDs(ctx, limit)
+		},
+	))
+	playbackHandler := httpplayback.New(playbackService)
+
+	// relation 链路：关注/取关与列表；关注状态迁移时经 feed 回填器同步回填读者 inbox、
+	// 并经 message service 向被关注者发送站内消息（S16 接入）。
 	relationRepo := infrarelation.New(gormDB)
 	relationService := apprelation.New(relationRepo,
 		apprelation.WithFollowFeedBackfiller(appfeed.NewInboxBackfiller(feedRepo, feedCache)),
+		apprelation.WithFollowEventMessenger(messageService),
 	)
 	relationHandler := httprelation.New(relationService)
 
 	// 互动链路：Redis 与 MQ 均可用时启用异步流水线（Redis 先写 → MQ → Worker 落库），
 	// 否则回退 S9 的同步落库路径；评论始终同步处理。
+	// 计数真正变化时同步累加 Redis 热度分钟桶（S15 hot 场景数据源），缓存禁用时实现自身跳过。
 	actionRepo := infraaction.New(gormDB)
-	actionOpts := make([]appaction.Option, 0, 1)
+	actionOpts := make([]appaction.Option, 0, 2)
+	actionOpts = append(actionOpts, appaction.WithHotScoreRecorder(feedCache))
 	if feedCache.Enabled() && mqClient != nil {
 		actionOpts = append(actionOpts, appaction.WithAsyncActionPipeline(feedCache, mqClient))
 		log.Printf("互动异步链路已启用 (queue=%s)", cfg.RabbitMQ.ActionChangedQueue)
@@ -116,6 +157,16 @@ func Register(engine *gin.Engine, cfg *config.Config, db *sql.DB) error {
 	}
 	actionService := appaction.New(actionRepo, actionOpts...)
 	actionHandler := httpaction.New(actionService)
+
+	// 曝光链路：播放事件幂等落库 + 当日曝光聚合；MQ 可用时投递 play.recorded 供 Worker 补偿。
+	impressionRepo := infraimpression.New(gormDB)
+	impressionOpts := make([]appimpression.Option, 0, 1)
+	if mqClient != nil {
+		impressionOpts = append(impressionOpts, appimpression.WithPublisher(mqClient))
+		log.Printf("播放事件异步链路已启用 (queue=%s)", cfg.RabbitMQ.PlayEventRecordedQueue)
+	}
+	impressionService := appimpression.New(impressionRepo, impressionOpts...)
+	impressionHandler := httpimpression.New(impressionService)
 
 	jwtAuth := middleware.NewJWTAuth(issuer)
 	optionalAuth := middleware.NewOptionalJWTAuth(issuer)
@@ -147,11 +198,30 @@ func Register(engine *gin.Engine, cfg *config.Config, db *sql.DB) error {
 	authed.DELETE("/clips/:clipId/save", actionHandler.Unsave)
 	authed.POST("/clips/:clipId/comments", actionHandler.CreateComment)
 	authed.DELETE("/comments/:commentId", actionHandler.DeleteComment)
+	// 播放事件上报：登录用户上报一次播放行为，幂等落库并聚合当日曝光。
+	authed.POST("/clip-play-events", impressionHandler.RecordPlayEvent)
 	// 关注关系端点：关注/取关与关注/粉丝列表，均要求登录。
 	authed.PUT("/users/me/following/:targetUserId", relationHandler.Follow)
 	authed.DELETE("/users/me/following/:targetUserId", relationHandler.Unfollow)
 	authed.GET("/users/me/following", relationHandler.ListFollowing)
 	authed.GET("/users/me/followers", relationHandler.ListFollowers)
+	// 站内消息端点：列表、未读数与全部标记已读，均要求登录（S16 接入）。
+	authed.GET("/messages", messageHandler.ListMessages)
+	authed.GET("/message-stats/unread", messageHandler.GetUnreadCount)
+	authed.PATCH("/messages", messageHandler.MarkAllRead)
+	// 播放配置与 QoS 上报端点：登录用户读取/更新配置、取预加载列表、幂等上报 QoS（S16 接入）。
+	authed.GET("/playback-config", playbackHandler.GetConfig)
+	authed.PUT("/playback-config", playbackHandler.UpdateConfig)
+	authed.GET("/preload-clips", playbackHandler.GetPreload)
+	authed.POST("/playback-qos-reports", playbackHandler.ReportQoS)
+
+	// 内部接口：X-Internal-Token 鉴权，供推荐排查、曝光决策、向量链路核对与消息/QoS 主动投递（S16 接入）。
+	internal := engine.Group("/internal", middleware.NewInternalTokenAuth(cfg.Internal.Token))
+	internal.POST("/recommendation-candidates", recommendationHandler.ListCandidates)
+	internal.GET("/impression-decisions", recommendationHandler.ImpressionDecision)
+	internal.GET("/impressions", recommendationHandler.ListImpressions)
+	internal.POST("/messages", messageHandler.CreateMessageInternal)
+	internal.POST("/playback-qos-reports", playbackHandler.ReportQoSInternal)
 
 	// 上传产物静态回读：GET/HEAD /uploads/<kind>/<filename>。
 	engine.Static("/uploads", "./uploads")

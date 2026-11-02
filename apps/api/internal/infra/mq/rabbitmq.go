@@ -10,6 +10,7 @@ import (
 	"time"
 
 	appclip "pulsefeed/internal/application/clip"
+	appimpression "pulsefeed/internal/application/impression"
 	appaction "pulsefeed/internal/application/interaction"
 	"pulsefeed/internal/infra/config"
 
@@ -124,9 +125,14 @@ func declareQueue(ch *amqp.Channel, queue, exchange, routing string) error {
 	return nil
 }
 
-// PublishClipPublished 投递 clip.published 事件，供后续阶段扇出/向量消费者使用。
+// PublishClipPublished 投递 clip.published 事件，供扇出消费者使用。
 func (c *Client) PublishClipPublished(ctx context.Context, event appclip.ClipPublished) error {
 	return c.publish(ctx, c.cfg.ClipExchange, c.cfg.ClipPublishedRouting, event)
+}
+
+// PublishClipEmbedding 投递 clip.embedding 事件，由 ClipEmbeddingWorker 生成文本向量。
+func (c *Client) PublishClipEmbedding(ctx context.Context, event appclip.ClipPublished) error {
+	return c.publish(ctx, c.cfg.ClipExchange, embeddingRouting, event)
 }
 
 // PublishActionChanged 投递 interaction.action_changed 事件，由 ActionWorker 落库。
@@ -134,9 +140,9 @@ func (c *Client) PublishActionChanged(ctx context.Context, event appaction.Actio
 	return c.publish(ctx, c.cfg.InteractionExchange, c.cfg.ActionChangedRouting, event)
 }
 
-// PublishPlayRecorded 投递 impression.play_recorded 事件；载荷由 S13 的播放事件用例定义。
-func (c *Client) PublishPlayRecorded(ctx context.Context, payload any) error {
-	return c.publish(ctx, c.cfg.ImpressionExchange, c.cfg.PlayEventRecordedRouting, payload)
+// PublishPlayRecorded 投递 impression.play_recorded 事件，由 PlayEventWorker 消费做曝光补偿。
+func (c *Client) PublishPlayRecorded(ctx context.Context, event appimpression.PlayRecorded) error {
+	return c.publish(ctx, c.cfg.ImpressionExchange, c.cfg.PlayEventRecordedRouting, event)
 }
 
 // publish 将载荷序列化为 JSON 并以持久化消息投递；调用方需保证事件已落库或可重放。
