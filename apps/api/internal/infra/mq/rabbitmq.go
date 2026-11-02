@@ -125,9 +125,14 @@ func declareQueue(ch *amqp.Channel, queue, exchange, routing string) error {
 	return nil
 }
 
-// PublishClipPublished 投递 clip.published 事件，供后续阶段扇出/向量消费者使用。
+// PublishClipPublished 投递 clip.published 事件，供扇出消费者使用。
 func (c *Client) PublishClipPublished(ctx context.Context, event appclip.ClipPublished) error {
 	return c.publish(ctx, c.cfg.ClipExchange, c.cfg.ClipPublishedRouting, event)
+}
+
+// PublishClipEmbedding 投递 clip.embedding 事件，由 ClipEmbeddingWorker 生成文本向量。
+func (c *Client) PublishClipEmbedding(ctx context.Context, event appclip.ClipPublished) error {
+	return c.publish(ctx, c.cfg.ClipExchange, embeddingRouting, event)
 }
 
 // PublishActionChanged 投递 interaction.action_changed 事件，由 ActionWorker 落库。

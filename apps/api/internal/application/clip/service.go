@@ -70,6 +70,10 @@ func (s *Service) CreatePublished(ctx context.Context, creatorID int64, title, v
 			// 事件投递失败不回滚发布结果，MQ 链路在 S10 接入后由 Worker 保证最终一致。
 			log.Printf("投递 clip.published 事件失败 (clip_id=%d): %v", clip.ID, err)
 		}
+		if err := s.publisher.PublishClipEmbedding(ctx, event); err != nil {
+			// 向量事件失败不阻塞发布；S14 的推荐链路可容忍向量暂时缺失。
+			log.Printf("投递 clip.embedding 事件失败 (clip_id=%d): %v", clip.ID, err)
+		}
 	}
 	return clip, nil
 }

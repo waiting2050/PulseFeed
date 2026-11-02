@@ -13,6 +13,7 @@ import (
 	appfeed "pulsefeed/internal/application/feed"
 	appimpression "pulsefeed/internal/application/impression"
 	appaction "pulsefeed/internal/application/interaction"
+	apprecommendation "pulsefeed/internal/application/recommendation"
 	apprelation "pulsefeed/internal/application/relation"
 	infracache "pulsefeed/internal/infra/cache"
 	"pulsefeed/internal/infra/config"
@@ -20,10 +21,12 @@ import (
 	inframq "pulsefeed/internal/infra/mq"
 	infraaccount "pulsefeed/internal/infra/persistence/account"
 	infraclip "pulsefeed/internal/infra/persistence/clip"
+	infraembedding "pulsefeed/internal/infra/persistence/embedding"
 	infrafeed "pulsefeed/internal/infra/persistence/feed"
 	infraimpression "pulsefeed/internal/infra/persistence/impression"
 	infraaction "pulsefeed/internal/infra/persistence/interaction"
 	"pulsefeed/internal/infra/persistence/migration"
+	infrarecommendation "pulsefeed/internal/infra/persistence/recommendation"
 	infrarelation "pulsefeed/internal/infra/persistence/relation"
 	httpaccount "pulsefeed/internal/interfaces/http/account"
 	httpclip "pulsefeed/internal/interfaces/http/clip"
@@ -31,6 +34,7 @@ import (
 	httpimpression "pulsefeed/internal/interfaces/http/impression"
 	httpaction "pulsefeed/internal/interfaces/http/interaction"
 	"pulsefeed/internal/interfaces/http/middleware"
+	httprecommendation "pulsefeed/internal/interfaces/http/recommendation"
 	httprelation "pulsefeed/internal/interfaces/http/relation"
 	httpupload "pulsefeed/internal/interfaces/http/upload"
 
@@ -93,12 +97,18 @@ func Register(engine *gin.Engine, cfg *config.Config, db *sql.DB) error {
 		log.Printf("redis.addr 为空，缓存已禁用，Feed 走 DB")
 	}
 	feedRepo := infrafeed.New(gormDB)
+	// 向量与推荐链路：embedding 仓储同时服务推荐兴趣向量聚合，Worker 侧负责生成向量。
+	embeddingRepo := infraembedding.New(gormDB)
+	recommendationRepo := infrarecommendation.New(gormDB)
+	recommendationService := apprecommendation.New(recommendationRepo, embeddingRepo)
 	// following 场景策略：合并读者 inbox 与大 V outbox，Redis 缺失/禁用自动回源 DB。
 	feedService := appfeed.New(feedRepo,
 		appfeed.WithFeedCache(feedCache),
 		appfeed.WithFollowingStrategy(feedCache),
+		appfeed.WithForYouStrategy(recommendationService),
 	)
 	feedHandler := httpfeed.New(feedService)
+	recommendationHandler := httprecommendation.New(recommendationService)
 
 	// relation 链路：关注/取关与列表；关注状态迁移时经 feed 回填器同步回填读者 inbox。
 	relationRepo := infrarelation.New(gormDB)
@@ -167,6 +177,12 @@ func Register(engine *gin.Engine, cfg *config.Config, db *sql.DB) error {
 	authed.DELETE("/users/me/following/:targetUserId", relationHandler.Unfollow)
 	authed.GET("/users/me/following", relationHandler.ListFollowing)
 	authed.GET("/users/me/followers", relationHandler.ListFollowers)
+
+	// 内部接口：X-Internal-Token 鉴权，供推荐排查与曝光决策核对。
+	internal := engine.Group("/internal", middleware.NewInternalTokenAuth(cfg.Internal.Token))
+	internal.POST("/recommendation-candidates", recommendationHandler.ListCandidates)
+	internal.GET("/impression-decisions", recommendationHandler.ImpressionDecision)
+	internal.GET("/impressions", recommendationHandler.ListImpressions)
 
 	// 上传产物静态回读：GET/HEAD /uploads/<kind>/<filename>。
 	engine.Static("/uploads", "./uploads")

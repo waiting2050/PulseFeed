@@ -17,4 +17,6 @@ type ClipPublished struct {
 type Publisher interface {
 	// PublishClipPublished 投递 clip.published 事件。
 	PublishClipPublished(ctx context.Context, event ClipPublished) error
+	// PublishClipEmbedding 投递 clip.embedding 事件，供向量生成 Worker 消费。
+	PublishClipEmbedding(ctx context.Context, event ClipPublished) error
 }

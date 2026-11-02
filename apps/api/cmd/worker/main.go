@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	appclip "pulsefeed/internal/application/clip"
+	appembedding "pulsefeed/internal/application/embedding"
 	appimpression "pulsefeed/internal/application/impression"
 	appaction "pulsefeed/internal/application/interaction"
 	infracache "pulsefeed/internal/infra/cache"
@@ -17,6 +18,7 @@ import (
 	infradatabase "pulsefeed/internal/infra/database"
 	inframetrics "pulsefeed/internal/infra/metrics"
 	inframq "pulsefeed/internal/infra/mq"
+	infraembedding "pulsefeed/internal/infra/persistence/embedding"
 	infrafeed "pulsefeed/internal/infra/persistence/feed"
 	infraimpression "pulsefeed/internal/infra/persistence/impression"
 	infraaction "pulsefeed/internal/infra/persistence/interaction"
@@ -71,6 +73,9 @@ func main() {
 	// 播放事件消费链路：对 API 同步链路未完成曝光聚合的事件做二次 upsert 补偿（D7 修正）。
 	playEventWorker := appimpression.NewPlayEventWorker(infraimpression.New(gormDB))
 
+	// 向量生成链路：消费 clip.embedding 事件，按标题 hash n-gram 写入 pf_clip_embeddings。
+	embeddingWorker := appembedding.NewWorker(appembedding.New(infraembedding.New(gormDB)))
+
 	// 发布扇出链路：复用与 API 相同的 Redis 缓存实现，把新 clip 推入粉丝 inbox 或大 V outbox。
 	redisClient := infracache.New(cfg.Redis)
 	feedCache := infracache.NewFeedCache(redisClient)
@@ -85,16 +90,20 @@ func main() {
 		}
 	}()
 
-	// 三个消费者各自持有独立 AMQP 通道并发消费；任一异常退出即终止进程。
+	// 四个消费者各自持有独立 AMQP 通道并发消费；任一异常退出即终止进程。
 	log.Printf("worker 已启动: %s (queue=%s)", actionWorker.Name(), cfg.RabbitMQ.ActionChangedQueue)
 	log.Printf("worker 已启动: %s (queue=%s)", fanoutWorker.Name(), cfg.RabbitMQ.ClipPublishedQueue)
+	log.Printf("worker 已启动: %s (queue=%s)", embeddingWorker.Name(), cfg.RabbitMQ.ClipEmbeddingQueue)
 	log.Printf("worker 已启动: %s (queue=%s)", playEventWorker.Name(), cfg.RabbitMQ.PlayEventRecordedQueue)
-	errCh := make(chan error, 3)
+	errCh := make(chan error, 4)
 	go func() {
 		errCh <- mqClient.Consume(ctx, cfg.RabbitMQ.ActionChangedQueue, actionWorker.Handle)
 	}()
 	go func() {
 		errCh <- mqClient.Consume(ctx, cfg.RabbitMQ.ClipPublishedQueue, fanoutWorker.Handle)
+	}()
+	go func() {
+		errCh <- mqClient.Consume(ctx, cfg.RabbitMQ.ClipEmbeddingQueue, embeddingWorker.Handle)
 	}()
 	go func() {
 		errCh <- mqClient.Consume(ctx, cfg.RabbitMQ.PlayEventRecordedQueue, playEventWorker.Handle)

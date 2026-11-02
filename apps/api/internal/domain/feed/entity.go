@@ -15,7 +15,7 @@ const (
 	DefaultFeedLimit = 20
 )
 
-// Scene 是 Feed 场景标识；S7 支持 latest，S11 接入 following，其余场景在后续阶段接入。
+// Scene 是 Feed 场景标识；S7 支持 latest，S11 接入 following，S14 接入 for-you，其余场景在后续阶段接入。
 type Scene string
 
 const (
@@ -23,6 +23,8 @@ const (
 	SceneLatest Scene = "latest"
 	// SceneFollowing 仅含当前读者关注创作者的 Feed（inbox + 大 V outbox 合并，S11 接入）。
 	SceneFollowing Scene = "following"
+	// SceneForYou 按推荐分数排序的个性化 Feed（S14 接入，要求登录）。
+	SceneForYou Scene = "for-you"
 )
 
 // ParseScene 解析场景字符串；不支持的场景返回 ErrUnsupportedScene。
@@ -32,6 +34,8 @@ func ParseScene(s string) (Scene, error) {
 		return SceneLatest, nil
 	case SceneFollowing:
 		return SceneFollowing, nil
+	case SceneForYou:
+		return SceneForYou, nil
 	default:
 		return "", ErrUnsupportedScene
 	}
@@ -77,11 +81,16 @@ type FollowedCreator struct {
 	FollowerCount int64
 }
 
-// Cursor 是按 (published_at, clip_id) 复合键严格递减翻页的游标；
-// 推荐场景的 snapshot_at 修正（D6）在 S14 扩展该结构。
+// Cursor 是 Feed 翻页游标：
+// latest/following 使用 (published_at, clip_id) 严格递减；
+// for-you 额外携带排序分数 score 与候选池快照 snapshot_at（D6 修正），保证跨分钟翻页稳定。
 type Cursor struct {
 	PublishedAt time.Time `json:"p"`
 	ClipID      int64     `json:"c"`
+	// Score 是推荐场景的排序分数，与 ClipID 组成 (score, clip_id) 严格小于过滤键。
+	Score float64 `json:"s,omitempty"`
+	// SnapshotAt 是推荐场景首屏固定下来的候选池快照时间，仅 for-you 游标携带。
+	SnapshotAt *time.Time `json:"t,omitempty"`
 }
 
 // EncodeCursor 将游标编码为 URL 安全字符串；nil 游标编码为空串。

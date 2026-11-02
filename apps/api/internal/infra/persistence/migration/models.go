@@ -4,6 +4,7 @@ package migration
 import (
 	infraaccount "pulsefeed/internal/infra/persistence/account"
 	infraclip "pulsefeed/internal/infra/persistence/clip"
+	infraembedding "pulsefeed/internal/infra/persistence/embedding"
 	infraimpression "pulsefeed/internal/infra/persistence/impression"
 	infraaction "pulsefeed/internal/infra/persistence/interaction"
 	infrarelation "pulsefeed/internal/infra/persistence/relation"
@@ -22,5 +23,6 @@ func Models() []any {
 		&infrarelation.UserStatsModel{},
 		&infraimpression.PlayEventModel{},
 		&infraimpression.ImpressionModel{},
+		&infraembedding.ClipEmbeddingModel{},
 	}
 }
