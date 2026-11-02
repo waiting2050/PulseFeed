@@ -1,0 +1,495 @@
+# deploy.yaml 提供 PulseFeed 的 K8s 清单：命名空间、密钥、持久卷与全栈 Deployment/Service，
+# 探针沿用 API /health、Worker /metrics、Web /，配置经 Secret 挂载覆盖镜像内 config.yaml。
+# 计划原文写“5 个 Deployment”属计数偏差，实际完整栈为 6 个：mysql/redis/rabbitmq/api/worker/web。
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: pulsefeed
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: pulsefeed-secret
+  namespace: pulsefeed
+type: Opaque
+stringData:
+  mysql-root-password: pulsefeed-root
+  api-config.yaml: |
+    # 容器内配置：服务名即主机名，密钥与 compose 内网保持一致。
+    port: 8090
+
+    jwt:
+      secret: pulsefeed-docker-secret
+      access_ttl: 15m
+
+    internal:
+      token: pulsefeed-internal-token
+
+    database:
+      host: mysql
+      port: 3306
+      user: root
+      password: pulsefeed-root
+      name: PulseFeed
+
+    redis:
+      addr: redis:6379
+      password: ""
+      db: 0
+
+    rabbitmq:
+      url: amqp://guest:guest@rabbitmq:5672/
+      clip_exchange: pulsefeed.clip
+      clip_published_queue: pulsefeed.clip.published
+      clip_published_routing: clip.published
+      clip_embedding_queue: pulsefeed.clip.embedding
+      interaction_exchange: pulsefeed.interaction
+      action_changed_queue: pulsefeed.interaction.action_changed
+      action_changed_routing: interaction.action_changed
+      impression_exchange: pulsefeed.impression
+      play_event_recorded_queue: pulsefeed.impression.play_recorded
+      play_event_recorded_routing: impression.play_recorded
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mysql-data
+  namespace: pulsefeed
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: redis-data
+  namespace: pulsefeed
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: rabbitmq-data
+  namespace: pulsefeed
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: api-uploads
+  namespace: pulsefeed
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mysql
+  namespace: pulsefeed
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mysql
+  template:
+    metadata:
+      labels:
+        app: mysql
+    spec:
+      containers:
+        - name: mysql
+          image: mysql:8.4
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 3306
+          env:
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: pulsefeed-secret
+                  key: mysql-root-password
+            - name: MYSQL_DATABASE
+              value: PulseFeed
+          volumeMounts:
+            - name: mysql-data
+              mountPath: /var/lib/mysql
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - mysqladmin ping -h 127.0.0.1 -uroot -p${MYSQL_ROOT_PASSWORD} --silent
+            initialDelaySeconds: 20
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 20
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - mysqladmin ping -h 127.0.0.1 -uroot -p${MYSQL_ROOT_PASSWORD} --silent
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+      volumes:
+        - name: mysql-data
+          persistentVolumeClaim:
+            claimName: mysql-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql
+  namespace: pulsefeed
+spec:
+  selector:
+    app: mysql
+  ports:
+    - name: mysql
+      port: 3306
+      targetPort: 3306
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: pulsefeed
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:7.4-alpine
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 6379
+          volumeMounts:
+            - name: redis-data
+              mountPath: /data
+          readinessProbe:
+            exec:
+              command:
+                - redis-cli
+                - ping
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 20
+          livenessProbe:
+            exec:
+              command:
+                - redis-cli
+                - ping
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+      volumes:
+        - name: redis-data
+          persistentVolumeClaim:
+            claimName: redis-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: pulsefeed
+spec:
+  selector:
+    app: redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: 6379
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rabbitmq
+  namespace: pulsefeed
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rabbitmq
+  template:
+    metadata:
+      labels:
+        app: rabbitmq
+    spec:
+      containers:
+        - name: rabbitmq
+          image: rabbitmq:3.13-management-alpine
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: amqp
+              containerPort: 5672
+            - name: management
+              containerPort: 15672
+          volumeMounts:
+            - name: rabbitmq-data
+              mountPath: /var/lib/rabbitmq
+          readinessProbe:
+            exec:
+              command:
+                - rabbitmq-diagnostics
+                - -q
+                - ping
+            initialDelaySeconds: 20
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 20
+          livenessProbe:
+            exec:
+              command:
+                - rabbitmq-diagnostics
+                - -q
+                - ping
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+      volumes:
+        - name: rabbitmq-data
+          persistentVolumeClaim:
+            claimName: rabbitmq-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rabbitmq
+  namespace: pulsefeed
+spec:
+  selector:
+    app: rabbitmq
+  ports:
+    - name: amqp
+      port: 5672
+      targetPort: 5672
+    - name: management
+      port: 15672
+      targetPort: 15672
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: pulsefeed
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: api
+  template:
+    metadata:
+      labels:
+        app: api
+    spec:
+      securityContext:
+        # 运行镜像以 uid 10001 的非 root 用户启动，需 fsGroup 才能写入上传卷。
+        fsGroup: 10001
+      containers:
+        - name: api
+          image: pulsefeed-api:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - /app/pulsefeed-api
+            - -config
+            - /app/configs/config.yaml
+          ports:
+            - containerPort: 8090
+          volumeMounts:
+            - name: api-config
+              mountPath: /app/configs/config.yaml
+              subPath: api-config.yaml
+              readOnly: true
+            - name: api-uploads
+              mountPath: /app/uploads
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8090
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 12
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8090
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+      volumes:
+        - name: api-config
+          secret:
+            secretName: pulsefeed-secret
+            items:
+              - key: api-config.yaml
+                path: api-config.yaml
+        - name: api-uploads
+          persistentVolumeClaim:
+            claimName: api-uploads
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+  namespace: pulsefeed
+spec:
+  selector:
+    app: api
+  ports:
+    - name: http
+      port: 8090
+      targetPort: 8090
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+  namespace: pulsefeed
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: worker
+  template:
+    metadata:
+      labels:
+        app: worker
+    spec:
+      containers:
+        - name: worker
+          image: pulsefeed-api:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - /app/pulsefeed-worker
+            - -config
+            - /app/configs/config.yaml
+            - -metrics-addr
+            - :9092
+          ports:
+            - name: metrics
+              containerPort: 9092
+          volumeMounts:
+            - name: api-config
+              mountPath: /app/configs/config.yaml
+              subPath: api-config.yaml
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /metrics
+              port: 9092
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 12
+          livenessProbe:
+            httpGet:
+              path: /metrics
+              port: 9092
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+      volumes:
+        - name: api-config
+          secret:
+            secretName: pulsefeed-secret
+            items:
+              - key: api-config.yaml
+                path: api-config.yaml
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: worker
+  namespace: pulsefeed
+spec:
+  selector:
+    app: worker
+  ports:
+    - name: metrics
+      port: 9092
+      targetPort: 9092
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: pulsefeed
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: web
+  template:
+    metadata:
+      labels:
+        app: web
+    spec:
+      containers:
+        - name: web
+          image: pulsefeed-web:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 80
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+  namespace: pulsefeed
+spec:
+  type: NodePort
+  selector:
+    app: web
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+      nodePort: 30090

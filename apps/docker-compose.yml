@@ -118,7 +118,8 @@ services:
       worker:
         condition: service_healthy
     ports:
-      - "9090:9090"
+      # 宿主机固定 19090：9090 落在 Win11 Hyper-V 保留段 9020–9119，与 S20 的 Worker 19092 同源处理。
+      - "19090:9090"
     volumes:
       - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
 
@@ -133,6 +134,8 @@ services:
       - "3000:3000"
     volumes:
       - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      # dashboard JSON 由 file provider 自动加载（目录已在 provisioning/dashboards 中声明）。
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
       - pulsefeed-grafana-data:/var/lib/grafana
 
 volumes:

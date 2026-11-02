@@ -1,0 +1,21 @@
+# prometheus.yml 定义监控栈抓取目标：API 的 /metrics 与 Worker 独立指标端口（compose 内部服务名）。
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: pulsefeed-api
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - api:8090
+        labels:
+          component: api
+
+  - job_name: pulsefeed-worker
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - worker:9092
+        labels:
+          component: worker
