@@ -1,7 +1,15 @@
-// App.jsx 提供 S18 最小闭环：登录/注册、latest Feed 首屏与 next_cursor 加载更多（按 clip_id 去重）。
-import React, { useCallback, useEffect, useState } from 'react'
+// App.jsx 提供 S19 完整前端闭环：登录/注册、四场景 Feed、上传发布、互动、消息与播放配置。
+import React, { useCallback, useEffect, useRef, useState } from 'react'
 
 const TOKEN_KEY = 'pulsefeed.token'
+
+// SCENES 是 Feed 场景清单，与 GET /api/feed 的 scene 取值一一对应。
+const SCENES = [
+  { key: 'latest', label: '最新' },
+  { key: 'hot', label: '热门' },
+  { key: 'following', label: '关注' },
+  { key: 'for-you', label: '推荐' },
+]
 
 // 生成幂等键：优先使用浏览器 UUID，缺失时退化为时间戳 + 随机串。
 function newIdempotencyKey() {
@@ -11,21 +19,8 @@ function newIdempotencyKey() {
   return `pf-${Date.now()}-${Math.random().toString(16).slice(2)}`
 }
 
-// apiFetch 统一封装 API 访问：自动携带 Bearer，写请求自动带 Idempotency-Key，并解包 {code,message,data}。
-async function apiFetch(path, { method = 'GET', body, token, idempotencyKey } = {}) {
-  const headers = {}
-  if (body !== undefined) headers['Content-Type'] = 'application/json'
-  if (token) headers.Authorization = `Bearer ${token}`
-  if (method !== 'GET' && method !== 'HEAD') {
-    headers['Idempotency-Key'] = idempotencyKey || newIdempotencyKey()
-  }
-
-  const response = await fetch(`/api${path}`, {
-    method,
-    headers,
-    body: body === undefined ? undefined : JSON.stringify(body),
-  })
-
+// readEnvelope 解析统一信封 {code,message,data}，失败时抛出后端 message。
+async function readEnvelope(response) {
   let payload = null
   try {
     payload = await response.json()
@@ -38,9 +33,49 @@ async function apiFetch(path, { method = 'GET', body, token, idempotencyKey } = 
   return payload ? payload.data : null
 }
 
-// FeedCard 渲染单条 clip 卡片，字段与 GET /api/feed 的 data.items 对齐。
-function FeedCard({ item }) {
+// apiFetch 统一封装 API 访问：自动携带 Bearer，写请求自动带 Idempotency-Key。
+async function apiFetch(path, { method = 'GET', body, token, idempotencyKey } = {}) {
+  const headers = {}
+  if (body !== undefined) headers['Content-Type'] = 'application/json'
+  if (token) headers.Authorization = `Bearer ${token}`
+  if (method !== 'GET' && method !== 'HEAD') {
+    headers['Idempotency-Key'] = idempotencyKey || newIdempotencyKey()
+  }
+  const response = await fetch(`/api${path}`, {
+    method,
+    headers,
+    body: body === undefined ? undefined : JSON.stringify(body),
+  })
+  return readEnvelope(response)
+}
+
+// apiUpload 以 multipart 上传文件（视频/封面），返回 {url, kind}。
+async function apiUpload(path, formData, token) {
+  const response = await fetch(`/api${path}`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Idempotency-Key': newIdempotencyKey(),
+    },
+    body: formData,
+  })
+  return readEnvelope(response)
+}
+
+// FeedCard 渲染单条 clip 卡片：计数、互动状态、评论入口与评论列表。
+function FeedCard({ item, comments, busy, onLike, onSave, onToggleComments, onSubmitComment }) {
+  const [draft, setDraft] = useState('')
+  const state = comments[item.clip_id] || { open: false, items: [], loading: false, error: '' }
   const published = item.published_at ? new Date(item.published_at).toLocaleString() : ''
+
+  async function handleSubmit(event) {
+    event.preventDefault()
+    const content = draft.trim()
+    if (!content) return
+    setDraft('')
+    await onSubmitComment(item.clip_id, content)
+  }
+
   return (
     <article className="card">
       <div className="card-cover">
@@ -62,6 +97,55 @@ function FeedCard({ item }) {
           <span>收藏 {item.save_count}</span>
           <span>评论 {item.comment_count}</span>
         </p>
+        <div className="card-actions">
+          <button
+            type="button"
+            className={item.liked ? 'icon-btn active' : 'icon-btn'}
+            onClick={() => onLike(item)}
+            disabled={busy}
+          >
+            {item.liked ? '已点赞' : '点赞'}
+          </button>
+          <button
+            type="button"
+            className={item.saved ? 'icon-btn active' : 'icon-btn'}
+            onClick={() => onSave(item)}
+            disabled={busy}
+          >
+            {item.saved ? '已收藏' : '收藏'}
+          </button>
+          <button type="button" className="icon-btn" onClick={() => onToggleComments(item.clip_id)}>
+            {state.open ? '收起评论' : '评论'}
+          </button>
+        </div>
+        {state.open && (
+          <div className="comment-box">
+            {state.loading && <p className="subtle">评论加载中…</p>}
+            {state.error && <p className="error">{state.error}</p>}
+            {!state.loading && !state.error && state.items.length === 0 && (
+              <p className="subtle">还没有评论。</p>
+            )}
+            <ul className="comment-list">
+              {(state.items || []).map((comment) => (
+                <li key={comment.id}>
+                  <span className="comment-author">{comment.user_nickname || `用户 ${comment.user_id}`}</span>
+                  <span className="comment-content">{comment.content}</span>
+                </li>
+              ))}
+            </ul>
+            <form className="comment-form" onSubmit={handleSubmit}>
+              <input
+                value={draft}
+                onChange={(event) => setDraft(event.target.value)}
+                placeholder="写下你的评论"
+                maxLength={200}
+              />
+              <button type="submit" className="primary" disabled={busy || !draft.trim()}>
+                发送
+              </button>
+            </form>
+          </div>
+        )}
       </div>
     </article>
   )
@@ -69,18 +153,41 @@ function FeedCard({ item }) {
 
 export default function App() {
   const [token, setToken] = useState(() => localStorage.getItem(TOKEN_KEY) || '')
+  const [me, setMe] = useState(null)
   const [mode, setMode] = useState('login')
   const [account, setAccount] = useState('')
   const [password, setPassword] = useState('')
   const [nickname, setNickname] = useState('')
   const [authError, setAuthError] = useState('')
   const [busy, setBusy] = useState(false)
+  const [tab, setTab] = useState('feed')
 
+  const [scene, setScene] = useState('latest')
   const [items, setItems] = useState([])
   const [cursor, setCursor] = useState('')
   const [hasMore, setHasMore] = useState(false)
   const [feedError, setFeedError] = useState('')
   const [feedLoading, setFeedLoading] = useState(false)
+  const [comments, setComments] = useState({})
+  const feedSeq = useRef(0)
+
+  const [title, setTitle] = useState('')
+  const [videoFile, setVideoFile] = useState(null)
+  const [coverFile, setCoverFile] = useState(null)
+  const [publishNotice, setPublishNotice] = useState('')
+  const [publishError, setPublishError] = useState('')
+  const [publishing, setPublishing] = useState(false)
+
+  const [messages, setMessages] = useState([])
+  const [unread, setUnread] = useState(0)
+  const [messageError, setMessageError] = useState('')
+  const [messagesLoading, setMessagesLoading] = useState(false)
+
+  const [playback, setPlayback] = useState({ preload_count: 0, qos_sample_rate: 0 })
+  const [preloadIds, setPreloadIds] = useState([])
+  const [playbackError, setPlaybackError] = useState('')
+  const [playbackNotice, setPlaybackNotice] = useState('')
+  const [playbackLoading, setPlaybackLoading] = useState(false)
 
   // 按 clip_id 追加去重，避免翻页期间重复渲染同一条。
   const appendItems = useCallback((incoming) => {
@@ -97,15 +204,17 @@ export default function App() {
     })
   }, [])
 
-  // loadFeed 拉取一页 latest Feed；reset=true 表示首屏或切换账号后重置。
+  // loadFeed 拉取指定场景的一页；reset=true 时用请求序号丢弃过期响应。
   const loadFeed = useCallback(
-    async (nextToken, nextCursor, reset) => {
+    async (nextToken, nextScene, nextCursor, reset) => {
+      const seq = reset ? ++feedSeq.current : feedSeq.current
       setFeedLoading(true)
       setFeedError('')
       try {
-        const params = new URLSearchParams({ scene: 'latest', limit: '10' })
+        const params = new URLSearchParams({ scene: nextScene, limit: '10' })
         if (nextCursor) params.set('cursor', nextCursor)
         const data = await apiFetch(`/feed?${params.toString()}`, { token: nextToken })
+        if (seq !== feedSeq.current) return
         const page = (data && data.items) || []
         if (reset) {
           setItems(page)
@@ -115,19 +224,39 @@ export default function App() {
         setCursor((data && data.next_cursor) || '')
         setHasMore(Boolean(data && data.has_more))
       } catch (err) {
-        setFeedError(err.message)
+        if (seq === feedSeq.current) setFeedError(err.message)
       } finally {
-        setFeedLoading(false)
+        if (seq === feedSeq.current) setFeedLoading(false)
       }
     },
     [appendItems],
   )
 
+  // 登录后加载用户资料、Feed 与未读数。
   useEffect(() => {
-    if (token) {
-      loadFeed(token, '', true)
+    if (!token) {
+      setMe(null)
+      return undefined
     }
-  }, [token, loadFeed])
+    let alive = true
+    apiFetch('/users/me', { token })
+      .then((data) => {
+        if (alive) setMe(data)
+      })
+      .catch(() => {})
+    apiFetch('/message-stats/unread', { token })
+      .then((data) => {
+        if (alive) setUnread((data && data.unread) || 0)
+      })
+      .catch(() => {})
+    return () => {
+      alive = false
+    }
+  }, [token])
+
+  useEffect(() => {
+    if (token) loadFeed(token, scene, '', true)
+  }, [token, scene, loadFeed])
 
   async function handleAuth(event) {
     event.preventDefault()
@@ -148,6 +277,7 @@ export default function App() {
       if (!nextToken) throw new Error('登录响应缺少 access_token')
       localStorage.setItem(TOKEN_KEY, nextToken)
       setToken(nextToken)
+      setTab('feed')
     } catch (err) {
       setAuthError(err.message)
     } finally {
@@ -155,26 +285,301 @@ export default function App() {
     }
   }
 
-  function handleLogout() {
+  async function handleLogout() {
+    try {
+      await apiFetch('/sessions/current', { method: 'DELETE', token })
+    } catch {
+      // 登出失败不阻塞本地状态清理。
+    }
     localStorage.removeItem(TOKEN_KEY)
     setToken('')
+    setMe(null)
     setItems([])
     setCursor('')
     setHasMore(false)
-    setFeedError('')
+    setComments({})
+    setMessages([])
+    setUnread(0)
   }
 
   async function handleLoadMore() {
     if (!token || !hasMore || feedLoading) return
-    await loadFeed(token, cursor, false)
+    await loadFeed(token, scene, cursor, false)
   }
+
+  function patchItem(clipId, patch) {
+    setItems((prev) => prev.map((item) => (item.clip_id === clipId ? { ...item, ...patch } : item)))
+  }
+
+  // 点赞采用乐观更新：先改本地计数与状态，失败后回滚。
+  async function handleLike(item) {
+    const liked = !item.liked
+    const likeCount = Math.max(0, item.like_count + (liked ? 1 : -1))
+    patchItem(item.clip_id, { liked, like_count: likeCount })
+    try {
+      const data = await apiFetch(`/clips/${item.clip_id}/like`, {
+        method: liked ? 'PUT' : 'DELETE',
+        token,
+      })
+      patchItem(item.clip_id, { like_count: data.like_count, liked: data.active })
+    } catch (err) {
+      patchItem(item.clip_id, { liked: item.liked, like_count: item.like_count })
+      setFeedError(err.message)
+    }
+  }
+
+  // 收藏同样乐观更新并按服务端计数校正。
+  async function handleSave(item) {
+    const saved = !item.saved
+    const saveCount = Math.max(0, item.save_count + (saved ? 1 : -1))
+    patchItem(item.clip_id, { saved, save_count: saveCount })
+    try {
+      const data = await apiFetch(`/clips/${item.clip_id}/save`, {
+        method: saved ? 'PUT' : 'DELETE',
+        token,
+      })
+      patchItem(item.clip_id, { save_count: data.save_count, saved: data.active })
+    } catch (err) {
+      patchItem(item.clip_id, { saved: item.saved, save_count: item.save_count })
+      setFeedError(err.message)
+    }
+  }
+
+  async function handleToggleComments(clipId) {
+    const current = comments[clipId]
+    if (current && current.open) {
+      setComments((prev) => ({ ...prev, [clipId]: { ...current, open: false } }))
+      return
+    }
+    setComments((prev) => ({
+      ...prev,
+      [clipId]: { open: true, items: (current && current.items) || [], loading: true, error: '' },
+    }))
+    try {
+      const data = await apiFetch(`/clips/${clipId}/comments?limit=20`, { token })
+      const list = (data && data.items) || []
+      setComments((prev) => ({ ...prev, [clipId]: { open: true, items: list, loading: false, error: '' } }))
+    } catch (err) {
+      setComments((prev) => ({
+        ...prev,
+        [clipId]: { open: true, items: [], loading: false, error: err.message },
+      }))
+    }
+  }
+
+  // 评论乐观追加临时项，成功后替换为服务端评论，失败则移除并回滚计数。
+  async function handleSubmitComment(clipId, content) {
+    const tempId = `tmp-${Date.now()}`
+    const temp = {
+      id: tempId,
+      clip_id: clipId,
+      user_id: (me && me.user_id) || 0,
+      user_nickname: (me && me.nickname) || '我',
+      content,
+      created_at: new Date().toISOString(),
+    }
+    setComments((prev) => {
+      const current = prev[clipId] || { open: true, items: [], loading: false, error: '' }
+      return {
+        ...prev,
+        [clipId]: { ...current, open: true, items: [...current.items, temp], error: '' },
+      }
+    })
+    setItems((prev) =>
+      prev.map((item) =>
+        item.clip_id === clipId ? { ...item, comment_count: item.comment_count + 1 } : item,
+      ),
+    )
+    try {
+      const data = await apiFetch(`/clips/${clipId}/comments`, {
+        method: 'POST',
+        body: { content },
+        token,
+      })
+      setComments((prev) => {
+        const current = prev[clipId]
+        return {
+          ...prev,
+          [clipId]: {
+            ...current,
+            items: current.items.map((comment) => (comment.id === tempId ? data : comment)),
+          },
+        }
+      })
+      patchItem(clipId, { comment_count: data.comment_count })
+    } catch (err) {
+      setComments((prev) => {
+        const current = prev[clipId]
+        return {
+          ...prev,
+          [clipId]: {
+            ...current,
+            items: current.items.filter((comment) => comment.id !== tempId),
+            error: err.message,
+          },
+        }
+      })
+      setItems((prev) =>
+        prev.map((item) =>
+          item.clip_id === clipId
+            ? { ...item, comment_count: Math.max(0, item.comment_count - 1) }
+            : item,
+        ),
+      )
+    }
+  }
+
+  // 发布：先上传 clip 文件（可选封面），再创建 clip；成功后回到最新 Feed 刷新。
+  async function handlePublish(event) {
+    event.preventDefault()
+    setPublishError('')
+    setPublishNotice('')
+    if (!title.trim()) {
+      setPublishError('请填写标题')
+      return
+    }
+    if (!videoFile) {
+      setPublishError('请选择要上传的 clip 文件')
+      return
+    }
+    setPublishing(true)
+    try {
+      const videoForm = new FormData()
+      videoForm.append('file', videoFile)
+      videoForm.append('kind', 'video')
+      const video = await apiUpload('/uploads', videoForm, token)
+
+      let coverURL = ''
+      if (coverFile) {
+        const coverForm = new FormData()
+        coverForm.append('file', coverFile)
+        coverForm.append('kind', 'cover')
+        const cover = await apiUpload('/uploads', coverForm, token)
+        coverURL = cover.url
+      }
+
+      await apiFetch('/clips', {
+        method: 'POST',
+        token,
+        body: { title: title.trim(), video_url: video.url, cover_url: coverURL },
+      })
+      setPublishNotice('发布成功，已返回最新 Feed。')
+      setTitle('')
+      setVideoFile(null)
+      setCoverFile(null)
+      setScene('latest')
+      setTab('feed')
+      await loadFeed(token, 'latest', '', true)
+    } catch (err) {
+      setPublishError(err.message)
+    } finally {
+      setPublishing(false)
+    }
+  }
+
+  async function loadMessages() {
+    if (!token) return
+    setMessagesLoading(true)
+    setMessageError('')
+    try {
+      const data = await apiFetch('/messages?limit=20', { token })
+      setMessages((data && data.items) || [])
+    } catch (err) {
+      setMessageError(err.message)
+    } finally {
+      setMessagesLoading(false)
+    }
+  }
+
+  async function loadUnread() {
+    if (!token) return
+    try {
+      const data = await apiFetch('/message-stats/unread', { token })
+      setUnread((data && data.unread) || 0)
+    } catch {
+      // 未读数失败不阻塞页面。
+    }
+  }
+
+  async function handleMarkAllRead() {
+    if (!token) return
+    try {
+      await apiFetch('/messages', { method: 'PATCH', token })
+      setUnread(0)
+      setMessages((prev) => prev.map((message) => ({ ...message, read: true })))
+    } catch (err) {
+      setMessageError(err.message)
+    }
+  }
+
+  async function loadPlayback() {
+    if (!token) return
+    setPlaybackLoading(true)
+    setPlaybackError('')
+    try {
+      const data = await apiFetch('/playback-config', { token })
+      setPlayback({
+        preload_count: (data && data.preload_count) || 0,
+        qos_sample_rate: (data && data.qos_sample_rate) || 0,
+      })
+    } catch (err) {
+      setPlaybackError(err.message)
+    } finally {
+      setPlaybackLoading(false)
+    }
+  }
+
+  async function handleSavePlayback(event) {
+    event.preventDefault()
+    setPlaybackNotice('')
+    setPlaybackError('')
+    try {
+      const data = await apiFetch('/playback-config', {
+        method: 'PUT',
+        token,
+        body: {
+          preload_count: Number(playback.preload_count),
+          qos_sample_rate: Number(playback.qos_sample_rate),
+        },
+      })
+      setPlayback({
+        preload_count: data.preload_count,
+        qos_sample_rate: data.qos_sample_rate,
+      })
+      setPlaybackNotice('配置已保存')
+    } catch (err) {
+      setPlaybackError(err.message)
+    }
+  }
+
+  async function handleLoadPreload() {
+    setPlaybackError('')
+    try {
+      const data = await apiFetch('/preload-clips', { token })
+      setPreloadIds((data && data.clip_ids) || [])
+    } catch (err) {
+      setPlaybackError(err.message)
+    }
+  }
+
+  // 切换到消息/播放页时按需拉取数据。
+  useEffect(() => {
+    if (tab === 'messages' && token) {
+      loadMessages()
+      loadUnread()
+    }
+    if (tab === 'playback' && token) {
+      loadPlayback()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, token])
 
   if (!token) {
     return (
       <main className="page">
         <header className="hero">
           <h1>PulseFeed</h1>
-          <p>轻量 Feed 系统 · 登录后查看最新发布</p>
+          <p>轻量 Feed 系统 · 登录后浏览与发布</p>
         </header>
         <section className="panel">
           <div className="tabs">
@@ -216,10 +621,7 @@ export default function App() {
             {mode === 'register' && (
               <label>
                 昵称（可选）
-                <input
-                  value={nickname}
-                  onChange={(event) => setNickname(event.target.value)}
-                />
+                <input value={nickname} onChange={(event) => setNickname(event.target.value)} />
               </label>
             )}
             {authError && <p className="error">{authError}</p>}
@@ -237,33 +639,177 @@ export default function App() {
       <header className="topbar">
         <div>
           <h1>PulseFeed</h1>
-          <p className="subtle">latest Feed</p>
+          <p className="subtle">{me && me.nickname ? `你好，${me.nickname}` : '已登录'}</p>
         </div>
         <button type="button" className="ghost" onClick={handleLogout}>
           退出登录
         </button>
       </header>
 
-      {feedError && <p className="error">{feedError}</p>}
-      {items.length === 0 && !feedLoading && !feedError && (
-        <p className="empty">暂无可见 clip，先发布一条再刷新。</p>
+      <nav className="nav">
+        <button type="button" className={tab === 'feed' ? 'tab active' : 'tab'} onClick={() => setTab('feed')}>
+          首页
+        </button>
+        <button type="button" className={tab === 'publish' ? 'tab active' : 'tab'} onClick={() => setTab('publish')}>
+          发布
+        </button>
+        <button type="button" className={tab === 'messages' ? 'tab active' : 'tab'} onClick={() => setTab('messages')}>
+          消息{unread > 0 ? <span className="badge">{unread}</span> : null}
+        </button>
+        <button type="button" className={tab === 'playback' ? 'tab active' : 'tab'} onClick={() => setTab('playback')}>
+          播放
+        </button>
+      </nav>
+
+      {tab === 'feed' && (
+        <>
+          <div className="scene-tabs">
+            {SCENES.map((entry) => (
+              <button
+                key={entry.key}
+                type="button"
+                className={scene === entry.key ? 'scene active' : 'scene'}
+                onClick={() => setScene(entry.key)}
+                disabled={feedLoading && scene === entry.key}
+              >
+                {entry.label}
+              </button>
+            ))}
+          </div>
+
+          {feedError && <p className="error">{feedError}</p>}
+          {items.length === 0 && !feedLoading && !feedError && (
+            <p className="empty">该场景暂无 clip，去「发布」上传一条吧。</p>
+          )}
+
+          <section className="feed">
+            {items.map((item) => (
+              <FeedCard
+                key={item.clip_id}
+                item={item}
+                comments={comments}
+                busy={busy}
+                onLike={handleLike}
+                onSave={handleSave}
+                onToggleComments={handleToggleComments}
+                onSubmitComment={handleSubmitComment}
+              />
+            ))}
+          </section>
+
+          <footer className="load-more">
+            {hasMore ? (
+              <button type="button" className="primary" onClick={handleLoadMore} disabled={feedLoading}>
+                {feedLoading ? '加载中…' : '加载更多'}
+              </button>
+            ) : (
+              items.length > 0 && <p className="subtle">已经到底了</p>
+            )}
+          </footer>
+        </>
       )}
 
-      <section className="feed">
-        {items.map((item) => (
-          <FeedCard key={item.clip_id} item={item} />
-        ))}
-      </section>
+      {tab === 'publish' && (
+        <section className="panel">
+          <h2 className="section-title">上传并发布</h2>
+          <form className="publish-form" onSubmit={handlePublish}>
+            <label>
+              标题
+              <input value={title} onChange={(event) => setTitle(event.target.value)} required />
+            </label>
+            <label>
+              clip 文件（mp4 / mov / webm）
+              <input
+                type="file"
+                accept=".mp4,.mov,.webm,video/*"
+                onChange={(event) => setVideoFile(event.target.files?.[0] || null)}
+              />
+            </label>
+            <label>
+              封面（可选，jpg / png / webp）
+              <input
+                type="file"
+                accept=".jpg,.jpeg,.png,.webp,image/*"
+                onChange={(event) => setCoverFile(event.target.files?.[0] || null)}
+              />
+            </label>
+            {publishError && <p className="error">{publishError}</p>}
+            {publishNotice && <p className="notice">{publishNotice}</p>}
+            <button type="submit" className="primary" disabled={publishing}>
+              {publishing ? '上传中…' : '上传并发布'}
+            </button>
+          </form>
+        </section>
+      )}
 
-      <footer className="load-more">
-        {hasMore ? (
-          <button type="button" className="primary" onClick={handleLoadMore} disabled={feedLoading}>
-            {feedLoading ? '加载中…' : '加载更多'}
-          </button>
-        ) : (
-          items.length > 0 && <p className="subtle">已经到底了</p>
-        )}
-      </footer>
+      {tab === 'messages' && (
+        <section className="panel">
+          <div className="panel-head">
+            <h2 className="section-title">站内消息</h2>
+            <button type="button" className="ghost" onClick={handleMarkAllRead} disabled={unread === 0}>
+              全部标记已读
+            </button>
+          </div>
+          {messageError && <p className="error">{messageError}</p>}
+          {messagesLoading && <p className="subtle">加载中…</p>}
+          {!messagesLoading && messages.length === 0 && <p className="subtle">暂无消息。</p>}
+          <ul className="message-list">
+            {messages.map((message) => (
+              <li key={message.id} className={message.read ? 'message' : 'message unread'}>
+                <span className="message-kind">{message.kind}</span>
+                <span className="message-text">
+                  来自用户 {message.actor_id} · 目标 {message.target_id}
+                </span>
+                <span className="subtle">{new Date(message.created_at).toLocaleString()}</span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
+      {tab === 'playback' && (
+        <section className="panel">
+          <h2 className="section-title">播放配置</h2>
+          {playbackError && <p className="error">{playbackError}</p>}
+          {playbackLoading && <p className="subtle">加载中…</p>}
+          <form className="publish-form" onSubmit={handleSavePlayback}>
+            <label>
+              预加载条数
+              <input
+                type="number"
+                min="0"
+                value={playback.preload_count}
+                onChange={(event) =>
+                  setPlayback((prev) => ({ ...prev, preload_count: Number(event.target.value) }))
+                }
+              />
+            </label>
+            <label>
+              QoS 采样率
+              <input
+                type="number"
+                min="0"
+                max="1"
+                step="0.01"
+                value={playback.qos_sample_rate}
+                onChange={(event) =>
+                  setPlayback((prev) => ({ ...prev, qos_sample_rate: Number(event.target.value) }))
+                }
+              />
+            </label>
+            <div className="inline-actions">
+              <button type="submit" className="primary">
+                保存配置
+              </button>
+              <button type="button" className="ghost" onClick={handleLoadPreload}>
+                查看预加载列表
+              </button>
+            </div>
+            {playbackNotice && <p className="notice">{playbackNotice}</p>}
+            {preloadIds.length > 0 && <p className="subtle">预加载 clip_id：{preloadIds.join(', ')}</p>}
+          </form>
+        </section>
+      )}
     </main>
   )
 }
