@@ -82,3 +82,15 @@ interfaces/http  →  application  →  domain
   2. 预热写入的是全局首页页缓存，发布/删除/状态变更后缺少逐页失效手段；一旦预热数据过期，全站首页会看到旧内容。
   3. 预热请求的 `limit`/游标组合与真实流量不一致，命中率无法保证，反而可能挤掉真实请求的缓存。
 - **替代方向**：若要降低首屏回源延迟，优先依赖已有的卡片缓存（15min）与计数缓存（15s），以及 `pf_clips` 的 timeline 索引，而不是页级预热。
+
+### 6.2 复合游标沿用 `OR` 展开，不改行比较
+
+- **结论**：latest/following 的游标条件保持 `published_at < ? OR (published_at = ? AND id < ?)`，不改成 `(published_at, id) < (?, ?)`。
+- **依据**：在本机 MySQL 8.0 上用 20 万行同构数据实测，`OR` 形式被优化为 `idx_clip_timeline` 的范围扫描（`type=range`，深游标 0.3ms）；行比较形式退化为索引全扫 + `Filter`（扫 14.7 万行，535ms）。
+- **取舍**：`OR` 写法略啰嗦，但能真正走索引；只有换到明确支持行比较下推的存储时再重新评估。
+
+### 6.3 已知测试缺口（本轮不补）
+
+- **RabbitMQ 重投递**：`ActionWorker` 的幂等已有单测覆盖（同一事件消费两次、以及“先成功后失败”分支），但 broker 层的 basic.nack/requeue 与死信未做集成验证，需要真实 MQ 或 testcontainers。
+- **前端自动化**：`apps/web` 目前只有 CI 构建（`npm ci` + `vite build`），没有组件测试或 E2E；交互回归仍靠手工。
+- **真实 MySQL 迁移**：索引建法只在本地 8.0 实例验证过，没有 testcontainers 回归，MySQL 版本升级时需要重新跑 EXPLAIN。
