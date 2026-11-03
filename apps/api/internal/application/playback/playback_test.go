@@ -1,0 +1,234 @@
+// playback_test.go 用内存 fake 仓储验证播放配置默认值（preload_count=8、qos_sample_rate=0.1）、
+// 更新回读、预加载最新 clip_id 列表，以及 QoS 同 event_id 幂等、不同 event 累加指标。
+package appplayback_test
+
+import (
+	"context"
+	"errors"
+	"testing"
+
+	appplayback "pulsefeed/internal/application/playback"
+	domplayback "pulsefeed/internal/domain/playback"
+)
+
+// playbackFake 是内存版 playback 仓储，按领域端口语义保存配置与 QoS 上报。
+type playbackFake struct {
+	configs       map[int64]*domplayback.Config
+	qosEvents     map[string]struct{}
+	latencyTotal  int
+	stallTotal    int
+	completedRows int
+	qosRows       int
+}
+
+// newPlaybackFake 构造空的内存仓储。
+func newPlaybackFake() *playbackFake {
+	return &playbackFake{
+		configs:   map[int64]*domplayback.Config{},
+		qosEvents: map[string]struct{}{},
+	}
+}
+
+// GetOrCreateConfig 未命中时返回归一化后的默认配置（不落库）。
+func (f *playbackFake) GetOrCreateConfig(_ context.Context, userID int64) (*domplayback.Config, error) {
+	if userID <= 0 {
+		return nil, domplayback.ErrInvalidConfigUser
+	}
+	if stored, ok := f.configs[userID]; ok {
+		cfg := *stored
+		cfg.Normalize()
+		return &cfg, nil
+	}
+	cfg := &domplayback.Config{UserID: userID}
+	cfg.Normalize()
+	return cfg, nil
+}
+
+// UpsertConfig 写入并返回归一化后的配置副本。
+func (f *playbackFake) UpsertConfig(_ context.Context, cfg *domplayback.Config) (*domplayback.Config, error) {
+	if cfg == nil || cfg.UserID <= 0 {
+		return nil, domplayback.ErrInvalidConfigUser
+	}
+	stored := *cfg
+	stored.Normalize()
+	f.configs[cfg.UserID] = &stored
+	result := stored
+	return &result, nil
+}
+
+// CreateQoS 按 event_id 幂等插入，仅新事件累加延迟/卡顿/完播指标。
+func (f *playbackFake) CreateQoS(_ context.Context, report *domplayback.QoSReport) (bool, error) {
+	if report == nil {
+		return false, domplayback.ErrInvalidReportTarget
+	}
+	if err := report.Validate(); err != nil {
+		return false, err
+	}
+	if _, exists := f.qosEvents[report.EventID]; exists {
+		return false, nil
+	}
+	f.qosEvents[report.EventID] = struct{}{}
+	f.qosRows++
+	f.latencyTotal += report.LatencyMS
+	f.stallTotal += report.StallCount
+	if report.Completed {
+		f.completedRows++
+	}
+	return true, nil
+}
+
+// playbackFakeClips 是内存版预加载数据源，按传入顺序返回最新的 limit 条 clip_id。
+type playbackFakeClips struct {
+	ids      []int64
+	gotCall  int
+	gotLimit int
+}
+
+// ListLatestIDs 模拟按 (published_at, id) 递减的最新列表，最多返回 limit 条。
+func (c *playbackFakeClips) ListLatestIDs(_ context.Context, limit int) ([]int64, error) {
+	c.gotCall++
+	c.gotLimit = limit
+	if limit > len(c.ids) {
+		limit = len(c.ids)
+	}
+	result := make([]int64, limit)
+	copy(result, c.ids[:limit])
+	return result, nil
+}
+
+// TestPlaybackDefaultConfig 验证未设置配置时返回 preload_count=8、qos_sample_rate=0.1。
+func TestPlaybackDefaultConfig(t *testing.T) {
+	service := appplayback.New(newPlaybackFake(), nil)
+
+	cfg, err := service.GetConfig(context.Background(), 42)
+	if err != nil {
+		t.Fatalf("读取默认配置失败: %v", err)
+	}
+	if cfg.PreloadCount != 8 {
+		t.Fatalf("默认 preload_count 期望 8，实际 %d", cfg.PreloadCount)
+	}
+	if cfg.QoSSampleRate != 0.1 {
+		t.Fatalf("默认 qos_sample_rate 期望 0.1，实际 %v", cfg.QoSSampleRate)
+	}
+}
+
+// TestPlaybackUpsertConfigReadBack 验证更新配置后可读回，零值被归一化为默认。
+func TestPlaybackUpsertConfigReadBack(t *testing.T) {
+	service := appplayback.New(newPlaybackFake(), nil)
+	ctx := context.Background()
+
+	written, err := service.UpsertConfig(ctx, 42, 12, 0.25)
+	if err != nil {
+		t.Fatalf("更新配置失败: %v", err)
+	}
+	if written.PreloadCount != 12 || written.QoSSampleRate != 0.25 {
+		t.Fatalf("返回落库值不符: %+v", written)
+	}
+
+	read, err := service.GetConfig(ctx, 42)
+	if err != nil {
+		t.Fatalf("读回配置失败: %v", err)
+	}
+	if read.PreloadCount != 12 || read.QoSSampleRate != 0.25 {
+		t.Fatalf("读回配置不符: preload=%d sample=%v", read.PreloadCount, read.QoSSampleRate)
+	}
+
+	normalized, err := service.UpsertConfig(ctx, 42, 0, 0)
+	if err != nil {
+		t.Fatalf("更新零值配置失败: %v", err)
+	}
+	if normalized.PreloadCount != 8 || normalized.QoSSampleRate != 0.1 {
+		t.Fatalf("零值配置应归一化为默认值，实际 preload=%d sample=%v", normalized.PreloadCount, normalized.QoSSampleRate)
+	}
+}
+
+// TestPlaybackPreloadReturnsLatestClips 验证预加载按配置条数返回最新的 clip_id。
+func TestPlaybackPreloadReturnsLatestClips(t *testing.T) {
+	clips := &playbackFakeClips{ids: []int64{101, 102, 103, 104, 105}}
+	service := appplayback.New(newPlaybackFake(), clips)
+	ctx := context.Background()
+
+	if _, err := service.UpsertConfig(ctx, 43, 3, 0.5); err != nil {
+		t.Fatalf("更新预加载条数失败: %v", err)
+	}
+
+	ids, err := service.GetPreload(ctx, 43)
+	if err != nil {
+		t.Fatalf("读取预加载列表失败: %v", err)
+	}
+	if clips.gotLimit != 3 {
+		t.Fatalf("预加载数据源应收到 limit=3，实际 %d", clips.gotLimit)
+	}
+	if len(ids) != 3 {
+		t.Fatalf("期望返回 3 条 clip_id，实际 %d", len(ids))
+	}
+	for i, want := range []int64{101, 102, 103} {
+		if ids[i] != want {
+			t.Fatalf("第 %d 条 clip_id 期望 %d，实际 %d", i+1, want, ids[i])
+		}
+	}
+}
+
+// TestPlaybackQoSReportIdempotent 验证同 event_id 重复上报只计一次，不同 event 累加指标。
+func TestPlaybackQoSReportIdempotent(t *testing.T) {
+	repo := newPlaybackFake()
+	service := appplayback.New(repo, nil)
+	ctx := context.Background()
+
+	first := &domplayback.QoSReport{ClipID: 21, EventID: "evt-1", LatencyMS: 120, StallCount: 1, Completed: true}
+	inserted, err := service.ReportQoS(ctx, 5, first)
+	if err != nil {
+		t.Fatalf("首次上报失败: %v", err)
+	}
+	if !inserted {
+		t.Fatalf("首次上报期望 inserted=true")
+	}
+	if first.ReporterID != 5 {
+		t.Fatalf("服务应回填上报者 ID，实际 %d", first.ReporterID)
+	}
+
+	duplicate := &domplayback.QoSReport{ClipID: 21, EventID: "evt-1", LatencyMS: 500, StallCount: 4, Completed: true}
+	inserted, err = service.ReportQoS(ctx, 5, duplicate)
+	if err != nil {
+		t.Fatalf("重复上报失败: %v", err)
+	}
+	if inserted {
+		t.Fatalf("同 event_id 重复上报期望 inserted=false")
+	}
+	if repo.qosRows != 1 || repo.latencyTotal != 120 || repo.stallTotal != 1 || repo.completedRows != 1 {
+		t.Fatalf("重复上报不应累加指标，实际 rows=%d latency=%d stall=%d completed=%d",
+			repo.qosRows, repo.latencyTotal, repo.stallTotal, repo.completedRows)
+	}
+
+	another := &domplayback.QoSReport{ClipID: 21, EventID: "evt-2", LatencyMS: 80, StallCount: 2}
+	inserted, err = service.ReportQoS(ctx, 5, another)
+	if err != nil {
+		t.Fatalf("新事件上报失败: %v", err)
+	}
+	if !inserted {
+		t.Fatalf("不同 event_id 期望 inserted=true")
+	}
+	if repo.qosRows != 2 || repo.latencyTotal != 200 || repo.stallTotal != 3 || repo.completedRows != 1 {
+		t.Fatalf("不同事件应累加指标，实际 rows=%d latency=%d stall=%d completed=%d",
+			repo.qosRows, repo.latencyTotal, repo.stallTotal, repo.completedRows)
+	}
+}
+
+// TestPlaybackRejectsInvalidArguments 验证非法用户、空 event_id 与负指标被拒绝。
+func TestPlaybackRejectsInvalidArguments(t *testing.T) {
+	service := appplayback.New(newPlaybackFake(), nil)
+	ctx := context.Background()
+
+	if _, err := service.GetConfig(ctx, 0); !errors.Is(err, domplayback.ErrInvalidConfigUser) {
+		t.Fatalf("非法用户期望 ErrInvalidConfigUser，实际 %v", err)
+	}
+	if _, err := service.ReportQoS(ctx, 0, &domplayback.QoSReport{ClipID: 1, EventID: "x"}); !errors.Is(err, domplayback.ErrInvalidReportTarget) {
+		t.Fatalf("上报者非正期望 ErrInvalidReportTarget，实际 %v", err)
+	}
+	if _, err := service.ReportQoS(ctx, 1, &domplayback.QoSReport{ClipID: 1}); !errors.Is(err, domplayback.ErrEventIDEmpty) {
+		t.Fatalf("空 event_id 期望 ErrEventIDEmpty，实际 %v", err)
+	}
+	if _, err := service.ReportQoS(ctx, 1, &domplayback.QoSReport{ClipID: 1, EventID: "neg", LatencyMS: -1}); !errors.Is(err, domplayback.ErrInvalidMetric) {
+		t.Fatalf("负延迟期望 ErrInvalidMetric，实际 %v", err)
+	}
+}

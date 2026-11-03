@@ -1,0 +1,72 @@
+# PulseFeed 架构说明
+
+本文只描述当前已实现的结构与数据流，不包含后续规划。
+
+## 1. 分层边界
+
+```
+interfaces/http  →  application  →  domain
+        ↑                 ↑            ↑
+        └──────────── infra ───────────┘（实现 domain 端口，由组合根注入）
+```
+
+- `domain/`：实体、值对象、错误哨兵、仓储端口；不依赖框架与基础设施。
+- `application/`：用例编排（账号、发布、Feed 策略、互动、关注、推荐、消息、播放）与 MQ Worker；只依赖 `domain` 端口和 `application/observability` 的指标端口。
+- `infra/`：GORM 仓储、Redis 缓存、RabbitMQ 客户端、JWT、Prometheus 指标、配置加载；实现 `domain` 端口。
+- `interfaces/http/`：DTO、Handler、JWT/内部 token 中间件、路由装配；统一响应 `{code,message,data}`。
+- `cmd/api`、`cmd/worker`：两个组合根，负责配置校验、依赖装配、进程生命周期与优雅退出。
+
+## 2. 关键数据流
+
+### 2.1 发布与扇出
+
+1. `POST /api/clips` 校验登录、标题与地址，按 `Idempotency-Key` 幂等写入 `pf_clips` 与 `pf_clip_stats`。
+2. 发布成功后投递 `clip.published`（含 `clip_id`、`creator_id`、`published_at`）。
+3. `FanoutWorker` 读取创作者粉丝数：达到大 V 阈值只写创作者 outbox（拉模型）；否则按 500/批写入粉丝 inbox（推模型），并预热卡片与计数缓存。
+4. 关注类 Feed 优先读 inbox/outbox，未命中时回源 DB 并按游标分页。
+
+### 2.2 互动
+
+1. 点赞/收藏先以 `(user_id, clip_id, action_type)` 幂等更新 Redis 与 DB 状态，计数只在状态变化时增减。
+2. 状态变化后投递 `interaction.action_changed`；`ActionWorker` 消费后维护计数与消息事件。
+3. 评论走同步落库，按 `Idempotency-Key` 去重；评论数随创建/删除同步更新。
+4. 前端对点赞/收藏做乐观更新，请求失败时回滚。
+
+### 2.3 曝光、播放与 QoS
+
+1. `POST /api/clip-play-events` 按 `event_id` 幂等写入 `pf_play_events`，并 upsert 曝光记录；重复事件不重复累加 `play_count`。
+2. 事件投递 `impression.play_recorded`；`PlayEventWorker`（D7 修正）消费后完成曝光聚合补偿，避免“只发不收”。
+3. `POST /api/playback-qos-reports` 按 `event_id` 幂等写入 QoS 表；仅首次插入参与采样与延迟/卡顿/完播聚合。
+4. 播放配置按用户持久化 `preload_count`、`qos_sample_rate`；预加载接口返回最新 N 个可见 clip。
+
+### 2.4 Feed 读取
+
+`GET /api/feed?scene=...` 由 `application/feed.Service` 按场景选择策略：
+
+| 场景 | 排序 / 来源 | 游标 |
+|---|---|---|
+| latest | `published_at DESC, clip_id DESC` | 复合游标 `(published_at, clip_id)` |
+| following | inbox/outbox，回源 DB | 复合游标 `(published_at, clip_id)` |
+| hot | 热度分数（点赞/收藏/评论/播放加权） | 复合游标 `(score, clip_id)`，窗口为最近 60 个分钟桶 |
+| for-you | 推荐候选 → 兴趣向量与热度加权 → 按创作者交错 | 携带 `snapshot_at`，交错后按最后实际输出条目生成 |
+
+分页统一 `limit+1` 判断 `has_more`，响应返回 Base64 `next_cursor`；跨页按 `clip_id` 去重。for-you 的 `snapshot_at` 保证翻页期间候选池不随新发布漂移。
+
+## 3. 一致性与幂等
+
+- 写接口按 `Idempotency-Key` 去重；MQ 事件按 `event_id` 去重。
+- 互动计数只在状态变化时更新，重复点赞/收藏不累加。
+- 播放计数与 QoS 聚合均以首次插入为准；QoS 采样率只影响上报与否，不影响已落库数据。
+- GORM `AutoMigrate` 对重复列/索引错误做 3 次退避重试；Worker 等待 API 迁移完成后再启动，避免并发建表。
+
+## 4. 可观测性
+
+- API 与 Worker 各自持有独立 Prometheus Registry，指标前缀 `pulsefeed_`。
+- HTTP 中间件在注册路由前挂载，记录请求量、状态码与延迟。
+- Feed 指标覆盖场景请求、缓存命中/未命中、分页耗时；Worker 指标覆盖消费事件数与结果；播放指标覆盖 QoS 上报、延迟直方图与卡顿。
+- Grafana 通过 provisioning 自动加载 `pulsefeed-prometheus` 数据源与 16 面板仪表盘；Prometheus 抓取 `api:8090/metrics` 与 `worker:9092/metrics`。
+
+## 5. 部署形态
+
+- 本地：`docker compose` 启动 MySQL/Redis/RabbitMQ/API/Worker/Web，`monitoring` profile 额外启动 Prometheus/Grafana。
+- 集群：`apps/deploy.yaml` 提供 Namespace、Secret、PVC、6 个 Deployment 与对应 Service，探针使用 `/health`、`/metrics`、`/`。K8s 清单尚未做集群级校验。

@@ -93,7 +93,7 @@
 | mysql | `3307` | `3306` | 避免与本机 3306 冲突 |
 | redis | `6380` | `6379` | |
 | rabbitmq | `5673` / `15673` | `5672` / `15672` | 15673 为管理台 |
-| prometheus | `9090` | `9090` | 仅 `--profile monitoring`（配置属 S21） |
+| prometheus | `19090` | `9090` | 仅 `--profile monitoring`；9090 落在 Win11 Hyper-V 保留段 9020–9119，故映射 19090（S21） |
 | grafana | `3000` | `3000` | 仅 `--profile monitoring`（配置属 S21） |
 
 前端开发态（`npm run dev`）与容器态路径一致：均以 `/api`、`/uploads` 为前缀，S19 无需区分环境改 baseURL。
