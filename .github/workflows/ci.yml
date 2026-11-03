@@ -1,0 +1,92 @@
+name: CI
+
+# 后端改动与前端改动分开跑：任一被修改就触发，避免只改文档时浪费构建时间。
+on:
+  push:
+    paths:
+      - 'apps/api/**'
+      - 'apps/web/**'
+      - '.github/workflows/**'
+  pull_request:
+    paths:
+      - 'apps/api/**'
+      - 'apps/web/**'
+      - '.github/workflows/**'
+
+permissions:
+  contents: read
+
+jobs:
+  api:
+    name: api build/vet/test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/api
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # gofmt 门禁需要与基线 commit 做 diff，浅克隆取不到基线。
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: apps/api/go.mod
+          cache-dependency-path: apps/api/go.sum
+
+      # 只检查本次改动涉及的 Go 文件。仓库历史遗留的 CRLF 工作区副本会让
+      # 裸 gofmt -l . 报出几十个既有文件，不能作为门禁。
+      - name: gofmt (changed Go files only)
+        shell: bash
+        # diff 与 gofmt 都在仓库根执行，保证输出路径可直接喂给 gofmt。
+        working-directory: ${{ github.workspace }}
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="${{ github.event.pull_request.base.sha }}"
+          else
+            BASE="${{ github.event.before }}"
+          fi
+          if [ -z "$BASE" ] || ! git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
+            BASE=$(git rev-list --max-parents=0 HEAD)
+          fi
+          FILES=$(git diff --name-only --diff-filter=ACM "$BASE" HEAD -- 'apps/api/**/*.go' | grep -v '^vendor/' || true)
+          if [ -z "$FILES" ]; then
+            echo "本次改动没有 Go 文件，跳过格式检查"
+            exit 0
+          fi
+          UNFORMATTED=$(gofmt -l $FILES)
+          if [ -n "$UNFORMATTED" ]; then
+            echo "以下文件未通过 gofmt："
+            echo "$UNFORMATTED"
+            exit 1
+          fi
+
+      - name: go build
+        run: go build ./...
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test ./...
+
+  web:
+    name: web build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: npm ci
+        run: npm ci
+
+      - name: build
+        run: npm run build
