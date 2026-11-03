@@ -5,6 +5,8 @@ import (
 	"errors"
 	"time"
 
+	infrafeed "pulsefeed/internal/infra/persistence/feed"
+
 	"github.com/go-sql-driver/mysql"
 	"gorm.io/gorm"
 )
@@ -18,15 +20,19 @@ const (
 
 // AutoMigrate 对给定模型切片执行 GORM 迁移；模型为空时不产生任何 DDL。
 // 仅对并发迁移场景下的重复列（1060）/重复索引（1061）错误重试，其余错误直接返回。
+// 建表完成后在迁移末尾补建 timeline 索引，索引已存在时跳过。
 func AutoMigrate(db *gorm.DB, models ...any) error {
 	var err error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		if err = db.AutoMigrate(models...); err == nil || !isRetryableSchemaError(err) {
-			return err
+			break
 		}
 		time.Sleep(retryBackoff)
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	return infrafeed.EnsureTimelineIndex(db)
 }
 
 // isRetryableSchemaError 判断错误是否为可重试的重复列/重复索引 MySQL 错误。

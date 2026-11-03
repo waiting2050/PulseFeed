@@ -34,6 +34,25 @@ func New(db *gorm.DB) *Repository {
 	return &Repository{db: db}
 }
 
+// EnsureTimelineIndex 幂等创建 latest/following 回源查询所需的 timeline 索引：
+// 先查 information_schema.statistics，已存在则跳过，否则按 (status, published_at DESC, id DESC) 建索引。
+// published_at 在 pf_clips 上为 NOT NULL，无需额外的空值过滤列。
+func EnsureTimelineIndex(db *gorm.DB) error {
+	var count int64
+	err := db.Raw(
+		"SELECT COUNT(1) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = ? AND index_name = ?",
+		"pf_clips",
+		"idx_clip_timeline",
+	).Scan(&count).Error
+	if err != nil {
+		return err
+	}
+	if count > 0 {
+		return nil
+	}
+	return db.Exec("CREATE INDEX idx_clip_timeline ON pf_clips (status, published_at DESC, id DESC)").Error
+}
+
 // ListLatestPage 按 (published_at, id) 严格递减分页返回可见 clip 条目，
 // 计数经 LEFT JOIN pf_clip_stats 一并读出；复合游标保证翻页不重不漏。
 func (r *Repository) ListLatestPage(ctx context.Context, cursor *domfeed.Cursor, limit int) ([]*domfeed.FeedEntry, error) {
