@@ -70,3 +70,15 @@ interfaces/http  →  application  →  domain
 
 - 本地：`docker compose` 启动 MySQL/Redis/RabbitMQ/API/Worker/Web，`monitoring` profile 额外启动 Prometheus/Grafana。
 - 集群：`apps/deploy.yaml` 提供 Namespace、Secret、PVC、6 个 Deployment 与对应 Service，探针使用 `/health`、`/metrics`、`/`。K8s 清单尚未做集群级校验。
+
+## 6. 决策记录（明确不做）
+
+### 6.1 latest 流不做预加载 / 预热
+
+- **结论**：不实现 latest 的 preload / warmup / 定时预热，只保留"首次请求回源 + 页缓存"（`application/feed/service.go` 的 `loadFeedPage`）。TODO 保留，不落地。
+- **对照原实现**：GCFeed 的 latest 同样没有预热逻辑，只有首次请求回源并回填缓存，本项不做属于对齐现状，不是新增缺口。
+- **理由**：
+  1. 首页页缓存 TTL 仅 5s（`infra/cache/feed_cache.go` 的 `firstPageTTL`），预热结果最多 5 秒即失效，有效期过短，预热成本换不回命中率。
+  2. 预热写入的是全局首页页缓存，发布/删除/状态变更后缺少逐页失效手段；一旦预热数据过期，全站首页会看到旧内容。
+  3. 预热请求的 `limit`/游标组合与真实流量不一致，命中率无法保证，反而可能挤掉真实请求的缓存。
+- **替代方向**：若要降低首屏回源延迟，优先依赖已有的卡片缓存（15min）与计数缓存（15s），以及 `pf_clips` 的 timeline 索引，而不是页级预热。
