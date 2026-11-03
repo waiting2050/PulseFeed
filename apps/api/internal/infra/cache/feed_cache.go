@@ -63,6 +63,8 @@ var ErrHotWindowUnavailable = errors.New("热度窗口缓存不可用")
 // FeedCache 是 Feed 三级缓存的 Redis 实现；client 为 nil 表示缓存禁用。
 type FeedCache struct {
 	client *redis.Client
+	// now 返回当前时间；为 nil 时使用 time.Now，测试可注入固定时钟验证分钟桶翻转。
+	now func() time.Time
 }
 
 // NewFeedCache 创建 Feed 缓存；client 传 nil 时缓存禁用，全部操作降级。
@@ -73,6 +75,14 @@ func NewFeedCache(client *redis.Client) *FeedCache {
 // Enabled 报告缓存是否启用。
 func (c *FeedCache) Enabled() bool {
 	return c != nil && c.client != nil
+}
+
+// clock 返回当前时间；未注入时钟时回退到 time.Now，生产行为保持不变。
+func (c *FeedCache) clock() time.Time {
+	if c.now == nil {
+		return time.Now()
+	}
+	return c.now()
 }
 
 // GetPage 读取一页 Feed 条目缓存；未命中或缓存不可用时返回 ok=false。
@@ -357,7 +367,7 @@ func (c *FeedCache) RecordHotScore(ctx context.Context, clipID int64, delta floa
 	if !c.Enabled() || clipID <= 0 || delta <= 0 {
 		return
 	}
-	key := hotBucketKey(time.Now())
+	key := hotBucketKey(c.clock())
 	if err := c.client.ZIncrBy(ctx, key, delta, strconv.FormatInt(clipID, 10)).Err(); err != nil {
 		log.Printf("warning: 热度分钟桶写入失败 (clip_id=%d): %v", clipID, err)
 		return
@@ -375,7 +385,7 @@ func (c *FeedCache) ListHotWindow(ctx context.Context) ([]domfeed.HotItem, error
 	}
 
 	// 取最近 N 个分钟桶，统一格式化为 yyyyMMddHHmm（分钟精度）。
-	now := time.Now()
+	now := c.clock()
 	keys := make([]string, 0, hotWindowBuckets)
 	for i := 0; i < hotWindowBuckets; i++ {
 		keys = append(keys, hotBucketKey(now.Add(-time.Duration(i)*time.Minute)))
