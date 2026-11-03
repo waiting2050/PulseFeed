@@ -213,14 +213,6 @@ func (c *FeedCache) SetStats(ctx context.Context, stats map[int64]*domfeed.Entry
 	}
 }
 
-// ActionState 是单条互动状态快照，供批量回填缓存使用。
-type ActionState struct {
-	UserID     int64
-	ClipID     int64
-	ActionType dominteraction.ActionType
-	Active     bool
-}
-
 // SetActionState 以 WATCH + 事务管道更新读者对某个 clip 的行为状态，
 // 仅在状态真正变化时按用户散列累加/累减 16 分片计数；Redis 未启用时返回 ErrActionStateUnavailable。
 func (c *FeedCache) SetActionState(ctx context.Context, userID, clipID int64, actionType dominteraction.ActionType, active bool) (*dominteraction.ActionResult, error) {
@@ -305,27 +297,6 @@ func (c *FeedCache) SetActionState(ctx context.Context, userID, clipID int64, ac
 		}, nil
 	}
 	return nil, fmt.Errorf("更新互动状态缓存冲突重试耗尽: %w", lastErr)
-}
-
-// BatchSetActionStates 批量写入行为状态（不调整计数），供离线/回放场景同步 Redis 快照。
-func (c *FeedCache) BatchSetActionStates(ctx context.Context, states []ActionState) {
-	if !c.Enabled() || len(states) == 0 {
-		return
-	}
-	pipe := c.client.Pipeline()
-	for _, state := range states {
-		if !state.ActionType.Valid() {
-			continue
-		}
-		value := "0"
-		if state.Active {
-			value = "1"
-		}
-		pipe.Set(ctx, actionStateKey(state.ClipID, state.UserID, state.ActionType), value, 0)
-	}
-	if _, err := pipe.Exec(ctx); err != nil {
-		log.Printf("warning: 批量写入互动状态缓存失败: %v", err)
-	}
 }
 
 // sumActionCounts 汇总某个 clip 的点赞/收藏 16 分片计数。
