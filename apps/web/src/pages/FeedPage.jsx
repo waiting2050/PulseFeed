@@ -1,10 +1,13 @@
-// FeedPage.jsx 组织场景切换、栅格、骨架屏、空态与错误态；数据仍由上层 App 通过现有 API 提供。
-import React from 'react'
+// FeedPage.jsx 组织场景切换、栅格、骨架屏、空态/错误态、分页与详情弹层。
+import React, { useCallback, useEffect, useState } from 'react'
 import SceneTabs from '../components/SceneTabs.jsx'
 import ClipCard from '../components/ClipCard.jsx'
 import SkeletonCard from '../components/SkeletonCard.jsx'
 import EmptyState from '../components/EmptyState.jsx'
 import ErrorBanner from '../components/ErrorBanner.jsx'
+import DetailSheet from '../components/DetailSheet.jsx'
+import useApi from '../hooks/useApi.js'
+import { api } from '../lib/api.js'
 
 const SCENES = [
   { key: 'latest', label: '最新' },
@@ -20,42 +23,119 @@ const SCENE_HINTS = {
   'for-you': '按兴趣推荐',
 }
 
-// 仅开发模式支持 ?state=loading|empty，用于本地预览骨架与空态；生产构建会消除该分支。
-function readPreviewState() {
-  if (!import.meta.env.DEV) return ''
-  const value = new URLSearchParams(window.location.search).get('state')
-  return value === 'loading' || value === 'empty' ? value : ''
-}
+export default function FeedPage({ scene, onScene, onGoPublish }) {
+  const [items, setItems] = useState([])
+  const [cursor, setCursor] = useState('')
+  const [hasMore, setHasMore] = useState(false)
+  const [loadingMore, setLoadingMore] = useState(false)
+  const [actionError, setActionError] = useState('')
+  const [activeId, setActiveId] = useState(null)
 
-export default function FeedPage({
-  scene,
-  onScene,
-  items,
-  loading,
-  error,
-  hasMore,
-  onLoadMore,
-  onRetry,
-  comments,
-  busy,
-  onLike,
-  onSave,
-  onToggleComments,
-  onSubmitComment,
-  onGoPublish,
-}) {
-  const preview = readPreviewState()
-  const forcedPlaceholder = preview === 'loading' || preview === 'empty'
-  const visibleItems = forcedPlaceholder ? [] : items
-  const showSkeleton = preview === 'loading' || (loading && visibleItems.length === 0)
-  const showEmpty = !showSkeleton && !error && visibleItems.length === 0
+  const firstPage = useApi(() => api.feed({ scene, limit: 10 }), [scene])
+
+  useEffect(() => {
+    setItems([])
+    setCursor('')
+    setHasMore(false)
+    setActiveId(null)
+  }, [scene])
+
+  useEffect(() => {
+    if (!firstPage.data) return
+    setItems(firstPage.data.items || [])
+    setCursor(firstPage.data.next_cursor || '')
+    setHasMore(Boolean(firstPage.data.has_more))
+  }, [firstPage.data])
+
+  const patchItem = useCallback((clipId, patch) => {
+    setItems((prev) => prev.map((item) => (item.clip_id === clipId ? { ...item, ...patch } : item)))
+  }, [])
+
+  async function toggleLike(item) {
+    const liked = !item.liked
+    patchItem(item.clip_id, {
+      liked,
+      like_count: Math.max(0, item.like_count + (liked ? 1 : -1)),
+    })
+    setActionError('')
+    try {
+      const data = await api.like(item.clip_id, liked)
+      patchItem(item.clip_id, { liked: data.active, like_count: data.like_count })
+    } catch (err) {
+      patchItem(item.clip_id, { liked: item.liked, like_count: item.like_count })
+      setActionError(err.message)
+    }
+  }
+
+  async function toggleSave(item) {
+    const saved = !item.saved
+    patchItem(item.clip_id, {
+      saved,
+      save_count: Math.max(0, item.save_count + (saved ? 1 : -1)),
+    })
+    setActionError('')
+    try {
+      const data = await api.save(item.clip_id, saved)
+      patchItem(item.clip_id, { saved: data.active, save_count: data.save_count })
+    } catch (err) {
+      patchItem(item.clip_id, { saved: item.saved, save_count: item.save_count })
+      setActionError(err.message)
+    }
+  }
+
+  async function loadMore() {
+    if (!hasMore || loadingMore) return
+    setLoadingMore(true)
+    setActionError('')
+    try {
+      const next = await api.feed({ scene, cursor, limit: 10 })
+      setItems((prev) => {
+        const seen = new Set(prev.map((item) => item.clip_id))
+        const merged = [...prev]
+        for (const item of next.items || []) {
+          if (!seen.has(item.clip_id)) {
+            seen.add(item.clip_id)
+            merged.push(item)
+          }
+        }
+        return merged
+      })
+      setCursor(next.next_cursor || '')
+      setHasMore(Boolean(next.has_more))
+    } catch (err) {
+      setActionError(err.message)
+    } finally {
+      setLoadingMore(false)
+    }
+  }
+
+  const closeDetail = useCallback(() => setActiveId(null), [])
+  const handleCommentAdded = useCallback(
+    (clipId, count) => {
+      patchItem(clipId, { comment_count: count })
+    },
+    [patchItem],
+  )
+
+  const activeItem = items.find((item) => item.clip_id === activeId)
+  const showSkeleton = firstPage.loading && items.length === 0
+  const showEmpty = !firstPage.loading && !firstPage.error && items.length === 0
 
   return (
     <div className="pf-feed-page">
       <h1 className="pf-sr-only">内容流</h1>
       <SceneTabs scenes={SCENES} scene={scene} onChange={onScene} hint={SCENE_HINTS[scene]} />
 
-      <ErrorBanner message={error} onRetry={onRetry} />
+      <ErrorBanner message={firstPage.error} onRetry={firstPage.retry} />
+
+      {actionError ? (
+        <div className="pf-toast" role="alert">
+          <span>{actionError}</span>
+          <button type="button" className="pf-toast-close" onClick={() => setActionError('')} aria-label="关闭提示">
+            知道了
+          </button>
+        </div>
+      ) : null}
 
       {showSkeleton ? (
         <section className="pf-grid" aria-busy="true" aria-label="内容加载中">
@@ -77,35 +157,44 @@ export default function FeedPage({
         />
       ) : null}
 
-      {visibleItems.length > 0 ? (
+      {items.length > 0 ? (
         <section className="pf-grid" aria-label="内容列表">
-          {visibleItems.map((item) => (
+          {items.map((item) => (
             <ClipCard
               key={item.clip_id}
               item={item}
-              commentState={comments[item.clip_id]}
-              busy={busy}
-              onLike={onLike}
-              onSave={onSave}
-              onToggleComments={onToggleComments}
-              onSubmitComment={onSubmitComment}
+              busy={false}
+              onLike={toggleLike}
+              onSave={toggleSave}
+              onOpen={(clip) => setActiveId(clip.clip_id)}
             />
           ))}
         </section>
       ) : null}
 
-      {visibleItems.length > 0 ? (
+      {items.length > 0 ? (
         <footer>
           {hasMore ? (
             <div className="pf-load-more">
-              <button type="button" className="pf-primary-btn" onClick={onLoadMore} disabled={loading}>
-                {loading ? '加载中…' : '加载更多'}
+              <button type="button" className="pf-primary-btn" onClick={loadMore} disabled={loadingMore}>
+                {loadingMore ? '加载中…' : '加载更多'}
               </button>
             </div>
           ) : (
             <p className="pf-end">已经到底了</p>
           )}
         </footer>
+      ) : null}
+
+      {activeItem ? (
+        <DetailSheet
+          key={activeItem.clip_id}
+          item={activeItem}
+          onClose={closeDetail}
+          onLike={toggleLike}
+          onSave={toggleSave}
+          onCommentAdded={handleCommentAdded}
+        />
       ) : null}
     </div>
   )

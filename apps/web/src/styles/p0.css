@@ -206,11 +206,6 @@ body {
   padding: var(--space-6) var(--space-6) 96px;
 }
 
-.pf-main > .panel {
-  max-width: 720px;
-  margin: 0 auto;
-}
-
 .pf-page-title {
   margin: 0 0 var(--space-2);
   font-size: var(--fs-h1);
@@ -484,11 +479,6 @@ body {
 }
 
 /* ---------- 评论 ---------- */
-.pf-comments {
-  border-top: 1px solid var(--line);
-  padding: var(--space-3) var(--space-3) var(--space-2);
-}
-
 .pf-comment-list {
   list-style: none;
   margin: 0 0 var(--space-2);
