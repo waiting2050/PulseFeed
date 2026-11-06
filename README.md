@@ -102,6 +102,13 @@ docker compose --profile monitoring down   # 只停止并移除容器，保留�
 - 已完成：S18/S19 前端最小闭环与功能补齐（登录/注册、Feed 分页、发布、互动、消息、播放配置）。
 - 已完成：S20 容器化与本地编排；S21 Prometheus/Grafana 监控与 K8s 清单。
 - 已完成：S22 测试补齐（鉴权中间件矩阵、Redis WATCH/16 分片计数、互动幂等）与 GitHub Actions CI（api build/vet/test + web 构建）。
+- 已完成：前端 P0/P1/P2 重构（视觉骨架、页面与交互重做、动效与可访问性）；媒体时长与首帧封面补齐。
+
+### 媒体时长与首帧封面
+
+- 上传视频时调用 `ffprobe` 读取时长（写入 `pf_clips.duration_ms`，毫秒）、调用 `ffmpeg` 抽取首帧写入 `uploads/cover/` 并作为 `cover_url` 回传；前端卡片按 `mm:ss` 展示时长角标，`duration_ms=0` 时不占位。
+- 工具缺失或执行失败时只记录 `warning` 并降级为“无时长、无封面”，上传与发布照常成功；前端回退为暗色首字占位封面。
+- 数据库沿用 GORM `AutoMigrate` 增量新增 `duration_ms` 列；API 镜像（`apps/api/Dockerfile`）已内置 `ffmpeg`，本地 Windows 不安装也能运行。
 
 ## 接口表
 
@@ -112,8 +119,8 @@ docker compose --profile monitoring down   # 只停止并移除容器，保留�
 | 账号 | `POST /api/users`、`POST /api/sessions`、`DELETE /api/sessions/current` | 公开 / 登录 |
 | 资料 | `GET/PATCH /api/users/me`、`GET /api/users/:userId`、`GET /api/users/:userId/clips` | 登录 / 公开 |
 | Feed | `GET /api/feed`、`POST /api/feed-search`（`scene=latest,following,for-you,hot`） | 可选登录 |
-| 发布 | `POST /api/clips`、`DELETE /api/clips/:clipId`、`GET /api/clips/:clipId`、`GET /api/users/me/clips` | 登录 / 公开 |
-| 上传 | `POST /api/uploads`（`kind=video,cover,avatar`） | 登录 |
+| 发布 | `POST /api/clips`（可选 `duration_ms`）、`DELETE /api/clips/:clipId`、`GET /api/clips/:clipId`、`GET /api/users/me/clips` | 登录 / 公开 |
+| 上传 | `POST /api/uploads`（`kind=video,cover,avatar`；视频额外回传 `cover_url`/`duration_ms`） | 登录 |
 | 互动 | `PUT/DELETE /api/clips/:clipId/like`、`PUT/DELETE /api/clips/:clipId/save`、`POST/GET /api/clips/:clipId/comments`、`DELETE /api/comments/:commentId` | 登录 / 公开 |
 | 播放 | `POST /api/clip-play-events`、`POST /api/playback-qos-reports`、`GET/PUT /api/playback-config`、`GET /api/preload-clips` | 登录 |
 | 关注 | `PUT/DELETE /api/users/me/following/:targetUserId`、`GET /api/users/me/following`、`GET /api/users/me/followers` | 登录 |

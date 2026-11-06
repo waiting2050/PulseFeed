@@ -43,7 +43,8 @@ func New(repo domclip.Repository, opts ...Option) *Service {
 
 // CreatePublished 幂等发布 clip：先按 (creatorID, 幂等键) 查重，命中直接返回既有记录；
 // 未命中走事务写入，唯一索引冲突（并发重试）时回读既有记录；成功后投递 clip.published。
-func (s *Service) CreatePublished(ctx context.Context, creatorID int64, title, videoURL, coverURL, idempotencyKey string) (*domclip.Clip, error) {
+// durationMS 来自上传探测，缺失时为 0，不参与发布校验。
+func (s *Service) CreatePublished(ctx context.Context, creatorID int64, title, videoURL, coverURL string, durationMS int64, idempotencyKey string) (*domclip.Clip, error) {
 	existing, err := s.repo.GetByIdempotencyKey(ctx, creatorID, idempotencyKey)
 	if err == nil {
 		return existing, nil
@@ -52,7 +53,7 @@ func (s *Service) CreatePublished(ctx context.Context, creatorID int64, title, v
 		return nil, err
 	}
 
-	clip, err := domclip.NewClip(creatorID, title, videoURL, coverURL, idempotencyKey)
+	clip, err := domclip.NewClip(creatorID, title, videoURL, coverURL, durationMS, idempotencyKey)
 	if err != nil {
 		return nil, err
 	}

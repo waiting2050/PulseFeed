@@ -17,6 +17,7 @@ type feedEntryResponse struct {
 	Title        string    `json:"title"`
 	VideoURL     string    `json:"video_url"`
 	CoverURL     string    `json:"cover_url"`
+	DurationMS   int64     `json:"duration_ms"`
 	PublishedAt  time.Time `json:"published_at"`
 	LikeCount    int64     `json:"like_count"`
 	SaveCount    int64     `json:"save_count"`

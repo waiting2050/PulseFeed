@@ -23,13 +23,13 @@
 | GET | `/api/users/me` | 登录 | — | `{user_id, nickname, avatar_url, bio}` |
 | PATCH | `/api/users/me` | 登录 | `{nickname?, avatar_url?, bio?}` | 更新后的用户资料 |
 | GET | `/api/users/:userId` | 公开 | — | `{user_id, account?, nickname, avatar_url, bio}` |
-| GET | `/api/users/:userId/clips` | 公开 | `?cursor=&limit=` | `{items:[{clip_id,creator_id,title,video_url,cover_url,published_at}], next_cursor, has_more}` |
+| GET | `/api/users/:userId/clips` | 公开 | `?cursor=&limit=` | `{items:[{clip_id,creator_id,title,video_url,cover_url,duration_ms,published_at}], next_cursor, has_more}` |
 
 ### 2.2 Feed 与推荐读取
 
 | 方法 | 路径 | 鉴权 | 请求要点 | 响应 data 要点 |
 |---|---|---|---|---|
-| GET | `/api/feed` | 可选 | `?scene=latest\|following\|for-you\|hot&cursor=&limit=` | `{items:[{clip_id,creator_id,title,video_url,cover_url,published_at,like_count,save_count,comment_count,play_count,liked,saved}], next_cursor, has_more}` |
+| GET | `/api/feed` | 可选 | `?scene=latest\|following\|for-you\|hot&cursor=&limit=` | `{items:[{clip_id,creator_id,title,video_url,cover_url,duration_ms,published_at,like_count,save_count,comment_count,play_count,liked,saved}], next_cursor, has_more}` |
 | POST | `/api/feed-search` | 可选 | `{scene, cursor, limit}` | 同上（与 GET 同义） |
 
 > 推荐/曝光类内部接口挂载在 `/internal` 前缀，见 2.6。
@@ -38,11 +38,14 @@
 
 | 方法 | 路径 | 鉴权 | 请求要点 | 响应 data 要点 |
 |---|---|---|---|---|
-| POST | `/api/clips` | 登录 | `{title, video_url, cover_url}` | `{clip_id, creator_id, title, video_url, cover_url, published_at}` |
+| POST | `/api/clips` | 登录 | `{title, video_url, cover_url, duration_ms?}` | `{clip_id, creator_id, title, video_url, cover_url, duration_ms, published_at}` |
 | DELETE | `/api/clips/:clipId` | 登录 | `Idempotency-Key` | `null` |
-| GET | `/api/clips/:clipId` | 公开 | — | clip 基本信息 |
+| GET | `/api/clips/:clipId` | 公开 | — | clip 基本信息（含 `duration_ms`） |
 | GET | `/api/users/me/clips` | 登录 | `?cursor=&limit=` | `{items, next_cursor, has_more}` |
-| POST | `/api/uploads` | 登录 | `multipart/form-data: file` | `{url, kind}`（静态回读 `/uploads/<name>`） |
+| POST | `/api/uploads` | 登录 | `multipart/form-data: file, kind` | `{url, kind, cover_url?, duration_ms?}`（静态回读 `/uploads/<name>`） |
+
+> `duration_ms` 为 0 或缺省表示未探测到时长；`cover_url` 缺省表示未生成首帧，前端使用占位封面。
+> 上传视频时会调用 ffprobe/ffmpeg：工具缺失只记录 warning，接口仍返回 201，不影响发布。
 
 ### 2.4 互动（点赞/收藏/评论）
 

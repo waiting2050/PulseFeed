@@ -141,7 +141,7 @@ func (p *clipFakePublisher) PublishClipEmbedding(_ context.Context, event appcli
 
 // clipFakeSeed 直接写入一条可指定发布时间与状态的 clip，供列表/详情用例构造数据。
 func clipFakeSeed(repo *clipFakeRepo, id, creatorID int64, title, mediaURL string, publishedAt time.Time, status int) {
-	repo.clips[id] = domclip.RestoreClip(id, creatorID, title, mediaURL, "", status, fmt.Sprintf("seed-%d", id), publishedAt)
+	repo.clips[id] = domclip.RestoreClip(id, creatorID, title, mediaURL, "", 0, status, fmt.Sprintf("seed-%d", id), publishedAt)
 	if id > repo.nextID {
 		repo.nextID = id
 	}
@@ -154,7 +154,7 @@ func TestClipCreatePublishedPublishesEvents(t *testing.T) {
 	publisher := &clipFakePublisher{}
 	svc := appclip.New(repo, appclip.WithPublisher(publisher))
 
-	clip, err := svc.CreatePublished(ctx, 7, "  新 clip  ", " /media/1.mp4 ", " /cover/1.png ", "key-1")
+	clip, err := svc.CreatePublished(ctx, 7, "  新 clip  ", " /media/1.mp4 ", " /cover/1.png ", 0, "key-1")
 	if err != nil {
 		t.Fatalf("合法发布不应失败: %v", err)
 	}
@@ -194,11 +194,11 @@ func TestClipCreatePublishedIsIdempotent(t *testing.T) {
 	publisher := &clipFakePublisher{}
 	svc := appclip.New(repo, appclip.WithPublisher(publisher))
 
-	first, err := svc.CreatePublished(ctx, 7, "首个标题", "/media/1.mp4", "", "same-key")
+	first, err := svc.CreatePublished(ctx, 7, "首个标题", "/media/1.mp4", "", 0, "same-key")
 	if err != nil {
 		t.Fatalf("首次发布不应失败: %v", err)
 	}
-	second, err := svc.CreatePublished(ctx, 7, "另一个标题", "/media/2.mp4", "", "same-key")
+	second, err := svc.CreatePublished(ctx, 7, "另一个标题", "/media/2.mp4", "", 0, "same-key")
 	if err != nil {
 		t.Fatalf("重复发布不应失败: %v", err)
 	}
@@ -240,7 +240,7 @@ func TestClipCreatePublishedRejectsInvalidFields(t *testing.T) {
 			publisher := &clipFakePublisher{}
 			svc := appclip.New(repo, appclip.WithPublisher(publisher))
 
-			if _, err := svc.CreatePublished(ctx, 7, tt.title, tt.mediaURL, "", tt.key); !errors.Is(err, tt.wantError) {
+			if _, err := svc.CreatePublished(ctx, 7, tt.title, tt.mediaURL, "", 0, tt.key); !errors.Is(err, tt.wantError) {
 				t.Fatalf("期望错误 %v，实际 %v", tt.wantError, err)
 			}
 			if repo.createCalls != 0 {
@@ -261,7 +261,7 @@ func TestClipCreatePublishedIgnoresPublisherFailure(t *testing.T) {
 	publisher := &clipFakePublisher{publishedErr: brokerErr, embeddingErr: brokerErr}
 	svc := appclip.New(repo, appclip.WithPublisher(publisher))
 
-	clip, err := svc.CreatePublished(ctx, 7, "标题", "/media/1.mp4", "", "key-1")
+	clip, err := svc.CreatePublished(ctx, 7, "标题", "/media/1.mp4", "", 0, "key-1")
 	if err != nil {
 		t.Fatalf("事件投递失败不应阻塞发布: %v", err)
 	}

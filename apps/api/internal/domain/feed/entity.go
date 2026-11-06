@@ -69,12 +69,14 @@ type ViewerState struct {
 }
 
 // FeedEntry 是 Feed 流中的一条条目：clip 视图 + 互动计数 + 读者互动状态。
+// DurationMS 为媒体时长（毫秒），0 表示未探测到，前端不展示时长角标。
 type FeedEntry struct {
 	ClipID      int64
 	CreatorID   int64
 	Title       string
 	VideoURL    string
 	CoverURL    string
+	DurationMS  int64
 	PublishedAt time.Time
 	Stats       EntryStats
 	Viewer      ViewerState

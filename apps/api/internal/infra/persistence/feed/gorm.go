@@ -58,7 +58,7 @@ func EnsureTimelineIndex(db *gorm.DB) error {
 func (r *Repository) ListLatestPage(ctx context.Context, cursor *domfeed.Cursor, limit int) ([]*domfeed.FeedEntry, error) {
 	query := r.db.WithContext(ctx).
 		Table("pf_clips AS c").
-		Select("c.id, c.creator_id, c.title, c.video_url, c.cover_url, c.published_at, "+
+		Select("c.id, c.creator_id, c.title, c.video_url, c.cover_url, c.duration_ms, c.published_at, "+
 			"s.like_count, s.save_count, s.comment_count, s.play_count").
 		Joins("LEFT JOIN pf_clip_stats s ON s.clip_id = c.id").
 		Where("c.status = ?", domclip.StatusPublished)
@@ -95,7 +95,7 @@ func (r *Repository) ListHotPage(ctx context.Context, cursor *domfeed.Cursor, li
 
 	query := r.db.WithContext(ctx).
 		Table("pf_clips AS c").
-		Select("c.id, c.creator_id, c.title, c.video_url, c.cover_url, c.published_at, "+
+		Select("c.id, c.creator_id, c.title, c.video_url, c.cover_url, c.duration_ms, c.published_at, "+
 			"s.like_count, s.save_count, s.comment_count, s.play_count, "+
 			expr+" AS hot_score", now).
 		Joins("LEFT JOIN pf_clip_stats s ON s.clip_id = c.id").
@@ -125,6 +125,7 @@ func (r *Repository) ListHotPage(ctx context.Context, cursor *domfeed.Cursor, li
 			Title:       rows[i].Title,
 			VideoURL:    rows[i].VideoURL,
 			CoverURL:    rows[i].CoverURL,
+			DurationMS:  rows[i].DurationMS,
 			PublishedAt: rows[i].PublishedAt,
 			Stats: domfeed.EntryStats{
 				LikeCount:    rows[i].LikeCount,
@@ -162,7 +163,7 @@ func (r *Repository) BatchGetEntries(ctx context.Context, clipIDs []int64) (map[
 	var rows []cardRow
 	err := r.db.WithContext(ctx).
 		Table("pf_clips").
-		Select("id, creator_id, title, video_url, cover_url, published_at").
+		Select("id, creator_id, title, video_url, cover_url, duration_ms, published_at").
 		Where("status = ? AND id IN ?", domclip.StatusPublished, clipIDs).
 		Scan(&rows).Error
 	if err != nil {
@@ -175,6 +176,7 @@ func (r *Repository) BatchGetEntries(ctx context.Context, clipIDs []int64) (map[
 			Title:       rows[i].Title,
 			VideoURL:    rows[i].VideoURL,
 			CoverURL:    rows[i].CoverURL,
+			DurationMS:  rows[i].DurationMS,
 			PublishedAt: rows[i].PublishedAt,
 		}
 	}
@@ -213,7 +215,7 @@ func (r *Repository) BatchGetStats(ctx context.Context, clipIDs []int64) (map[in
 func (r *Repository) ListFollowingPage(ctx context.Context, viewerID int64, cursor *domfeed.Cursor, limit int) ([]*domfeed.FeedEntry, error) {
 	query := r.db.WithContext(ctx).
 		Table("pf_clips AS c").
-		Select("c.id, c.creator_id, c.title, c.video_url, c.cover_url, c.published_at, "+
+		Select("c.id, c.creator_id, c.title, c.video_url, c.cover_url, c.duration_ms, c.published_at, "+
 			"s.like_count, s.save_count, s.comment_count, s.play_count").
 		Joins("JOIN pf_follows f ON f.target_user_id = c.creator_id AND f.user_id = ? AND f.status = ?", viewerID, domrelation.StatusFollowing).
 		Joins("LEFT JOIN pf_clip_stats s ON s.clip_id = c.id").
@@ -300,7 +302,7 @@ func (r *Repository) ListCreatorRecentClips(ctx context.Context, creatorID int64
 	var rows []latestRow
 	err := r.db.WithContext(ctx).
 		Table("pf_clips AS c").
-		Select("c.id, c.creator_id, c.title, c.video_url, c.cover_url, c.published_at, "+
+		Select("c.id, c.creator_id, c.title, c.video_url, c.cover_url, c.duration_ms, c.published_at, "+
 			"s.like_count, s.save_count, s.comment_count, s.play_count").
 		Joins("LEFT JOIN pf_clip_stats s ON s.clip_id = c.id").
 		Where("c.creator_id = ? AND c.status = ?", creatorID, domclip.StatusPublished).
@@ -376,6 +378,7 @@ func toEntry(row *latestRow) *domfeed.FeedEntry {
 		Title:       row.Title,
 		VideoURL:    row.VideoURL,
 		CoverURL:    row.CoverURL,
+		DurationMS:  row.DurationMS,
 		PublishedAt: row.PublishedAt,
 		Stats: domfeed.EntryStats{
 			LikeCount:    row.LikeCount,

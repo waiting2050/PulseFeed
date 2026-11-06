@@ -31,6 +31,7 @@ func (r *Repository) Create(ctx context.Context, c *domclip.Clip) error {
 		Title:          c.Title,
 		VideoURL:       c.VideoURL,
 		CoverURL:       c.CoverURL,
+		DurationMS:     c.DurationMS,
 		Status:         c.Status,
 		IdempotencyKey: c.IdempotencyKey,
 		PublishedAt:    c.PublishedAt,
@@ -140,7 +141,7 @@ func (r *Repository) Delete(ctx context.Context, id int64, _ string) error {
 
 // toEntity 将 GORM 模型转换为领域实体。
 func toEntity(m *ClipModel) *domclip.Clip {
-	return domclip.RestoreClip(m.ID, m.CreatorID, m.Title, m.VideoURL, m.CoverURL, m.Status, m.IdempotencyKey, m.PublishedAt)
+	return domclip.RestoreClip(m.ID, m.CreatorID, m.Title, m.VideoURL, m.CoverURL, m.DurationMS, m.Status, m.IdempotencyKey, m.PublishedAt)
 }
 
 // isDuplicateKeyError 判断是否为 MySQL 1062 唯一键冲突。

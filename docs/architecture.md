@@ -52,6 +52,12 @@ interfaces/http  →  application  →  domain
 
 分页统一 `limit+1` 判断 `has_more`，响应返回 Base64 `next_cursor`；跨页按 `clip_id` 去重。for-you 的 `snapshot_at` 保证翻页期间候选池不随新发布漂移。
 
+### 2.5 上传与媒体探测
+
+1. `POST /api/uploads` 落盘后，视频先经 `ffprobe` 校验内容；随后 `infra/media.Prober` 读取时长并调用 `ffmpeg` 抽取首帧。
+2. 首帧写入 `uploads/cover/`，响应回传 `cover_url` 与 `duration_ms`；发布时前端把两者一并提交，`duration_ms` 增量写入 `pf_clips`。
+3. `ffprobe`/`ffmpeg` 缺失或执行失败时只记录 `warning` 并返回 201（无 `cover_url`、`duration_ms`），前端回退占位封面且不展示时长角标。
+
 ## 3. 一致性与幂等
 
 - 写接口按 `Idempotency-Key` 去重；MQ 事件按 `event_id` 去重。

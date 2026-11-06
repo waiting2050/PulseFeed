@@ -4,19 +4,22 @@ package httpclip
 import "time"
 
 // publishRequest 是发布 clip 的请求体，幂等键走 Idempotency-Key 请求头。
+// duration_ms 由上传接口探测回传，可选；缺失或非法时服务端按 0 处理。
 type publishRequest struct {
-	Title    string `json:"title"`
-	VideoURL string `json:"video_url"`
-	CoverURL string `json:"cover_url"`
+	Title      string `json:"title"`
+	VideoURL   string `json:"video_url"`
+	CoverURL   string `json:"cover_url"`
+	DurationMS int64  `json:"duration_ms"`
 }
 
-// clipResponse 是 clip 视图响应。
+// clipResponse 是 clip 视图响应；duration_ms 为 0 表示未探测到时长。
 type clipResponse struct {
 	ClipID      int64     `json:"clip_id"`
 	CreatorID   int64     `json:"creator_id"`
 	Title       string    `json:"title"`
 	VideoURL    string    `json:"video_url"`
 	CoverURL    string    `json:"cover_url"`
+	DurationMS  int64     `json:"duration_ms"`
 	PublishedAt time.Time `json:"published_at"`
 }
 

@@ -11,6 +11,7 @@ type latestRow struct {
 	Title        string    `gorm:"column:title"`
 	VideoURL     string    `gorm:"column:video_url"`
 	CoverURL     string    `gorm:"column:cover_url"`
+	DurationMS   int64     `gorm:"column:duration_ms"`
 	PublishedAt  time.Time `gorm:"column:published_at"`
 	LikeCount    int64     `gorm:"column:like_count"`
 	SaveCount    int64     `gorm:"column:save_count"`
@@ -25,6 +26,7 @@ type cardRow struct {
 	Title       string    `gorm:"column:title"`
 	VideoURL    string    `gorm:"column:video_url"`
 	CoverURL    string    `gorm:"column:cover_url"`
+	DurationMS  int64     `gorm:"column:duration_ms"`
 	PublishedAt time.Time `gorm:"column:published_at"`
 }
 
@@ -50,6 +52,7 @@ type hotRow struct {
 	Title        string    `gorm:"column:title"`
 	VideoURL     string    `gorm:"column:video_url"`
 	CoverURL     string    `gorm:"column:cover_url"`
+	DurationMS   int64     `gorm:"column:duration_ms"`
 	PublishedAt  time.Time `gorm:"column:published_at"`
 	LikeCount    int64     `gorm:"column:like_count"`
 	SaveCount    int64     `gorm:"column:save_count"`

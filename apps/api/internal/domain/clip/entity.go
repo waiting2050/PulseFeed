@@ -24,19 +24,22 @@ const (
 )
 
 // Clip 是内容聚合根，记录创作者、标题与媒体地址；发布即可见，删除为状态置位。
+// DurationMS 是媒体时长（毫秒），探测不可用时为 0，读取侧按“无时长”处理。
 type Clip struct {
 	ID             int64
 	CreatorID      int64
 	Title          string
 	VideoURL       string
 	CoverURL       string
+	DurationMS     int64
 	Status         int
 	IdempotencyKey string
 	PublishedAt    time.Time
 }
 
-// NewClip 创建并发布一条 clip：标题去空白非空且限长，视频地址与幂等键非空。
-func NewClip(creatorID int64, title, videoURL, coverURL, idempotencyKey string) (*Clip, error) {
+// NewClip 创建并发布一条 clip：标题去空白非空且限长，视频地址与幂等键非空；
+// 时长由上传探测提供，负值按 0 处理，避免脏数据进入展示层。
+func NewClip(creatorID int64, title, videoURL, coverURL string, durationMS int64, idempotencyKey string) (*Clip, error) {
 	title = strings.TrimSpace(title)
 	if title == "" || len(title) > titleMaxLen {
 		return nil, ErrInvalidTitle
@@ -49,11 +52,15 @@ func NewClip(creatorID int64, title, videoURL, coverURL, idempotencyKey string) 
 	if idempotencyKey == "" {
 		return nil, ErrInvalidIdempotencyKey
 	}
+	if durationMS < 0 {
+		durationMS = 0
+	}
 	return &Clip{
 		CreatorID:      creatorID,
 		Title:          title,
 		VideoURL:       videoURL,
 		CoverURL:       strings.TrimSpace(coverURL),
+		DurationMS:     durationMS,
 		Status:         StatusPublished,
 		IdempotencyKey: idempotencyKey,
 		PublishedAt:    time.Now(),
@@ -61,13 +68,14 @@ func NewClip(creatorID int64, title, videoURL, coverURL, idempotencyKey string) 
 }
 
 // RestoreClip 从持久化记录恢复实体，读取路径不再执行发布校验。
-func RestoreClip(id, creatorID int64, title, videoURL, coverURL string, status int, idempotencyKey string, publishedAt time.Time) *Clip {
+func RestoreClip(id, creatorID int64, title, videoURL, coverURL string, durationMS int64, status int, idempotencyKey string, publishedAt time.Time) *Clip {
 	return &Clip{
 		ID:             id,
 		CreatorID:      creatorID,
 		Title:          title,
 		VideoURL:       videoURL,
 		CoverURL:       coverURL,
+		DurationMS:     durationMS,
 		Status:         status,
 		IdempotencyKey: idempotencyKey,
 		PublishedAt:    publishedAt,

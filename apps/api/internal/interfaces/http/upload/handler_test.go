@@ -109,7 +109,8 @@ func TestUploadCoverCreated(t *testing.T) {
 	}
 }
 
-// TestUploadDefaultsToVideoKind 验证缺省 kind 归入 video 目录；置空 PATH 强制走 C7 降级路径。
+// TestUploadDefaultsToVideoKind 验证缺省 kind 归入 video 目录；置空 PATH 强制走 C7 降级路径，
+// 同时验证无 ffmpeg/ffprobe 时响应不含 cover_url 与 duration_ms，上传仍然成功。
 func TestUploadDefaultsToVideoKind(t *testing.T) {
 	t.Setenv("PATH", "")
 	dir := t.TempDir()
@@ -120,5 +121,11 @@ func TestUploadDefaultsToVideoKind(t *testing.T) {
 	_, data := decodeEnvelope(t, recorder)
 	if !strings.HasPrefix(data["url"], "/uploads/video/") {
 		t.Fatalf("缺省 kind 应归入 video 目录: %s", data["url"])
+	}
+	if data["cover_url"] != "" || data["duration_ms"] != "" {
+		t.Fatalf("无 ffmpeg 环境应省略封面与时长，实际 cover=%q duration=%q", data["cover_url"], data["duration_ms"])
+	}
+	if entries, err := os.ReadDir(filepath.Join(dir, "cover")); err == nil && len(entries) > 0 {
+		t.Fatalf("无 ffmpeg 环境不应生成封面文件，实际 %d 个", len(entries))
 	}
 }

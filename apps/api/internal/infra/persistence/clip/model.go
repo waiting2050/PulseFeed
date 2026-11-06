@@ -10,6 +10,7 @@ type ClipModel struct {
 	Title          string    `gorm:"column:title;size:128;not null"`
 	VideoURL       string    `gorm:"column:video_url;size:512;not null"`
 	CoverURL       string    `gorm:"column:cover_url;size:512"`
+	DurationMS     int64     `gorm:"column:duration_ms;not null;default:0"`
 	Status         int       `gorm:"column:status;not null;default:1"`
 	IdempotencyKey string    `gorm:"column:idempotency_key;size:64;not null;uniqueIndex:uk_creator_idempotency,priority:2"`
 	PublishedAt    time.Time `gorm:"column:published_at;not null;index:idx_creator_published,priority:2,sort:desc"`

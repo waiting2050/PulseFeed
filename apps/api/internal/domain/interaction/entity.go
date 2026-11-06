@@ -35,7 +35,7 @@ type ActionType string
 const (
 	// ActionLike 表示点赞行为。
 	ActionLike ActionType = "LIKE"
-	// ActionSave 表示收藏行为（词汇映射 favorite→save）。
+	// ActionSave 表示收藏行为（对外统一使用 save 语义）。
 	ActionSave ActionType = "SAVE"
 )
 

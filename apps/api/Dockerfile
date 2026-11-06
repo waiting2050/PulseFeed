@@ -11,7 +11,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/pulsefe
  && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/pulsefeed-worker ./cmd/worker
 
 FROM alpine:3.20
-# ffmpeg 供上传接口探测时长/编码；ca-certificates 供容器内 HTTPS。
+# ffmpeg 供上传接口校验内容、读取时长与抽取首帧封面；ca-certificates 供容器内 HTTPS。
 RUN apk add --no-cache ffmpeg ca-certificates
 
 WORKDIR /app

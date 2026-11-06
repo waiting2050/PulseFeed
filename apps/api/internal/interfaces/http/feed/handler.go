@@ -85,6 +85,7 @@ func toFeedEntryResponse(entry *domfeed.FeedEntry) feedEntryResponse {
 		Title:        entry.Title,
 		VideoURL:     entry.VideoURL,
 		CoverURL:     entry.CoverURL,
+		DurationMS:   entry.DurationMS,
 		PublishedAt:  entry.PublishedAt,
 		LikeCount:    entry.Stats.LikeCount,
 		SaveCount:    entry.Stats.SaveCount,

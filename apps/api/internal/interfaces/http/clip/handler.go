@@ -42,6 +42,7 @@ func (h *Handler) Publish(c *gin.Context) {
 		req.Title,
 		req.VideoURL,
 		req.CoverURL,
+		req.DurationMS,
 		c.GetHeader("Idempotency-Key"),
 	)
 	if err != nil {
@@ -141,6 +142,7 @@ func toClipResponse(clip *domclip.Clip) clipResponse {
 		Title:       clip.Title,
 		VideoURL:    clip.VideoURL,
 		CoverURL:    clip.CoverURL,
+		DurationMS:  clip.DurationMS,
 		PublishedAt: clip.PublishedAt,
 	}
 }
