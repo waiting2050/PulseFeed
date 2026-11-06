@@ -33,7 +33,11 @@ export default function TopBar({ tab, onTab, unread, me, onLogout }) {
               onClick={() => onTab(entry.key)}
             >
               {entry.label}
-              {entry.key === 'messages' && unread > 0 ? <span className="pf-nav-badge">{unread}</span> : null}
+              {entry.key === 'messages' && unread > 0 ? (
+                <span className="pf-nav-badge" aria-label={`未读 ${unread} 条`}>
+                  {unread}
+                </span>
+              ) : null}
             </button>
           ))}
         </nav>

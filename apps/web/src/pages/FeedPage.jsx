@@ -6,6 +6,8 @@ import SkeletonCard from '../components/SkeletonCard.jsx'
 import EmptyState from '../components/EmptyState.jsx'
 import ErrorBanner from '../components/ErrorBanner.jsx'
 import DetailSheet from '../components/DetailSheet.jsx'
+import Spinner from '../components/Spinner.jsx'
+import Toast from '../components/Toast.jsx'
 import useApi from '../hooks/useApi.js'
 import { api } from '../lib/api.js'
 
@@ -128,14 +130,7 @@ export default function FeedPage({ scene, onScene, onGoPublish }) {
 
       <ErrorBanner message={firstPage.error} onRetry={firstPage.retry} />
 
-      {actionError ? (
-        <div className="pf-toast" role="alert">
-          <span>{actionError}</span>
-          <button type="button" className="pf-toast-close" onClick={() => setActionError('')} aria-label="关闭提示">
-            知道了
-          </button>
-        </div>
-      ) : null}
+      {actionError ? <Toast message={actionError} tone="error" onDismiss={() => setActionError('')} /> : null}
 
       {showSkeleton ? (
         <section className="pf-grid" aria-busy="true" aria-label="内容加载中">
@@ -177,6 +172,7 @@ export default function FeedPage({ scene, onScene, onGoPublish }) {
           {hasMore ? (
             <div className="pf-load-more">
               <button type="button" className="pf-primary-btn" onClick={loadMore} disabled={loadingMore}>
+                {loadingMore ? <Spinner label="正在加载更多内容" /> : null}
                 {loadingMore ? '加载中…' : '加载更多'}
               </button>
             </div>

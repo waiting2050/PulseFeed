@@ -58,6 +58,24 @@ button:disabled {
   color: var(--text-1);
 }
 
+/* ---------- 卡片悬停预览与时长角标 ---------- */
+.pf-cover-preview-video {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  background: #000;
+}
+
+.pf-cover-duration {
+  left: auto;
+  right: var(--space-2);
+  top: auto;
+  bottom: var(--space-2);
+}
+
 /* ---------- 轻提示 ---------- */
 .pf-toast {
   display: flex;
@@ -66,14 +84,50 @@ button:disabled {
   margin-bottom: var(--space-4);
   padding: var(--space-3) var(--space-4);
   border: 1px solid var(--line);
-  border-left: 3px solid var(--error);
+  border-left: 3px solid var(--line-strong);
   border-radius: var(--r-sm);
   background: var(--surface-2);
   color: var(--text-1);
   font-size: var(--fs-caption);
 }
 
+.pf-toast-info {
+  border-left-color: var(--line-strong);
+}
+
+.pf-toast-success {
+  border-left-color: var(--success);
+}
+
+.pf-toast-error {
+  border-left-color: var(--error);
+}
+
+.pf-toast-text {
+  min-width: 0;
+  flex: 1;
+  line-height: var(--lh-caption);
+}
+
+.pf-toast-action {
+  flex: none;
+  min-height: 32px;
+  padding: 0 var(--space-3);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-xs);
+  background: transparent;
+  color: var(--text-1);
+  font-size: var(--fs-micro);
+  transition: background var(--dur-fast), border-color var(--dur-fast);
+}
+
+.pf-toast-action:hover {
+  background: var(--surface-3);
+  border-color: rgba(255, 255, 255, 0.24);
+}
+
 .pf-toast-close {
+  flex: none;
   margin-left: auto;
   min-height: 32px;
   padding: 0 var(--space-2);
@@ -82,6 +136,30 @@ button:disabled {
   background: transparent;
   color: var(--text-2);
   font-size: var(--fs-micro);
+  transition: color var(--dur-fast);
+}
+
+.pf-toast-close:hover {
+  color: var(--text-1);
+}
+
+/* ---------- 内联加载指示 ---------- */
+.pf-spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  margin-right: var(--space-2);
+  vertical-align: -2px;
+  border: 2px solid rgba(255, 255, 255, 0.28);
+  border-top-color: currentColor;
+  border-radius: 50%;
+  animation: pf-spin 0.8s linear infinite;
+}
+
+@keyframes pf-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .pf-note {
@@ -647,5 +725,31 @@ button:disabled {
     bottom: 0;
     padding-top: var(--space-2);
     background: var(--surface-1);
+  }
+}
+
+/* 减少动态偏好：关闭位移与旋转类动画，仅保留颜色/明暗的状态切换。 */
+@media (prefers-reduced-motion: reduce) {
+  .pf-cover-play,
+  .pf-card,
+  .pf-act,
+  .pf-file,
+  .pf-primary-btn,
+  .pf-toast-action,
+  .pf-toast-close,
+  .pf-sheet-play span {
+    transition: none;
+  }
+
+  .pf-spinner {
+    animation: none;
+  }
+
+  .pf-sk-cover::before,
+  .pf-sk-line::before,
+  .pf-sk-actions::before,
+  .pf-chip-skeleton::before {
+    animation: none;
+    opacity: 0;
   }
 }

@@ -1,6 +1,7 @@
 // LoginPage.jsx 提供登录/注册视图：左侧品牌舞台 + 右侧表单卡，窄屏收为单列。
 import React from 'react'
 import Icon from '../components/Icon.jsx'
+import Spinner from '../components/Spinner.jsx'
 
 export default function LoginPage({
   mode,
@@ -120,6 +121,7 @@ export default function LoginPage({
             ) : null}
 
             <button type="submit" className="pf-primary-btn pf-login-submit" disabled={busy}>
+              {busy ? <Spinner label="正在登录" /> : null}
               {busy ? '处理中…' : mode === 'login' ? '登录' : '注册并登录'}
             </button>
           </form>

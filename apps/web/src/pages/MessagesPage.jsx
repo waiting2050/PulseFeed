@@ -3,6 +3,8 @@ import React, { useEffect, useState } from 'react'
 import Avatar from '../components/Avatar.jsx'
 import EmptyState from '../components/EmptyState.jsx'
 import ErrorBanner from '../components/ErrorBanner.jsx'
+import Spinner from '../components/Spinner.jsx'
+import Toast from '../components/Toast.jsx'
 import useApi from '../hooks/useApi.js'
 import { api } from '../lib/api.js'
 import { formatDateTime } from '../lib/format.js'
@@ -15,25 +17,37 @@ export default function MessagesPage({ unread, onUnreadChange }) {
   const messages = useApi(() => api.messages({ limit: 20 }), [])
   const [items, setItems] = useState([])
   const [marking, setMarking] = useState(false)
-  const [notice, setNotice] = useState('')
-  const [actionError, setActionError] = useState('')
+  const [feedback, setFeedback] = useState(null)
 
   useEffect(() => {
     if (messages.data) setItems(messages.data.items || [])
   }, [messages.data])
 
+  // 进入消息页时同步服务端未读数，避免顶栏角标与页面提示沿用登录时的旧值。
+  useEffect(() => {
+    let alive = true
+    api
+      .unread()
+      .then((data) => {
+        if (alive) onUnreadChange((data && data.unread) || 0)
+      })
+      .catch(() => {})
+    return () => {
+      alive = false
+    }
+  }, [onUnreadChange])
+
   async function handleMarkAllRead() {
     if (marking) return
     setMarking(true)
-    setActionError('')
-    setNotice('')
+    setFeedback(null)
     try {
       await api.markAllRead()
       setItems((prev) => prev.map((message) => ({ ...message, read: true })))
       onUnreadChange(0)
-      setNotice('已全部标记为已读')
+      setFeedback({ text: '已全部标记为已读', tone: 'success' })
     } catch (err) {
-      setActionError(err.message)
+      setFeedback({ text: err.message, tone: 'error' })
     } finally {
       setMarking(false)
     }
@@ -59,25 +73,15 @@ export default function MessagesPage({ unread, onUnreadChange }) {
           onClick={handleMarkAllRead}
           disabled={marking || unread === 0}
         >
+          {marking ? <Spinner label="正在标记已读" /> : null}
           {marking ? '处理中…' : '全部标记已读'}
         </button>
       </div>
 
       <ErrorBanner message={messages.error} onRetry={messages.retry} />
 
-      {actionError ? (
-        <div className="pf-toast" role="alert">
-          <span>{actionError}</span>
-          <button type="button" className="pf-toast-close" onClick={() => setActionError('')} aria-label="关闭提示">
-            知道了
-          </button>
-        </div>
-      ) : null}
-
-      {notice ? (
-        <p className="pf-note success" role="status">
-          {notice}
-        </p>
+      {feedback ? (
+        <Toast message={feedback.text} tone={feedback.tone} onDismiss={() => setFeedback(null)} />
       ) : null}
 
       {showSkeleton ? (

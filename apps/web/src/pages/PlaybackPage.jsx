@@ -2,6 +2,8 @@
 import React, { useEffect, useState } from 'react'
 import EmptyState from '../components/EmptyState.jsx'
 import ErrorBanner from '../components/ErrorBanner.jsx'
+import Spinner from '../components/Spinner.jsx'
+import Toast from '../components/Toast.jsx'
 import useApi from '../hooks/useApi.js'
 import { api } from '../lib/api.js'
 
@@ -10,8 +12,7 @@ export default function PlaybackPage() {
   const preload = useApi(() => api.preloadClips(), [])
   const [form, setForm] = useState({ preload_count: '', qos_sample_rate: '' })
   const [saving, setSaving] = useState(false)
-  const [notice, setNotice] = useState('')
-  const [actionError, setActionError] = useState('')
+  const [feedback, setFeedback] = useState(null)
 
   useEffect(() => {
     if (!config.data) return
@@ -27,17 +28,16 @@ export default function PlaybackPage() {
 
   async function handleSubmit(event) {
     event.preventDefault()
-    setActionError('')
-    setNotice('')
+    setFeedback(null)
 
     const preloadCount = Number(form.preload_count)
     const sampleRate = Number(form.qos_sample_rate)
     if (!Number.isInteger(preloadCount) || preloadCount < 1 || preloadCount > 32) {
-      setActionError('预加载条数需为 1–32 的整数')
+      setFeedback({ text: '预加载条数需为 1–32 的整数', tone: 'error' })
       return
     }
     if (Number.isNaN(sampleRate) || sampleRate < 0.01 || sampleRate > 1) {
-      setActionError('QoS 采样率需在 0.01–1 之间')
+      setFeedback({ text: 'QoS 采样率需在 0.01–1 之间', tone: 'error' })
       return
     }
 
@@ -51,10 +51,10 @@ export default function PlaybackPage() {
         preload_count: String(data.preload_count),
         qos_sample_rate: String(data.qos_sample_rate),
       })
-      setNotice('配置已保存')
+      setFeedback({ text: '配置已保存', tone: 'success' })
       preload.retry()
     } catch (err) {
-      setActionError(err.message)
+      setFeedback({ text: err.message, tone: 'error' })
     } finally {
       setSaving(false)
     }
@@ -107,20 +107,13 @@ export default function PlaybackPage() {
           </div>
         </div>
 
-        {actionError ? (
-          <p className="pf-note error" role="alert">
-            {actionError}
-          </p>
-        ) : null}
-
-        {notice ? (
-          <p className="pf-note success" role="status">
-            {notice}
-          </p>
+        {feedback ? (
+          <Toast message={feedback.text} tone={feedback.tone} onDismiss={() => setFeedback(null)} />
         ) : null}
 
         <div className="pf-form-actions">
           <button type="submit" className="pf-primary-btn" disabled={saving || config.loading}>
+            {saving ? <Spinner label="正在保存配置" /> : null}
             {saving ? '保存中…' : '保存配置'}
           </button>
         </div>
@@ -137,6 +130,7 @@ export default function PlaybackPage() {
             </p>
           </div>
           <button type="button" className="pf-ghost-btn" onClick={preload.retry} disabled={preload.loading}>
+            {preload.loading ? <Spinner label="正在刷新列表" /> : null}
             {preload.loading ? '加载中…' : '刷新列表'}
           </button>
         </div>

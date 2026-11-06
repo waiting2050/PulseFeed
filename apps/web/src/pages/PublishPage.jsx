@@ -1,6 +1,8 @@
 // PublishPage.jsx 提供上传到创建内容的完整表单、素材预览与分阶段状态反馈。
 import React, { useEffect, useState } from 'react'
 import Icon from '../components/Icon.jsx'
+import Spinner from '../components/Spinner.jsx'
+import Toast from '../components/Toast.jsx'
 import { api, FILE_KIND } from '../lib/api.js'
 import { formatFileSize } from '../lib/format.js'
 
@@ -48,7 +50,9 @@ export default function PublishPage({ onPublished }) {
       setStage('uploading')
       const uploaded = await api.uploadFile(file, FILE_KIND)
 
-      let coverUrl = ''
+      // 后端抽帧成功时回传 cover_url，未手动选封面则直接沿用首帧；时长同样透传给创建接口。
+      let coverUrl = uploaded.cover_url || ''
+      const durationMs = uploaded.duration_ms || 0
       if (cover) {
         setStage('cover')
         const uploadedCover = await api.uploadFile(cover, 'cover')
@@ -56,7 +60,7 @@ export default function PublishPage({ onPublished }) {
       }
 
       setStage('creating')
-      await api.publishClip({ title: title.trim(), fileUrl: uploaded.url, coverUrl })
+      await api.publishClip({ title: title.trim(), fileUrl: uploaded.url, coverUrl, durationMs })
       setTitle('')
       setFile(null)
       setCover(null)
@@ -131,19 +135,15 @@ export default function PublishPage({ onPublished }) {
           ) : null}
         </div>
 
-        {error ? (
-          <p className="pf-note error" role="alert">
-            {error}
-          </p>
-        ) : null}
+        {error ? <Toast message={error} tone="error" onDismiss={() => setError('')} /> : null}
 
         {notice ? (
-          <div className="pf-note success" role="status">
-            <span>{notice}</span>
-            <button type="button" className="pf-ghost-btn" onClick={onPublished}>
-              去首页查看
-            </button>
-          </div>
+          <Toast
+            message={notice}
+            tone="success"
+            onDismiss={() => setNotice('')}
+            action={{ label: '去首页查看', onClick: onPublished }}
+          />
         ) : null}
 
         {stage ? (
@@ -154,7 +154,8 @@ export default function PublishPage({ onPublished }) {
 
         <div className="pf-form-actions">
           <button type="submit" className="pf-primary-btn" disabled={submitting}>
-            {stage ? STAGE_LABELS[stage] : '上传并发布'}
+            {submitting ? <Spinner label={STAGE_LABELS[stage]} /> : null}
+            {submitting ? '处理中…' : '上传并发布'}
           </button>
         </div>
       </form>

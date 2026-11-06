@@ -42,3 +42,12 @@ export function formatFileSize(bytes) {
   if (size >= 1024) return `${Math.round(size / 1024)} KB`
   return `${size} B`
 }
+
+// formatDuration 把毫秒时长格式化为 mm:ss；非正数或非法值返回空串，供调用方跳过角标。
+export function formatDuration(ms) {
+  const total = Math.round((Number(ms) || 0) / 1000)
+  if (!Number.isFinite(total) || total <= 0) return ''
+  const minutes = Math.floor(total / 60)
+  const seconds = total % 60
+  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
+}

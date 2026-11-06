@@ -3,6 +3,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react'
 import Icon from './Icon.jsx'
 import Avatar from './Avatar.jsx'
 import ClipCover from './ClipCover.jsx'
+import Spinner from './Spinner.jsx'
 import useApi from '../hooks/useApi.js'
 import { api } from '../lib/api.js'
 import { formatCount, formatTime } from '../lib/format.js'
@@ -229,6 +230,7 @@ export default function DetailSheet({ item, onClose, onLike, onSave, onCommentAd
                   disabled={submitting}
                 />
                 <button type="submit" className="pf-primary-btn" disabled={submitting || !draft.trim()}>
+                  {submitting ? <Spinner label="正在发送评论" /> : null}
                   {submitting ? '发送中…' : '发送'}
                 </button>
               </form>

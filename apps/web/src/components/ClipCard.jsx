@@ -1,22 +1,89 @@
-// ClipCard.jsx 渲染 Feed 卡片：封面、标题、作者行与操作栏；点击封面或标题进入详情弹层。
-import React from 'react'
+// ClipCard.jsx 渲染 Feed 卡片：封面（含时长角标与悬停预览）、标题、作者行与操作栏。
+// 点击封面或标题进入详情弹层；悬停预览仅在支持 hover 的设备且有真实 video_url 时启用。
+import React, { useEffect, useRef, useState } from 'react'
 import Icon from './Icon.jsx'
 import Avatar from './Avatar.jsx'
 import ClipCover from './ClipCover.jsx'
-import { formatCount, formatTime } from '../lib/format.js'
+import { formatCount, formatDuration, formatTime } from '../lib/format.js'
+
+// HOVER_PREVIEW 在模块加载时判定一次，触屏设备不注册预览，避免误触后自动播放。
+const HOVER_PREVIEW =
+  typeof window !== 'undefined' &&
+  typeof window.matchMedia === 'function' &&
+  window.matchMedia('(hover: hover) and (pointer: fine)').matches
 
 export default function ClipCard({ item, busy, onLike, onSave, onOpen }) {
   const title = item.title || '未命名内容'
+  const duration = formatDuration(item.duration_ms)
+  const canPreview = HOVER_PREVIEW && Boolean(item.video_url)
+  const [previewing, setPreviewing] = useState(false)
+  const [previewFailed, setPreviewFailed] = useState(false)
+  const previewRef = useRef(null)
+
+  // 开始预览才挂载 video；播放被拒或资源异常时立即停止并标记失败，后续悬停不再重试。
+  useEffect(() => {
+    const video = previewRef.current
+    if (!previewing || !video) return
+    video.currentTime = 0
+    const attempt = video.play()
+    if (attempt && typeof attempt.catch === 'function') {
+      attempt.catch(() => {
+        setPreviewing(false)
+        setPreviewFailed(true)
+      })
+    }
+  }, [previewing])
+
+  function startPreview() {
+    if (canPreview && !previewFailed) setPreviewing(true)
+  }
+
+  function stopPreview() {
+    const video = previewRef.current
+    if (video) {
+      video.pause()
+      video.currentTime = 0
+    }
+    setPreviewing(false)
+  }
 
   return (
     <article className="pf-card">
-      <button type="button" className="pf-card-open" onClick={() => onOpen(item)}>
+      <button
+        type="button"
+        className="pf-card-open"
+        onClick={() => onOpen(item)}
+        onPointerEnter={startPreview}
+        onPointerLeave={stopPreview}
+        onPointerCancel={stopPreview}
+      >
         <ClipCover clipId={item.clip_id} title={title} coverUrl={item.cover_url}>
-          <span className="pf-cover-play" aria-hidden="true">
-            <span>
-              <Icon name="play" size={24} />
+          {previewing ? (
+            <video
+              ref={previewRef}
+              className="pf-cover-preview-video"
+              src={item.video_url}
+              muted
+              playsInline
+              preload="none"
+              aria-hidden="true"
+              tabIndex={-1}
+              onError={() => {
+                setPreviewing(false)
+                setPreviewFailed(true)
+              }}
+            />
+          ) : null}
+          {!previewing ? (
+            <span className="pf-cover-play" aria-hidden="true">
+              <span>
+                <Icon name="play" size={24} />
+              </span>
             </span>
-          </span>
+          ) : null}
+          {duration ? (
+            <span className="pf-cover-badge pf-cover-duration pf-num">{duration}</span>
+          ) : null}
         </ClipCover>
         <span className="pf-sr-only">查看详情：{title}</span>
       </button>

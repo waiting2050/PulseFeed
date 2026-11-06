@@ -132,11 +132,16 @@ export const api = {
     return upload('/uploads', form)
   },
 
-  // 沿用既有发布契约：先上传素材，再提交 title / video_url / cover_url。
-  publishClip: ({ title, fileUrl, coverUrl }) =>
+  // 沿用既有发布契约：先上传素材，再提交 title / video_url / cover_url；duration_ms 由上传探测回传。
+  publishClip: ({ title, fileUrl, coverUrl, durationMs }) =>
     request('/clips', {
       method: 'POST',
-      body: { title, video_url: fileUrl, cover_url: coverUrl || '' },
+      body: {
+        title,
+        video_url: fileUrl,
+        cover_url: coverUrl || '',
+        duration_ms: Number(durationMs) || 0,
+      },
     }),
 
   messages: ({ limit = 20, cursor = '' } = {}) =>

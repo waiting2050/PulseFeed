@@ -384,3 +384,15 @@
 | `docs/prototype/direction-c.html` | 视频优先全屏流单屏 | 方向对比 |
 
 原型均为单文件、零外部依赖，可直接双击打开；截图见交付说明。
+
+---
+
+## 12. P2 实施记录（动效与可访问性）
+
+- 悬停预览：仅 `(hover: hover) and (pointer: fine)` 设备且 `video_url` 非空时挂载 `<video muted playsInline preload="none">` 并调用 `play()`；播放被拒或资源异常立即卸载并置失败标记，后续悬停不再重试，避免空转。
+- 轻提示统一为 `Toast` 组件（默认 2.8s、错误 4.2s 自动消失，可带一个操作按钮），替换 Feed、发布、消息、播放配置页的零散提示。
+- 加载态统一为按钮内联 `Spinner` + `disabled`：登录、发布、评论提交、全部已读、保存配置、加载更多、刷新列表。
+- 可访问性复查：场景 tab 保留 `aria-selected`；详情弹层 `role=dialog` + `aria-modal` + `aria-labelledby`，打开时焦点落到关闭按钮、Tab 循环、Esc 关闭并归还触发元素；点赞/收藏保留 `aria-pressed`；封面图 `alt` 与装饰性元素 `aria-hidden`；未读角标补 `aria-label`。
+- `prefers-reduced-motion: reduce`：关闭骨架扫光与 spinner 旋转、去掉卡片/按钮/播放键过渡，仅保留颜色与明暗的状态切换；不新增装饰性入场动画。
+- 时长角标：卡片右下角显示 `mm:ss`，`duration_ms` 为 0 时不渲染占位。
+- 媒体链路：上传接口回传 `cover_url` 与 `duration_ms`，发布时透传并写入 `pf_clips.duration_ms`；无 ffmpeg 环境降级为占位封面与无角标（详见 `docs/architecture.md` 2.5）。
