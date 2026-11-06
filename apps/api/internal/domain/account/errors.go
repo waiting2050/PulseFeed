@@ -8,8 +8,8 @@ var (
 	ErrAccountExists = errors.New("account already exists")
 	// ErrInvalidCredentials 表示登录凭证校验失败。
 	ErrInvalidCredentials = errors.New("invalid credentials")
-	// ErrInvalidNickname 表示昵称为空或超长。
-	ErrInvalidNickname = errors.New("invalid nickname")
+	// ErrInvalidNickname 表示昵称为空或超长（64 个字符）。
+	ErrInvalidNickname = errors.New("昵称不能为空且不能超过 64 个字符")
 	// ErrInvalidAccountName 表示账号名为空或长度越界。
 	ErrInvalidAccountName = errors.New("invalid account name")
 	// ErrAccountNotFound 表示账号或资料不存在。

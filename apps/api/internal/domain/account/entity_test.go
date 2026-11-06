@@ -59,6 +59,11 @@ func TestNewUserProfile(t *testing.T) {
 		{name: "仅空白字符", nickname: "   ", wantError: ErrInvalidNickname},
 		{name: "等于最大长度", nickname: strings.Repeat("n", nicknameMaxLen), wantName: strings.Repeat("n", nicknameMaxLen)},
 		{name: "超过最大长度", nickname: strings.Repeat("n", nicknameMaxLen+1), wantError: ErrInvalidNickname},
+		{name: "中文等于上限", nickname: strings.Repeat("昵", nicknameMaxLen), wantName: strings.Repeat("昵", nicknameMaxLen)},
+		{name: "中文超过上限", nickname: strings.Repeat("昵", nicknameMaxLen+1), wantError: ErrInvalidNickname},
+		{name: "emoji 等于上限", nickname: strings.Repeat("🙂", nicknameMaxLen), wantName: strings.Repeat("🙂", nicknameMaxLen)},
+		{name: "emoji 超过上限", nickname: strings.Repeat("🙂", nicknameMaxLen+1), wantError: ErrInvalidNickname},
+		{name: "中文与 emoji 混合等于上限", nickname: strings.Repeat("昵", 32) + strings.Repeat("🙂", 32), wantName: strings.Repeat("昵", 32) + strings.Repeat("🙂", 32)},
 	}
 
 	for _, tt := range tests {

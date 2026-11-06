@@ -109,6 +109,7 @@ export default function LoginPage({
                   value={nickname}
                   onChange={(event) => onNickname(event.target.value)}
                   autoComplete="nickname"
+                  maxLength={64}
                   placeholder="不填则使用默认昵称"
                 />
               </div>

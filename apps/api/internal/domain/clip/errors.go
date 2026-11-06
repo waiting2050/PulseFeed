@@ -4,8 +4,8 @@ package domclip
 import "errors"
 
 var (
-	// ErrInvalidTitle 表示标题为空或超过长度上限。
-	ErrInvalidTitle = errors.New("invalid title")
+	// ErrInvalidTitle 表示标题为空或超过长度上限（128 个字符）。
+	ErrInvalidTitle = errors.New("标题不能为空且不能超过 128 个字符")
 	// ErrInvalidVideoURL 表示视频地址为空。
 	ErrInvalidVideoURL = errors.New("invalid video url")
 	// ErrInvalidIdempotencyKey 表示幂等键为空。

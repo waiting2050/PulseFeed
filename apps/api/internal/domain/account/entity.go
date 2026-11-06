@@ -1,7 +1,10 @@
 // entity.go 定义 account 领域的 Account 与 UserProfile 实体及其校验规则。
 package domainaccount
 
-import "strings"
+import (
+	"strings"
+	"unicode/utf8"
+)
 
 const (
 	// StatusNormal 表示账号处于正常可用状态。
@@ -12,7 +15,7 @@ const (
 	// 账号名长度限制（按字节计，规范化后判定）。
 	accountNameMinLen = 3
 	accountNameMaxLen = 64
-	// 昵称长度上限（按字节计）。
+	// 昵称长度上限（按字符/rune 计；列宽 64 字符）。
 	nicknameMaxLen = 64
 )
 
@@ -82,7 +85,7 @@ func NewUserProfile(userID int64, nickname string) (*UserProfile, error) {
 
 // ValidateNickname 校验昵称：非空且不超过长度上限。
 func ValidateNickname(nickname string) error {
-	if nickname == "" || len(nickname) > nicknameMaxLen {
+	if nickname == "" || utf8.RuneCountInString(nickname) > nicknameMaxLen {
 		return ErrInvalidNickname
 	}
 	return nil

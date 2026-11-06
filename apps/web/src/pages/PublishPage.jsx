@@ -12,6 +12,11 @@ const STAGE_LABELS = {
   creating: '正在创建内容…',
 }
 
+// 标题按字符（Unicode 码点）计数，与后端 rune 口径一致；页面沿用既有 120 字上限，
+// HTML maxLength 取后端列宽 128 作为兜底，保证不会出现前端放行、后端拒绝。
+const TITLE_MAX_CHARS = 120
+const TITLE_HTML_MAX = 128
+
 export default function PublishPage({ onPublished }) {
   const [title, setTitle] = useState('')
   const [file, setFile] = useState(null)
@@ -32,6 +37,7 @@ export default function PublishPage({ onPublished }) {
   }, [cover])
 
   const submitting = Boolean(stage)
+  const titleLength = [...title.trim()].length
 
   async function handleSubmit(event) {
     event.preventDefault()
@@ -39,6 +45,10 @@ export default function PublishPage({ onPublished }) {
     setNotice('')
     if (!title.trim()) {
       setError('请填写标题')
+      return
+    }
+    if (titleLength > TITLE_MAX_CHARS) {
+      setError(`标题最多 ${TITLE_MAX_CHARS} 个字符，当前 ${titleLength} 个字符`)
       return
     }
     if (!file) {
@@ -87,10 +97,19 @@ export default function PublishPage({ onPublished }) {
             value={title}
             onChange={(event) => setTitle(event.target.value)}
             placeholder="一句话说清这条内容"
-            maxLength={120}
+            maxLength={TITLE_HTML_MAX}
+            aria-describedby="pf-publish-title-hint"
             disabled={submitting}
             required
           />
+          <span
+            id="pf-publish-title-hint"
+            className="pf-field-hint"
+            role="status"
+            aria-live="polite"
+          >
+            {titleLength}/{TITLE_MAX_CHARS} 个字符{titleLength > TITLE_MAX_CHARS ? '，已超出上限' : ''}
+          </span>
         </div>
 
         <div className="pf-field">

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -14,7 +15,7 @@ const (
 	// StatusDeleted 表示 clip 已被创作者删除，读取路径视为不存在。
 	StatusDeleted = 2
 
-	// 标题长度上限（按字节计，去空白后判定）。
+	// 标题长度上限（按字符/rune 计，去空白后判定；列宽 128 字符）。
 	titleMaxLen = 128
 
 	// MaxListLimit 是创作者列表单页条数上限。
@@ -41,7 +42,7 @@ type Clip struct {
 // 时长由上传探测提供，负值按 0 处理，避免脏数据进入展示层。
 func NewClip(creatorID int64, title, videoURL, coverURL string, durationMS int64, idempotencyKey string) (*Clip, error) {
 	title = strings.TrimSpace(title)
-	if title == "" || len(title) > titleMaxLen {
+	if title == "" || utf8.RuneCountInString(title) > titleMaxLen {
 		return nil, ErrInvalidTitle
 	}
 	videoURL = strings.TrimSpace(videoURL)
