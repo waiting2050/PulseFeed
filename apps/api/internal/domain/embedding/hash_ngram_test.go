@@ -63,7 +63,7 @@ func TestHashTextCosineSimilarity(t *testing.T) {
 
 // TestHashTextIdenticalCosine 校验逐字符一致的文本余弦相似度为 1。
 func TestHashTextIdenticalCosine(t *testing.T) {
-	text := "PulseFeed 同构仿写 推荐与向量"
+	text := "PulseFeed 推荐与向量"
 	score := HashText(text).Cosine(HashText(text))
 	if math.Abs(score-1) > 1e-9 {
 		t.Fatalf("相同文本余弦相似度 = %.9f, 期望 1", score)

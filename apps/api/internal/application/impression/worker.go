@@ -1,5 +1,5 @@
 // worker.go 实现 PlayEventWorker：消费 impression.play_recorded 事件，
-// 对 API 同步链路未完成曝光聚合的事件做二次 upsert 补偿（修正 D7：原项目只发不收）。
+// 对 API 同步链路未完成曝光聚合的事件做二次 upsert 补偿，避免事件只投递不消费。
 package appimpression
 
 import (

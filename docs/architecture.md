@@ -76,7 +76,7 @@ interfaces/http  →  application  →  domain
 ### 6.1 latest 流不做预加载 / 预热
 
 - **结论**：不实现 latest 的 preload / warmup / 定时预热，只保留"首次请求回源 + 页缓存"（`application/feed/service.go` 的 `loadFeedPage`）。TODO 保留，不落地。
-- **对照原实现**：GCFeed 的 latest 同样没有预热逻辑，只有首次请求回源并回填缓存，本项不做属于对齐现状，不是新增缺口。
+- **现状**：latest 只有首次请求回源并回填缓存这一条读取路径，本项不做属于维持现状，不是新增缺口。
 - **理由**：
   1. 首页页缓存 TTL 仅 5s（`infra/cache/feed_cache.go` 的 `firstPageTTL`），预热结果最多 5 秒即失效，有效期过短，预热成本换不回命中率。
   2. 预热写入的是全局首页页缓存，发布/删除/状态变更后缺少逐页失效手段；一旦预热数据过期，全站首页会看到旧内容。
@@ -86,7 +86,7 @@ interfaces/http  →  application  →  domain
 ### 6.2 复合游标沿用 `OR` 展开，不改行比较
 
 - **结论**：latest/following 的游标条件保持 `published_at < ? OR (published_at = ? AND id < ?)`，不改成 `(published_at, id) < (?, ?)`。
-- **依据**：在本机 MySQL 8.0 上用 20 万行同构数据实测，`OR` 形式被优化为 `idx_clip_timeline` 的范围扫描（`type=range`，深游标 0.3ms）；行比较形式退化为索引全扫 + `Filter`（扫 14.7 万行，535ms）。
+- **依据**：在本机 MySQL 8.0 上用 20 万行测试数据实测，`OR` 形式被优化为 `idx_clip_timeline` 的范围扫描（`type=range`，深游标 0.3ms）；行比较形式退化为索引全扫 + `Filter`（扫 14.7 万行，535ms）。
 - **取舍**：`OR` 写法略啰嗦，但能真正走索引；只有换到明确支持行比较下推的存储时再重新评估。
 
 ### 6.3 已知测试缺口（本轮不补）

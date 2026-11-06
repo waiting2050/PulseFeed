@@ -1,6 +1,6 @@
 # PulseFeed
 
-PulseFeed 是一个按领域分层实现的 Feed 系统仿写项目：后端提供账号、发布、Feed、互动、关注、推荐、热榜、消息与播放配置，前端提供登录、四场景 Feed、发布、互动、消息与播放配置页面。
+PulseFeed 是一个按领域分层实现的 Feed 系统示例项目：后端提供账号、发布、Feed、互动、关注、推荐、热榜、消息与播放配置，前端提供登录、四场景 Feed、发布、互动、消息与播放配置页面。
 
 ## 技术栈
 
@@ -24,7 +24,6 @@ pulsefeed/
 ├── README.md
 ├── docs/
 │   ├── architecture.md            # 分层边界与四条数据流
-│   ├── isomorphism-mapping.md     # 原文件→新文件映射表
 │   └── routes-snapshot.md         # HTTP 路由与端口快照
 ├── scripts/start.sh               # 本地三进程启动与信号清理
 └── apps/
@@ -71,6 +70,8 @@ npm install
 npm run dev            # http://127.0.0.1:5173
 ```
 
+前端开发态将 `/api`、`/uploads` 代理到 `http://127.0.0.1:8090`，目标地址可用环境变量 `PULSEFEED_API` 覆盖。
+
 健康检查与指标：`GET :8090/health`、`GET :8090/metrics`、Worker `GET :19092/metrics`。
 
 ## 容器化与监控
@@ -100,7 +101,7 @@ docker compose --profile monitoring down   # 只停止并移除容器，保留�
 - 已完成：S1–S17 后端主链路（账号、发布、Feed 四场景、互动、关注、推荐、热榜、消息、播放配置、可观测性）。
 - 已完成：S18/S19 前端最小闭环与功能补齐（登录/注册、Feed 分页、发布、互动、消息、播放配置）。
 - 已完成：S20 容器化与本地编排；S21 Prometheus/Grafana 监控与 K8s 清单。
-- 当前：S22 测试补齐与文档映射（状态待人工确认）。
+- 已完成：S22 测试补齐（鉴权中间件矩阵、Redis WATCH/16 分片计数、互动幂等）与 GitHub Actions CI（api build/vet/test + web 构建）。
 
 ## 接口表
 
@@ -139,5 +140,4 @@ npm run build
 ## 文档
 
 - [架构与数据流](docs/architecture.md)
-- [原文件→新文件映射表](docs/isomorphism-mapping.md)
 - [路由与端口快照](docs/routes-snapshot.md)
