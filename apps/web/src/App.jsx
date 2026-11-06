@@ -1,15 +1,10 @@
-// App.jsx 提供 S19 完整前端闭环：登录/注册、四场景 Feed、上传发布、互动、消息与播放配置。
+// App.jsx 负责数据与状态：登录、四场景 Feed、发布、互动、消息与播放配置；视图交由 P0 组件渲染。
 import React, { useCallback, useEffect, useRef, useState } from 'react'
+import TopBar from './components/TopBar.jsx'
+import LoginPage from './pages/LoginPage.jsx'
+import FeedPage from './pages/FeedPage.jsx'
 
 const TOKEN_KEY = 'pulsefeed.token'
-
-// SCENES 是 Feed 场景清单，与 GET /api/feed 的 scene 取值一一对应。
-const SCENES = [
-  { key: 'latest', label: '最新' },
-  { key: 'hot', label: '热门' },
-  { key: 'following', label: '关注' },
-  { key: 'for-you', label: '推荐' },
-]
 
 // 生成幂等键：优先使用浏览器 UUID，缺失时退化为时间戳 + 随机串。
 function newIdempotencyKey() {
@@ -60,95 +55,6 @@ async function apiUpload(path, formData, token) {
     body: formData,
   })
   return readEnvelope(response)
-}
-
-// FeedCard 渲染单条 clip 卡片：计数、互动状态、评论入口与评论列表。
-function FeedCard({ item, comments, busy, onLike, onSave, onToggleComments, onSubmitComment }) {
-  const [draft, setDraft] = useState('')
-  const state = comments[item.clip_id] || { open: false, items: [], loading: false, error: '' }
-  const published = item.published_at ? new Date(item.published_at).toLocaleString() : ''
-
-  async function handleSubmit(event) {
-    event.preventDefault()
-    const content = draft.trim()
-    if (!content) return
-    setDraft('')
-    await onSubmitComment(item.clip_id, content)
-  }
-
-  return (
-    <article className="card">
-      <div className="card-cover">
-        {item.cover_url ? (
-          <img src={item.cover_url} alt={item.title || 'cover'} loading="lazy" />
-        ) : (
-          <span className="card-cover-fallback">#{item.clip_id}</span>
-        )}
-      </div>
-      <div className="card-body">
-        <h3 className="card-title">{item.title || '未命名 clip'}</h3>
-        <p className="card-meta">
-          <span>创作者 {item.creator_id}</span>
-          <span>{published}</span>
-        </p>
-        <p className="card-stats">
-          <span>播放 {item.play_count}</span>
-          <span>点赞 {item.like_count}</span>
-          <span>收藏 {item.save_count}</span>
-          <span>评论 {item.comment_count}</span>
-        </p>
-        <div className="card-actions">
-          <button
-            type="button"
-            className={item.liked ? 'icon-btn active' : 'icon-btn'}
-            onClick={() => onLike(item)}
-            disabled={busy}
-          >
-            {item.liked ? '已点赞' : '点赞'}
-          </button>
-          <button
-            type="button"
-            className={item.saved ? 'icon-btn active' : 'icon-btn'}
-            onClick={() => onSave(item)}
-            disabled={busy}
-          >
-            {item.saved ? '已收藏' : '收藏'}
-          </button>
-          <button type="button" className="icon-btn" onClick={() => onToggleComments(item.clip_id)}>
-            {state.open ? '收起评论' : '评论'}
-          </button>
-        </div>
-        {state.open && (
-          <div className="comment-box">
-            {state.loading && <p className="subtle">评论加载中…</p>}
-            {state.error && <p className="error">{state.error}</p>}
-            {!state.loading && !state.error && state.items.length === 0 && (
-              <p className="subtle">还没有评论。</p>
-            )}
-            <ul className="comment-list">
-              {(state.items || []).map((comment) => (
-                <li key={comment.id}>
-                  <span className="comment-author">{comment.user_nickname || `用户 ${comment.user_id}`}</span>
-                  <span className="comment-content">{comment.content}</span>
-                </li>
-              ))}
-            </ul>
-            <form className="comment-form" onSubmit={handleSubmit}>
-              <input
-                value={draft}
-                onChange={(event) => setDraft(event.target.value)}
-                placeholder="写下你的评论"
-                maxLength={200}
-              />
-              <button type="submit" className="primary" disabled={busy || !draft.trim()}>
-                发送
-              </button>
-            </form>
-          </div>
-        )}
-      </div>
-    </article>
-  )
 }
 
 export default function App() {
@@ -576,138 +482,46 @@ export default function App() {
 
   if (!token) {
     return (
-      <main className="page">
-        <header className="hero">
-          <h1>PulseFeed</h1>
-          <p>轻量 Feed 系统 · 登录后浏览与发布</p>
-        </header>
-        <section className="panel">
-          <div className="tabs">
-            <button
-              type="button"
-              className={mode === 'login' ? 'tab active' : 'tab'}
-              onClick={() => setMode('login')}
-            >
-              登录
-            </button>
-            <button
-              type="button"
-              className={mode === 'register' ? 'tab active' : 'tab'}
-              onClick={() => setMode('register')}
-            >
-              注册
-            </button>
-          </div>
-          <form className="auth-form" onSubmit={handleAuth}>
-            <label>
-              账号
-              <input
-                value={account}
-                onChange={(event) => setAccount(event.target.value)}
-                autoComplete="username"
-                required
-              />
-            </label>
-            <label>
-              密码
-              <input
-                type="password"
-                value={password}
-                onChange={(event) => setPassword(event.target.value)}
-                autoComplete="current-password"
-                required
-              />
-            </label>
-            {mode === 'register' && (
-              <label>
-                昵称（可选）
-                <input value={nickname} onChange={(event) => setNickname(event.target.value)} />
-              </label>
-            )}
-            {authError && <p className="error">{authError}</p>}
-            <button type="submit" className="primary" disabled={busy}>
-              {busy ? '处理中…' : mode === 'login' ? '登录' : '注册并登录'}
-            </button>
-          </form>
-        </section>
-      </main>
+      <LoginPage
+        mode={mode}
+        onMode={setMode}
+        account={account}
+        onAccount={setAccount}
+        password={password}
+        onPassword={setPassword}
+        nickname={nickname}
+        onNickname={setNickname}
+        authError={authError}
+        busy={busy}
+        onSubmit={handleAuth}
+      />
     )
   }
 
   return (
-    <main className="page">
-      <header className="topbar">
-        <div>
-          <h1>PulseFeed</h1>
-          <p className="subtle">{me && me.nickname ? `你好，${me.nickname}` : '已登录'}</p>
-        </div>
-        <button type="button" className="ghost" onClick={handleLogout}>
-          退出登录
-        </button>
-      </header>
+    <div className="pf-app">
+      <TopBar tab={tab} onTab={setTab} unread={unread} me={me} onLogout={handleLogout} />
 
-      <nav className="nav">
-        <button type="button" className={tab === 'feed' ? 'tab active' : 'tab'} onClick={() => setTab('feed')}>
-          首页
-        </button>
-        <button type="button" className={tab === 'publish' ? 'tab active' : 'tab'} onClick={() => setTab('publish')}>
-          发布
-        </button>
-        <button type="button" className={tab === 'messages' ? 'tab active' : 'tab'} onClick={() => setTab('messages')}>
-          消息{unread > 0 ? <span className="badge">{unread}</span> : null}
-        </button>
-        <button type="button" className={tab === 'playback' ? 'tab active' : 'tab'} onClick={() => setTab('playback')}>
-          播放
-        </button>
-      </nav>
-
-      {tab === 'feed' && (
-        <>
-          <div className="scene-tabs">
-            {SCENES.map((entry) => (
-              <button
-                key={entry.key}
-                type="button"
-                className={scene === entry.key ? 'scene active' : 'scene'}
-                onClick={() => setScene(entry.key)}
-                disabled={feedLoading && scene === entry.key}
-              >
-                {entry.label}
-              </button>
-            ))}
-          </div>
-
-          {feedError && <p className="error">{feedError}</p>}
-          {items.length === 0 && !feedLoading && !feedError && (
-            <p className="empty">该场景暂无 clip，去「发布」上传一条吧。</p>
-          )}
-
-          <section className="feed">
-            {items.map((item) => (
-              <FeedCard
-                key={item.clip_id}
-                item={item}
-                comments={comments}
-                busy={busy}
-                onLike={handleLike}
-                onSave={handleSave}
-                onToggleComments={handleToggleComments}
-                onSubmitComment={handleSubmitComment}
-              />
-            ))}
-          </section>
-
-          <footer className="load-more">
-            {hasMore ? (
-              <button type="button" className="primary" onClick={handleLoadMore} disabled={feedLoading}>
-                {feedLoading ? '加载中…' : '加载更多'}
-              </button>
-            ) : (
-              items.length > 0 && <p className="subtle">已经到底了</p>
-            )}
-          </footer>
-        </>
-      )}
+      <main className="pf-main">
+        {tab === 'feed' && (
+          <FeedPage
+            scene={scene}
+            onScene={setScene}
+            items={items}
+            loading={feedLoading}
+            error={feedError}
+            hasMore={hasMore}
+            onLoadMore={handleLoadMore}
+            onRetry={() => loadFeed(token, scene, '', true)}
+            comments={comments}
+            busy={busy}
+            onLike={handleLike}
+            onSave={handleSave}
+            onToggleComments={handleToggleComments}
+            onSubmitComment={handleSubmitComment}
+            onGoPublish={() => setTab('publish')}
+          />
+        )}
 
       {tab === 'publish' && (
         <section className="panel">
@@ -810,6 +624,7 @@ export default function App() {
           </form>
         </section>
       )}
-    </main>
+      </main>
+    </div>
   )
 }

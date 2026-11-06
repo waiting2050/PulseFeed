@@ -1,0 +1,83 @@
+/* tokens.css 定义 P0 设计 token：纯黑底、红青强调、明暗块分层、字号阶梯与短动效，供 pf-* 组件使用。 */
+:root {
+  color-scheme: dark;
+
+  /* 背景层次：纯黑底 + 三级明暗块，层级主要靠明暗而非阴影 */
+  --pf-bg: #000000;
+  --surface-1: #161823;
+  --surface-2: #1c1c1e;
+  --surface-3: #26272b;
+  --line: rgba(255, 255, 255, 0.08);
+  --line-strong: rgba(255, 255, 255, 0.16);
+
+  /* 文本 */
+  --text-1: #ffffff;
+  --text-2: rgba(255, 255, 255, 0.75);
+  --text-3: rgba(255, 255, 255, 0.45);
+
+  /* 强调与语义：红只给主操作与点赞，青只给焦点环、收藏激活与极少量标签 */
+  --brand: #fe2c55;
+  --brand-hover: #ff4d70;
+  --brand-press: #e01f46;
+  --brand-soft: rgba(254, 44, 85, 0.14);
+  --cyan: #25f4ee;
+  --cyan-soft: rgba(37, 244, 238, 0.12);
+  --success: #34d399;
+  --warning: #ffb020;
+  --error: #ff6b6b;
+  --info: #60a5fa;
+
+  /* 字号阶梯（字号 / 行高） */
+  --fs-display: 32px;
+  --lh-display: 36px;
+  --fs-h1: 24px;
+  --lh-h1: 30px;
+  --fs-h2: 20px;
+  --lh-h2: 26px;
+  --fs-title: 16px;
+  --lh-title: 22px;
+  --fs-body: 14px;
+  --lh-body: 22px;
+  --fs-caption: 12px;
+  --lh-caption: 18px;
+  --fs-micro: 11px;
+  --lh-micro: 16px;
+
+  /* 间距（基数 4） */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+  --space-16: 64px;
+  --space-20: 80px;
+
+  /* 圆角：卡片 10px、控件 8px、面板 12px，保持棱角感 */
+  --r-xs: 4px;
+  --r-sm: 8px;
+  --r-md: 10px;
+  --r-lg: 12px;
+  --r-pill: 999px;
+
+  /* 阴影只保留两级：常态靠明暗块，浮层才用 shadow-md */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --shadow-md: 0 12px 32px rgba(0, 0, 0, 0.45);
+
+  /* 动效只服务状态变化，120–200ms */
+  --dur-fast: 120ms;
+  --dur-base: 200ms;
+  --ease-standard: cubic-bezier(0.2, 0.8, 0.2, 1);
+
+  /* 尺寸与层级 */
+  --w-app: 1240px;
+  --w-content: 1120px;
+  --w-narrow: 420px;
+  --z-sticky: 10;
+  --z-dropdown: 20;
+  --z-modal: 30;
+  --z-toast: 40;
+}
