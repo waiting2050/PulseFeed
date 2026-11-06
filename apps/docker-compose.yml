@@ -1,5 +1,7 @@
 # docker-compose.yml 定义 PulseFeed 本地全栈编排：MySQL/Redis/RabbitMQ + API/Worker + Web，
 # 并提供可选的 monitoring profile（Prometheus/Grafana 配置属于 S21，profile 默认不启动）。
+# 所有宿主端口均可通过 .env 覆盖（默认值见 .env.example）；容器内端口与服务名固定不变，
+# 服务间通信只依赖服务名 + 容器端口，改宿主映射不会影响内部引用。
 name: pulsefeed
 
 services:
@@ -11,7 +13,7 @@ services:
       MYSQL_USER: pulsefeed
       MYSQL_PASSWORD: pulsefeed
     ports:
-      - "3307:3306"
+      - "${MYSQL_PORT:-3307}:3306"
     volumes:
       - pulsefeed-mysql-data:/var/lib/mysql
     healthcheck:
@@ -24,7 +26,7 @@ services:
   redis:
     image: redis:7.4-alpine
     ports:
-      - "6380:6379"
+      - "${REDIS_PORT:-6380}:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -38,8 +40,8 @@ services:
       RABBITMQ_DEFAULT_USER: pulsefeed
       RABBITMQ_DEFAULT_PASS: pulsefeed
     ports:
-      - "5673:5672"
-      - "15673:15672"
+      - "${RABBITMQ_PORT:-5673}:5672"
+      - "${RABBITMQ_UI_PORT:-15673}:15672"
     healthcheck:
       # ping 只证明 Erlang 节点存活；check_port_connectivity 额外确认 AMQP 监听端口可连接，
       # 避免 Worker 在 5672 尚未就绪时启动并因 connection refused 退出。
@@ -62,7 +64,7 @@ services:
       rabbitmq:
         condition: service_healthy
     ports:
-      - "8090:8090"
+      - "${API_PORT:-8090}:8090"
     volumes:
       - pulsefeed-uploads:/app/uploads
     healthcheck:
@@ -89,9 +91,9 @@ services:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
-    # 宿主机固定 19092：Win11 Hyper-V 动态保留段会占用 9092 一类的端口，不能依赖默认值。
+    # 宿主默认 19092：Win11 Hyper-V 动态保留段会占用 9092 一类的端口，因此默认值避开保留段。
     ports:
-      - "19092:9092"
+      - "${WORKER_METRICS_PORT:-19092}:9092"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:9092/metrics"]
       interval: 10s
@@ -107,7 +109,7 @@ services:
       api:
         condition: service_healthy
     ports:
-      - "8088:80"
+      - "${WEB_PORT:-8088}:80"
 
   prometheus:
     profiles: ["monitoring"]
@@ -118,8 +120,8 @@ services:
       worker:
         condition: service_healthy
     ports:
-      # 宿主机固定 19090：9090 落在 Win11 Hyper-V 保留段 9020–9119，与 S20 的 Worker 19092 同源处理。
-      - "19090:9090"
+      # 宿主默认 19090：9090 落在 Win11 Hyper-V 保留段 9020–9119，与 S20 的 Worker 19092 同源处理。
+      - "${PROMETHEUS_PORT:-19090}:9090"
     volumes:
       - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
 
@@ -131,7 +133,7 @@ services:
     environment:
       GF_SECURITY_ADMIN_PASSWORD: pulsefeed
     ports:
-      - "3000:3000"
+      - "${GRAFANA_PORT:-3000}:3000"
     volumes:
       - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
       # dashboard JSON 由 file provider 自动加载（目录已在 provisioning/dashboards 中声明）。

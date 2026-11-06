@@ -83,16 +83,30 @@ docker compose --profile monitoring up -d prometheus grafana
 docker compose --profile monitoring down   # 只停止并移除容器，保留数据卷
 ```
 
-| 服务 | 宿主机端口 | 容器端口 | 说明 |
-|---|---|---|---|
-| web | 8088 | 80 | nginx 托管构建产物，反代 `/api/`、`/uploads/` |
-| api | 8090 | 8090 | HTTP API 与 `/health`、`/metrics` |
-| worker | 19092 | 9092 | 指标端口固定映射，避开 Win11 Hyper-V 保留段 9020–9119 |
-| mysql | 3307 | 3306 | |
-| redis | 6380 | 6379 | |
-| rabbitmq | 5673 / 15673 | 5672 / 15672 | 15673 为管理台 |
-| prometheus | 19090 | 9090 | 仅 `monitoring` profile；9090 同样落在保留段，故映射 19090 |
-| grafana | 3000 | 3000 | 仅 `monitoring` profile，预置数据源与 16 面板仪表盘 |
+| 服务 | 默认宿主端口 | 覆盖变量 | 容器端口 | 说明 |
+|---|---|---|---|---|
+| web | 8088 | `WEB_PORT` | 80 | nginx 托管构建产物，反代 `/api/`、`/uploads/` |
+| api | 8090 | `API_PORT` | 8090 | HTTP API 与 `/health`、`/metrics` |
+| worker | 19092 | `WORKER_METRICS_PORT` | 9092 | 指标端口，默认值避开 Win11 Hyper-V 保留段 9020–9119 |
+| mysql | 3307 | `MYSQL_PORT` | 3306 | |
+| redis | 6380 | `REDIS_PORT` | 6379 | |
+| rabbitmq | 5673 / 15673 | `RABBITMQ_PORT` / `RABBITMQ_UI_PORT` | 5672 / 15672 | 15673 为管理台 |
+| prometheus | 19090 | `PROMETHEUS_PORT` | 9090 | 仅 `monitoring` profile；9090 同样落在保留段，故默认映射 19090 |
+| grafana | 3000 | `GRAFANA_PORT` | 3000 | 仅 `monitoring` profile，预置数据源与 16 面板仪表盘 |
+
+### 端口被占用怎么办
+
+宿主端口全部可由 `.env` 覆盖，不用改 `docker-compose.yml`：
+
+```bash
+cd pulsefeed/apps
+cp .env.example .env        # Windows PowerShell: Copy-Item .env.example .env
+# 编辑 .env，例如 REDIS_PORT=6381、MYSQL_PORT=3308
+docker compose config --quiet   # 先校验变量替换后的配置
+docker compose up -d --build
+```
+
+容器内端口与服务名固定不变（`mysql:3306`、`redis:6379`、`rabbitmq:5672`），因此改宿主映射不影响服务间通信。Windows 上 9020–9119 可能被 Hyper-V/WinNAT 动态保留，默认值 19090/19092 已避开；仍冲突时改 `PROMETHEUS_PORT` / `WORKER_METRICS_PORT` 即可。可用 `netsh interface ipv4 show excludedportrange protocol=tcp` 查看当前保留段。
 
 监控验收口径为 `http://localhost:19090`（Prometheus）与 `http://localhost:3000`（Grafana，默认账号 `admin` / `pulsefeed`）。K8s 清单 `deploy.yaml` 含 6 个 Deployment（mysql/redis/rabbitmq/api/worker/web）。
 
