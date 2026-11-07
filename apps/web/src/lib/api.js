@@ -162,4 +162,41 @@ export const api = {
   preloadClips: () => request('/preload-clips'),
 }
 
+// 播放配置在登录后拉取一次并缓存；播放结算与配置页共用，避免每次播放都请求。
+let cachedPlaybackConfig = null
+let playbackConfigRequest = null
+
+export function getCachedPlaybackConfig() {
+  return cachedPlaybackConfig
+}
+
+export function primePlaybackConfig(config) {
+  if (!config) return
+  cachedPlaybackConfig = { ...config }
+  playbackConfigRequest = null
+}
+
+export function invalidatePlaybackConfig() {
+  cachedPlaybackConfig = null
+  playbackConfigRequest = null
+}
+
+export function loadPlaybackConfig() {
+  if (cachedPlaybackConfig) return Promise.resolve(cachedPlaybackConfig)
+  if (!playbackConfigRequest) {
+    playbackConfigRequest = api
+      .playbackConfig()
+      .then((data) => {
+        cachedPlaybackConfig = data
+        playbackConfigRequest = null
+        return data
+      })
+      .catch((err) => {
+        playbackConfigRequest = null
+        throw err
+      })
+  }
+  return playbackConfigRequest
+}
+
 export { FILE_KIND }

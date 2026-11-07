@@ -36,7 +36,7 @@ func (h *Handler) GetConfig(c *gin.Context) {
 	respondOK(c, http.StatusOK, configResponse{PreloadCount: cfg.PreloadCount, QoSSampleRate: cfg.QoSSampleRate})
 }
 
-// UpdateConfig 处理 PUT /api/playback-config，按请求体字段覆盖播放配置；字段全可选。
+// UpdateConfig 处理 PUT /api/playback-config，按请求体字段覆盖播放配置；缺省字段继承现有值。
 func (h *Handler) UpdateConfig(c *gin.Context) {
 	viewerID, authed := middleware.UserIDFromContext(c)
 	if !authed {
@@ -48,15 +48,7 @@ func (h *Handler) UpdateConfig(c *gin.Context) {
 		fail(c, http.StatusBadRequest, "请求体非法")
 		return
 	}
-	preloadCount := 0
-	sampleRate := 0.0
-	if req.PreloadCount != nil {
-		preloadCount = *req.PreloadCount
-	}
-	if req.QoSSampleRate != nil {
-		sampleRate = *req.QoSSampleRate
-	}
-	cfg, err := h.service.UpsertConfig(c.Request.Context(), viewerID, preloadCount, sampleRate)
+	cfg, err := h.service.UpdateConfig(c.Request.Context(), viewerID, req.PreloadCount, req.QoSSampleRate)
 	if err != nil {
 		mapError(c, err)
 		return

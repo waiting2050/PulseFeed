@@ -142,6 +142,76 @@ func TestPlaybackUpsertConfigReadBack(t *testing.T) {
 	}
 }
 
+// intPtr 与 floatPtr 便于构造部分更新请求的可选字段。
+func intPtr(v int) *int { return &v }
+
+func floatPtr(v float64) *float64 { return &v }
+
+// TestPlaybackPartialUpdateKeepsOtherField 验证只传一个字段时另一字段保留库中现网值。
+func TestPlaybackPartialUpdateKeepsOtherField(t *testing.T) {
+	service := appplayback.New(newPlaybackFake(), nil)
+	ctx := context.Background()
+
+	if _, err := service.UpsertConfig(ctx, 42, 12, 0.25); err != nil {
+		t.Fatalf("准备配置失败: %v", err)
+	}
+
+	onlyPreload, err := service.UpdateConfig(ctx, 42, intPtr(20), nil)
+	if err != nil {
+		t.Fatalf("只更新预加载条数失败: %v", err)
+	}
+	if onlyPreload.PreloadCount != 20 || onlyPreload.QoSSampleRate != 0.25 {
+		t.Fatalf("只更新预加载条数后应为 20/0.25，实际 %d/%v", onlyPreload.PreloadCount, onlyPreload.QoSSampleRate)
+	}
+
+	onlySample, err := service.UpdateConfig(ctx, 42, nil, floatPtr(0.5))
+	if err != nil {
+		t.Fatalf("只更新采样率失败: %v", err)
+	}
+	if onlySample.PreloadCount != 20 || onlySample.QoSSampleRate != 0.5 {
+		t.Fatalf("只更新采样率后应为 20/0.5，实际 %d/%v", onlySample.PreloadCount, onlySample.QoSSampleRate)
+	}
+
+	unchanged, err := service.UpdateConfig(ctx, 42, nil, nil)
+	if err != nil {
+		t.Fatalf("两个字段都不传失败: %v", err)
+	}
+	if unchanged.PreloadCount != 20 || unchanged.QoSSampleRate != 0.5 {
+		t.Fatalf("两个字段都不传应保留现有值 20/0.5，实际 %d/%v", unchanged.PreloadCount, unchanged.QoSSampleRate)
+	}
+}
+
+// TestPlaybackConfigBoundary 验证越界与临界配置按现有规则夹取或回落默认值。
+func TestPlaybackConfigBoundary(t *testing.T) {
+	cases := []struct {
+		name        string
+		preload     int
+		sample      float64
+		wantPreload int
+		wantSample  float64
+	}{
+		{name: "preload 33", preload: 33, sample: 0.5, wantPreload: 32, wantSample: 0.5},
+		{name: "preload 0", preload: 0, sample: 0.5, wantPreload: 8, wantSample: 0.5},
+		{name: "preload negative", preload: -3, sample: 0.5, wantPreload: 8, wantSample: 0.5},
+		{name: "sample 33", preload: 5, sample: 33, wantPreload: 5, wantSample: 1},
+		{name: "sample 0", preload: 5, sample: 0, wantPreload: 5, wantSample: 0.1},
+		{name: "sample negative", preload: 5, sample: -0.5, wantPreload: 5, wantSample: 0.1},
+		{name: "sample 0.005", preload: 5, sample: 0.005, wantPreload: 5, wantSample: 0.005},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			service := appplayback.New(newPlaybackFake(), nil)
+			cfg, err := service.UpsertConfig(context.Background(), 44, tc.preload, tc.sample)
+			if err != nil {
+				t.Fatalf("写入边界配置失败: %v", err)
+			}
+			if cfg.PreloadCount != tc.wantPreload || cfg.QoSSampleRate != tc.wantSample {
+				t.Fatalf("期望 %d/%v，实际 %d/%v", tc.wantPreload, tc.wantSample, cfg.PreloadCount, cfg.QoSSampleRate)
+			}
+		})
+	}
+}
+
 // TestPlaybackPreloadReturnsLatestClips 验证预加载按配置条数返回最新的 clip_id。
 func TestPlaybackPreloadReturnsLatestClips(t *testing.T) {
 	clips := &playbackFakeClips{ids: []int64{101, 102, 103, 104, 105}}

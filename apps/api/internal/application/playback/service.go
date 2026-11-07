@@ -70,6 +70,21 @@ func (s *Service) UpsertConfig(ctx context.Context, userID int64, preloadCount i
 	return s.repo.UpsertConfig(ctx, cfg)
 }
 
+// UpdateConfig 按请求中出现的字段合并当前配置；nil 表示保留库中现有值，两者都为 nil 时原样返回现有配置。
+func (s *Service) UpdateConfig(ctx context.Context, userID int64, preloadCount *int, sampleRate *float64) (*domplayback.Config, error) {
+	cfg, err := s.GetConfig(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	if preloadCount != nil {
+		cfg.PreloadCount = *preloadCount
+	}
+	if sampleRate != nil {
+		cfg.QoSSampleRate = *sampleRate
+	}
+	return s.UpsertConfig(ctx, userID, cfg.PreloadCount, cfg.QoSSampleRate)
+}
+
 // GetPreload 按用户配置返回预加载 clip ID 列表；依赖 ClipProvider；配置缺失或 provider nil 都返回空切片 + nil 错误。
 func (s *Service) GetPreload(ctx context.Context, userID int64) ([]int64, error) {
 	if userID <= 0 {

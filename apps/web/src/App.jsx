@@ -9,7 +9,7 @@ import FeedPage from './pages/FeedPage.jsx'
 import PublishPage from './pages/PublishPage.jsx'
 import MessagesPage from './pages/MessagesPage.jsx'
 import PlaybackPage from './pages/PlaybackPage.jsx'
-import { api, getToken, hydrateToken, setToken } from './lib/api.js'
+import { api, getToken, hydrateToken, invalidatePlaybackConfig, loadPlaybackConfig, setToken } from './lib/api.js'
 
 // readNext 只接受站内绝对路径，避免登录回跳被外部地址利用。
 function readNext(search) {
@@ -72,6 +72,8 @@ export default function App() {
         if (alive) setUnread((data && data.unread) || 0)
       })
       .catch(() => {})
+    // 登录后读取一次播放配置并缓存，播放结算直接复用，不在每次播放时请求。
+    loadPlaybackConfig().catch(() => {})
     return () => {
       alive = false
     }
@@ -104,6 +106,7 @@ export default function App() {
     } catch {
       // 登出失败不阻塞本地状态清理。
     }
+    invalidatePlaybackConfig()
     setToken('')
     setTokenState('')
     setMe(null)

@@ -2,7 +2,7 @@
 // 播放期间按会话采集首帧耗时、卡顿次数、播放时长与完播状态，结束/卸载时用既有 QoS 接口上报一次。
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import Icon from './Icon.jsx'
-import { api } from '../lib/api.js'
+import { api, getCachedPlaybackConfig, loadPlaybackConfig } from '../lib/api.js'
 
 // newEventId 生成单个播放会话的幂等键；同一会话只上报一次，后端再按 event_id 去重。
 function newEventId() {
@@ -36,6 +36,9 @@ function initialSession() {
     resumeAt: 0,
     completed: false,
     reported: false,
+    settling: false,
+    // null 表示尚未抽样；false 表示本会话未命中，不再随机、也不再上报。
+    sampled: null,
     hasPlayed: false,
   }
 }
@@ -67,28 +70,51 @@ export default function VideoPlayer({
     return sessionRef.current
   }, [])
 
-  // reportQoS 结算当前会话并上报；同一会话由 reported 标记保证只发一次。
+  // reportQoS 结算当前会话，按 qos_sample_rate 在会话级别抽样一次后上报；
+  // 未命中只记录 sampled=false，不写 reported，避免把会话误标成已上报。
   const reportQoS = useCallback(() => {
     const session = sessionRef.current
     const video = videoRef.current
-    if (!session || session.reported || !session.hasPlayed) return
-    session.reported = true
+    if (!session || session.reported || session.settling || !session.hasPlayed) return
     const now = performance.now()
     const playedMs = session.playedMs + (session.resumeAt > 0 ? now - session.resumeAt : 0)
     const completed =
       session.completed ||
       Boolean(video && Number.isFinite(video.duration) && video.duration > 0 && video.currentTime >= video.duration - 0.5)
-    api
-      .reportQoS({
-        clip_id: clipId,
-        event_id: session.eventId,
-        latency_ms: Math.max(0, Math.round(session.firstFrameMs < 0 ? 0 : session.firstFrameMs)),
-        stall_count: session.stallCount,
-        completed,
-        // 后端契约没有时长字段，播放时长放入自由文本 client_info（上限 256 字符）。
-        client_info: JSON.stringify({ duration_ms: Math.max(0, Math.round(playedMs)) }),
+
+    const finish = (config) => {
+      session.settling = false
+      if (session.reported) return
+      if (session.sampled === null) {
+        const rate = Number.isFinite(config && config.qos_sample_rate) ? config.qos_sample_rate : 0
+        session.sampled = Math.random() < rate
+      }
+      if (!session.sampled) return
+      session.reported = true
+      api
+        .reportQoS({
+          clip_id: clipId,
+          event_id: session.eventId,
+          latency_ms: Math.max(0, Math.round(session.firstFrameMs < 0 ? 0 : session.firstFrameMs)),
+          stall_count: session.stallCount,
+          completed,
+          // 后端契约没有时长字段，播放时长放入自由文本 client_info（上限 256 字符）。
+          client_info: JSON.stringify({ duration_ms: Math.max(0, Math.round(playedMs)) }),
+        })
+        .catch(() => {})
+    }
+
+    session.settling = true
+    const cached = getCachedPlaybackConfig()
+    if (cached) {
+      finish(cached)
+      return
+    }
+    loadPlaybackConfig()
+      .then(finish)
+      .catch(() => {
+        session.settling = false
       })
-      .catch(() => {})
   }, [clipId])
 
   // 卸载（卡片被替换、详情关闭、切换场景）时结算未完成的播放会话。

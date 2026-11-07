@@ -5,7 +5,7 @@ import ErrorBanner from '../components/ErrorBanner.jsx'
 import Spinner from '../components/Spinner.jsx'
 import Toast from '../components/Toast.jsx'
 import useApi from '../hooks/useApi.js'
-import { api } from '../lib/api.js'
+import { api, primePlaybackConfig } from '../lib/api.js'
 
 export default function PlaybackPage() {
   const config = useApi(() => api.playbackConfig(), [])
@@ -16,6 +16,7 @@ export default function PlaybackPage() {
 
   useEffect(() => {
     if (!config.data) return
+    primePlaybackConfig(config.data)
     setForm({
       preload_count: String(config.data.preload_count),
       qos_sample_rate: String(config.data.qos_sample_rate),
@@ -47,6 +48,7 @@ export default function PlaybackPage() {
         preload_count: preloadCount,
         qos_sample_rate: sampleRate,
       })
+      primePlaybackConfig(data)
       setForm({
         preload_count: String(data.preload_count),
         qos_sample_rate: String(data.qos_sample_rate),
@@ -87,7 +89,9 @@ export default function PlaybackPage() {
               disabled={saving || config.loading}
               required
             />
-            <span className="pf-field-hint">范围 1–32，默认 8。</span>
+            <span className="pf-field-hint">
+              范围 1–32，默认 8；该值决定服务端预加载队列的条数，当前客户端未做预取。
+            </span>
           </div>
           <div className="pf-field">
             <label htmlFor="pf-qos-rate">QoS 采样率</label>
