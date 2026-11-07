@@ -1,6 +1,6 @@
 # PulseFeed 路由与端口快照
 
-> 生成时间：2026-11-02；2026-11-06 按 `router.go` 与 `docker-compose.yml` 复核字段、字符上限与可配置端口；2026-11-07 文档一致性终检。
+> 生成时间：2026-11-02；2026-11-06 按 `router.go` 与 `docker-compose.yml` 复核字段、字符上限与可配置端口；2026-11-07 终检：按代码复核 QoS 字段与 SPA 深链回落，补充死信拓扑索引。
 > 依据 `apps/api/internal/interfaces/http/router/router.go` 实际注册路由与 `apps/docker-compose.yml`。
 > 所有接口统一返回 `{code, message, data}`，成功 `code=0`；请求体与响应体均为 JSON。
 
@@ -79,6 +79,9 @@
 | GET | `/api/preload-clips` | 登录 | — | `{clip_ids:[int64]}` |
 | POST | `/api/playback-qos-reports` | 登录 | `{clip_id, event_id, latency_ms, stall_count, completed, client_info?}` | `{inserted}` |
 
+> QoS 以 `event_id` 唯一键幂等：重复上报返回 `inserted=false`，不重复聚合；`client_info` 为可选字符串，前端放入 `{"duration_ms":<实际播放时长>}`。
+> 消息队列的死信交换机、重试上限与 406 旧队列处理不属于 HTTP 契约，见 `docs/architecture.md` 2.2.1。
+
 ### 2.6 内部接口（`X-Internal-Token`）
 
 | 方法 | 路径 | 请求要点 | 响应 data 要点 |
@@ -105,3 +108,5 @@
 | grafana | `3000` | `GRAFANA_PORT` | `3000` | 仅 `--profile monitoring` |
 
 前端开发态（`npm run dev`）与容器态路径一致：均以 `/api`、`/uploads` 为前缀，无需区分环境改 baseURL。
+
+前端页面路由（`/login`、`/feed`、`/publish`、`/messages`、`/playback`、`/clip/:clipId`）由 React Router 在浏览器内处理；容器内 nginx 以 `try_files $uri $uri/ /index.html` 回落到 `index.html`，刷新与直接粘贴深链不会 404。

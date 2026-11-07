@@ -32,12 +32,22 @@ interfaces/http  →  application  →  domain
 3. 评论走同步落库，按 `Idempotency-Key` 去重；评论数随创建/删除同步更新。
 4. 前端对点赞/收藏做乐观更新，请求失败时回滚。
 
+### 2.2.1 消费失败与死信分流
+
+- **拓扑**：四组消费队列（`pulsefeed.clip.published`、`pulsefeed.clip.embedding`、`pulsefeed.interaction.action_changed`、`pulsefeed.impression.play_recorded`）均带 `x-dead-letter-exchange`；死信交换机为 `pulsefeed.<域>.dlx`，死信队列为 `<原队列>.dead`，路由键为 `dead.<原路由键>`，Worker 启动时与业务队列一并声明。
+- **可重试失败**：失败先 `basic.nack(requeue=true)` 回原队列；同一消费进程按消息体哈希累计次数，上限 3 次（含首次）。达到上限后 `nack(requeue=false)`，由 broker 经死信交换机转入死信队列，主队列不再堆积该消息。
+- **不可重试失败**：消息体 JSON 非法、必需字段缺失、目标 clip 不可见等确定性错误包装为 `messaging.Permanent`，直接 nack 进死信，不消耗重试次数。
+- **计数口径**：失败次数只保存在消费进程内存中，Worker 重启后清零；跨重启累计需依赖 broker 的 `x-death` 头，不在本轮范围。
+- **旧队列兼容**：队列已按旧参数（无死信参数）创建时，`QueueDeclare` 返回 `PRECONDITION_FAILED(406)`；Worker 直接报错退出并提示需要删除的队列名，需人工删除旧队列后重启，不静默改参。
+
 ### 2.3 展示（impression）、播放与 QoS
 
 1. `POST /api/clip-play-events` 按 `event_id` 幂等写入 `pf_play_events`，并 upsert 当日展示聚合；同一 `event_id` 不重复累加 `play_count`，与 `pf_playback_qos_reports` 相同的 `event_id` 也只计一次。
 2. 事件投递 `impression.play_recorded`；`PlayEventWorker`（D7 修正）消费后完成展示聚合补偿，避免“只发不收”。
 3. `POST /api/playback-qos-reports` 按 `event_id` 幂等写入 QoS 表；仅首次插入参与采样与延迟/卡顿/完播聚合。
 4. 播放配置按用户持久化 `preload_count`、`qos_sample_rate`；预加载接口返回最新 N 个可见 clip。
+5. 前端播放器采集口径：会话开始（调用 `play()`）到首次 `playing` 记为 `latency_ms`（首帧等待）；播放中每次 `waiting` 计 1 次 `stall_count`；`client_info.duration_ms` 只累计实际播放墙钟时间（暂停与缓冲不计）；`ended` 或 `currentTime` 距视频总时长 ≤0.5s 记为完播。
+6. 每次播放会话生成一个 `event_id`（`crypto.randomUUID`，缺失时用时间戳随机串），会话内只上报一次；重复提交由后端 `event_id` 唯一键吸收，返回 `inserted=false`，不重复聚合。
 
 ### 2.4 Feed 读取
 
@@ -100,7 +110,7 @@ interfaces/http  →  application  →  domain
 
 ### 6.3 已知测试缺口（本轮不补）
 
-- **RabbitMQ 重投递**：`ActionWorker` 的幂等已有单测覆盖（同一事件消费两次、以及“先成功后失败”分支），但 broker 层的 basic.nack/requeue 与死信未做集成验证，需要真实 MQ 或 testcontainers。
+- **RabbitMQ 重投递**：`ActionWorker` 的幂等已有单测覆盖（同一事件消费两次、以及“先成功后失败”分支）；死信路由已由 `test/integration/dlq_integration_test.go`（`-tags=integration`）覆盖不可重试直接入死信、连续失败 3 次入死信与原队列无残留；仍缺连接中断重连与多实例并发消费的 broker 级回归。
 - **前端自动化**：`apps/web` 目前只有 CI 构建（`npm ci` + `vite build`），没有组件测试或 E2E；交互回归仍靠手工。
 - **真实 MySQL 迁移**：索引建法只在本地 8.0 实例验证过，没有 testcontainers 回归，MySQL 版本升级时需要重新跑 EXPLAIN。
-- **已补覆盖**：`apps/api/test/integration`（`//go:build integration`）已覆盖 `play_count` 跨表同 `event_id` 去重（含并发）与 latest 游标分页边界；每次运行使用独立 schema，跑完清理。
+- **已补覆盖**：`apps/api/test/integration`（`//go:build integration`）已覆盖 `play_count` 跨表同 `event_id` 去重（含并发）、latest 游标分页边界与死信路由；每次运行使用独立 schema，跑完清理。

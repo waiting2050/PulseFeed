@@ -14,7 +14,7 @@ PulseFeed 是一个按领域分层实现的 Feed 系统示例项目：后端提�
 | 鉴权 | JWT HS256（`Authorization: Bearer`），内部接口使用 `X-Internal-Token` |
 | 配置 | goccy/go-yaml，配置文件缺失即报错，不做默认值兜底 |
 | 指标 | Prometheus client，API 与 Worker 独立 Registry，前缀 `pulsefeed_` |
-| 前端 | React 18 + Vite 5，开发态代理 `/api`、`/uploads` 到 8090 |
+| 前端 | React 18 + Vite 5 + react-router-dom 6，开发态代理 `/api`、`/uploads` 到 8090 |
 | 编排 | Docker Compose；Prometheus + Grafana 位于 `monitoring` profile |
 
 ## 目录结构
@@ -120,11 +120,11 @@ docker compose up -d --build
 - [x] 后端主链路：账号、Clip 发布（`Idempotency-Key` 幂等）、Feed 四场景（latest / following / for-you / hot）、互动（点赞 / 收藏 / 评论）、关注、推荐、热榜、消息、播放配置与 Prometheus 指标。
 - [x] 互动异步落库：点赞/收藏先写 Redis，再投递 `pulsefeed.interaction.action_changed`，由 Worker 的 `ActionWorker` 落库；Redis 或 MQ 不可用时回退同步落库。真实 compose 运行中该队列有 1 个消费者（`clip.published`、`clip.embedding`、`impression.play_recorded` 同样各 1 个）。
 - [x] 播放事件幂等：`event_id` 唯一键拦住 `pf_play_events` 重复写入；与 `pf_playback_qos_reports` 同 `event_id` 时不再累加 `play_count`。集成测试覆盖并发去重（见下方「集成测试」）。
-- [x] 前端：React 18 + Vite 5，5 个页面（登录 / Feed / 发布 / 消息 / 播放配置）用顶部 tab 切换，详情用弹层 / Sheet；无独立 URL 深链；Feed 分页用「加载更多」按钮，不是无限滚动。
+- [x] 前端：React 18 + Vite 5，5 个页面（登录 / Feed / 发布 / 消息 / 播放配置）走独立路由；Feed 场景由 `/feed?scene=latest|hot|following|for-you` 直达，详情为 `/clip/:id?from=...` 深链弹层，刷新、前进后退与直接粘贴 URL 均正常，关闭后回到来源列表；Feed 分页仍用「加载更多」按钮，不是无限滚动。卡片与详情内联播放器支持播放 / 暂停 / 静音 / 进度 / 全屏自控，并按首帧延迟、卡顿次数、播放时长、完播状态上报 QoS（`event_id` 幂等）。依赖仅新增 `react-router-dom` 6。
 - [x] 容器化与监控：Compose 编排、宿主端口可由 `.env` 覆盖；Prometheus/Grafana 位于 `monitoring` profile；K8s 清单已提供但未做集群级实测。
 - [x] 测试与 CI：`go build/vet/test`、前端 `npm run build`、GitHub Actions；真实依赖集成测试通过 `-tags=integration` 手动运行。
 - [x] 媒体探测：上传媒体文件时由 `ffprobe` / `ffmpeg` 读取时长与首帧，工具缺失或失败时降级，不影响发布。
-- [ ] RabbitMQ 重投递与死信：Worker 消费失败时已 `basic.nack(requeue=true)` 重投递，但未配置死信队列，也没有 broker 层重投递/死信行为的集成验证。
+- [x] RabbitMQ 重投递与死信：四组消费队列均声明 `x-dead-letter-exchange`，对应死信交换机 `pulsefeed.<域>.dlx` 与死信队列 `<原队列>.dead`；消费失败先 `basic.nack(requeue=true)` 回原队列，同一消费进程累计失败 3 次（含首次）后 nack 不重入原队列，由 broker 转进死信；不可重试错误（消息体非法、必需字段缺失、目标 clip 不可见等）直接进死信，不消耗重试次数。旧队列参数不一致时 broker 返回 406 PreconditionFailed，Worker 中止启动并提示删除旧队列。
 - [ ] 前端自动化：目前只有构建校验，没有组件测试或 E2E，交互回归仍靠手工。
 
 ### 字符计数口径
@@ -194,7 +194,7 @@ go test -tags=integration ./test/integration -v -count=1
 | `PULSEFEED_IT_REDIS_ADDR` | `127.0.0.1:6380` | 仅连通性检查 |
 | `PULSEFEED_IT_RABBITMQ_URL` | `amqp://pulsefeed:pulsefeed@127.0.0.1:5673/` | 仅连通性检查 |
 
-排障：先 `docker compose ps` 确认三个依赖为 healthy；`CREATE DATABASE` 报权限不足时检查 DSN 是否用了 root；连接超时优先核对 `.env` 实际映射的宿主端口与上述变量是否一致。测试覆盖：`play_count` 跨表同 `event_id` 去重（含两个 goroutine 并发上报）与 latest 场景逐页游标边界（含跨分钟）。
+排障：先 `docker compose ps` 确认三个依赖为 healthy；`CREATE DATABASE` 报权限不足时检查 DSN 是否用了 root；连接超时优先核对 `.env` 实际映射的宿主端口与上述变量是否一致。测试覆盖：`play_count` 跨表同 `event_id` 去重（含两个 goroutine 并发上报）、latest 场景逐页游标边界（含跨分钟）与死信路由（不可重试直接入死信、连续失败 3 次后入死信、原队列无残留）。
 
 ## 文档
 

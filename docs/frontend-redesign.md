@@ -139,15 +139,15 @@
 
 ## 4. 信息架构与页面布局
 
-顶层导航的设计目标是路由（详见 §7）。**实际交付未引入路由**：登录/Feed/发布/消息/播放配置为应用内 tab 切换，详情用弹层/Sheet，无独立 URL 与深链。下列路径仅作为后续演进目标保留：
+顶层导航已按路由落地（详见 §7）。登录 / Feed / 发布 / 消息 / 播放配置为五个独立路由，详情用 `/clip/:id` 弹层；刷新、前进后退与直接粘贴 URL 均可用，关闭后按 `from` 回到来源列表。实际路径：
 
 ```
 /login                登录 / 注册
-/                     Feed（?scene=latest|hot|following|for-you）
-/clip/:clipId         卡片详情 / 播放（桌面弹层，移动全屏 sheet）
+/feed                 Feed（?scene=latest|hot|following|for-you）
+/clip/:clipId         卡片详情 / 播放（?from=来源路径；桌面弹层，移动全屏 sheet）
 /publish              发布
 /messages             消息
-/settings/playback    播放配置
+/playback             播放配置
 ```
 
 ### 4.1 登录 / 注册
@@ -215,6 +215,7 @@
 | `FeedGrid` | 栅格与分页 | 首屏、追加、空、错、到底 |
 | `ClipCard` | 单卡容器 | 默认、悬停、按下、已点赞/已收藏、加载中 |
 | `CoverMedia` | 封面、首帧、占位、时长角标 | 有图 / 无图渐变占位 / 加载失败 / 悬停播放 |
+| `VideoPlayer` | 卡片与详情共用的内联播放器 | 播放、暂停、静音、进度、全屏、缓冲、失败、减少动效 |
 | `ActionBar` | 点赞/收藏/评论/分享 | 未激活、激活、请求中（禁用 + 透明度）、失败回滚 |
 | `CountBadge` | 计数与数字格式化 | 0、<1万、≥1万（1.2w） |
 | `SkeletonCard` / `SkeletonRow` | 骨架屏 | 静态微光、减少动效模式 |
@@ -261,14 +262,14 @@
 
 | 议题 | 推荐 | 理由 |
 |---|---|---|
-| 路由 | **不引入（实际落地）** | 交付版沿用 `App.jsx` 内的 tab 状态切换与详情弹层，无深链；引入 `react-router-dom` 仍列为后续候选，需在下一轮单独评估 |
+| 路由 | **引入 `react-router-dom` 6（已落地）** | `BrowserRouter` + 声明式 `Routes`；页面状态搬进 URL，不再用 `App.jsx` 内 tab state；未匹配路径由 `*` 兜底到 404 页 |
 | 图标 | **内联 SVG sprite（零依赖）** | 需要图标不超过 15 个；图标库（lucide-react 等）会引入一个依赖 + tree-shaking 不确定性。集中在 `Icon.jsx`，按 16/20/24 输出 |
 | 样式 | **CSS 变量 + CSS Modules** | Vite 原生支持，零配置；token 集中在 `styles/tokens.css`，组件样式就近。不引入 Tailwind：本项目组件数量少，工具类收益不抵配置与阅读成本 |
 | 字体 | **系统字体栈** | `-apple-system, "PingFang SC", "Segoe UI", "Noto Sans SC"`；不加载 Web Font，首屏零字体请求。标题靠字重与字距做层级，数字用 `tabular-nums`。若品牌需要衬线/展示体，再自托管 1 个可变字体（仅 B 方向需要） |
 | 状态管理 | **沿用 `useState` + 自写 `useApi` hook** | 页面级状态足够；不引入 Redux/SWR/TanStack Query。`useApi` 统一 loading/error/重试/取消 |
 | 组件库 | **不引入** | 视觉目标是定制化，组件库改造成本高于自建 15 个小组件 |
 
-新增依赖：无。全部复用现有 React 18 + Vite 5。
+新增依赖：`react-router-dom` 6（唯一运行时增量）；其余复用现有 React 18 + Vite 5。
 
 ---
 
@@ -296,7 +297,7 @@
 - [x] 表单：`label` 显式关联，标题错误提示用 `aria-describedby`；未使用 `aria-invalid`。
 - [x] Toast：成功 `role="status"`、失败 `role="alert"`，不依赖颜色表达。
 - [x] 支持 `prefers-reduced-motion`；支持键盘完成点赞/收藏/切场景。
-- [ ] 页面标题随路由变化（`document.title`）：未实施，应用仍为 tab 切换、无独立 URL，标题固定。
+- [ ] 页面标题随路由变化（`document.title`）：仍未实施，标题固定为 PulseFeed；路由已具备，可在路由层统一设置。
 
 ---
 
@@ -324,7 +325,7 @@
 
 **验收**：1440×900 与 390×844 截图对比；Feed 首屏三列/单列；登录页两栏/单列；Tab 键走查可见焦点；骨架屏、空态与错误态可见；移动端无横向滚动。
 
-**交付状态**：Feed + 登录两页达到新视觉，其余页面沿用旧样式并复用新顶栏；未引入路由，仍用 tab 切换。
+**交付状态**：Feed + 登录两页达到新视觉，其余页面沿用旧样式并复用新顶栏；当时未引入路由，仍用 tab 切换（后续轮次已接入路由，见 §13）。
 
 ### P1 页面与组件重做（约 4–5 人日）
 
@@ -340,7 +341,7 @@
 
 **验收**：5 个页面各 1 张截图；走查空态/错误态/加载态（可用网络节流与断网模拟）；键盘完成点赞、切场景、发布表单、保存配置；移动端无横向滚动。
 
-**交付状态**：已实施。5 个页面完成，详情用 `DetailSheet` 弹层/Sheet；仍为应用内 tab 切换，无独立路由与 URL 深链。
+**交付状态**：已实施。5 个页面完成，详情用 `DetailSheet` 弹层/Sheet；当时仍为应用内 tab 切换，路由与深链在后续轮次接入（见 §13）。
 
 ### P2 动效与细节打磨（已完成）
 
@@ -357,7 +358,7 @@
 
 **验收**：1440×900 与 390×844 截图；Playwright `reducedMotion:'reduce'` 下骨架与 spinner 动画为 none、连拍截图完全一致；`npm run build`、`go build/vet/test` 通过。
 
-**交付状态**：已实施（2026-11-06）。悬停预览、Toast/Spinner、焦点与弹层可访问性、reduced-motion 降级、时长角标均已落地；未引入路由与 `document.title` 联动。
+**交付状态**：已实施（2026-11-06）。悬停预览、Toast/Spinner、焦点与弹层可访问性、reduced-motion 降级、时长角标均已落地；路由与 `document.title` 联动在后续轮次接入（路由见 §13，标题仍未做）。
 
 **合计**：约 8–9 人日（不含后端字段扩展）。
 
@@ -367,7 +368,7 @@
 
 - **不做**：不引入组件库、不引入 CSS 框架、不做 SSR、不改 API 契约（除可选字段）、不重写后端。
 - **风险 1**：媒体素材缺失时，卡片仍以渐变占位呈现；需接受"无图也好看"的兜底设计。
-- **风险 2**：若后续引入路由，旧 tab 状态逻辑需删除，可能出现短暂的导航状态丢失；本轮未引入路由，无此风险。
+- **风险 2**：路由已引入，旧 tab 状态逻辑已移除；详情用 `from` 保留来源，实测前进后退与刷新未出现导航状态丢失。
 - **风险 3**：悬停预览在弱网下仍可能卡顿；实际用 `preload="none"` + 仅悬停时挂载、离开即卸载缓解（未做视口懒挂载）。
 - **风险 4**：若后续要做方向 C 的移动端全屏流，需在 P2 后单独立项，不复用 P1 的弹层逻辑。
 - **原型局限**：原型为纯静态 HTML/CSS/JS，封面使用渐变占位（当前环境图片生成接口返回固定图，无法产出多张不同封面），交互仅演示状态切换，不连接任何接口。
@@ -395,3 +396,22 @@
 - `prefers-reduced-motion: reduce`：关闭骨架扫光与 spinner 旋转、去掉卡片/按钮/播放键过渡，仅保留颜色与明暗的状态切换；不新增装饰性入场动画。
 - 时长角标：卡片右下角显示 `mm:ss`，`duration_ms` 为 0 时不渲染占位。
 - 媒体链路：上传接口回传 `cover_url` 与 `duration_ms`，发布时透传并写入 `pf_clips.duration_ms`；无 ffmpeg 环境降级为占位封面与无角标（详见 `docs/architecture.md` 2.5）。
+
+---
+
+## 13. 播放器与路由实施记录
+
+### 13.1 内联播放器（`580eb51`）
+
+- `VideoPlayer.jsx` 同时服务 Feed 卡片与 `DetailSheet`：支持播放 / 暂停、静音、进度拖动、全屏、缓冲与错误提示；`playsInline` + `preload="none"`，打开详情、切换场景或切页时暂停。
+- 单实例：Feed 维护 `playingId`，同一时刻只允许一个卡片播放；详情打开时先暂停列表播放。
+- 减少动效：`prefers-reduced-motion` 下不渲染播放脉冲等装饰过渡；控制项保持键盘可达并带 `aria-label`。
+- QoS：每次播放会话生成 `event_id`，上报首帧延迟、卡顿次数、实际播放时长与完播标记，采集口径见 `docs/architecture.md` 2.3。
+- 实测：`ffmpeg` 合成测试片上传后，Feed 卡片与详情均可播放；暂停 / 静音 / 进度 / 全屏可用，QoS 上报落库；`npm run build` 通过。
+
+### 13.2 路由与深链（`6fc7775`）
+
+- 引入 `react-router-dom` 6，`main.jsx` 包裹 `BrowserRouter`，`App.jsx` 改为 `Routes` 外壳；五个页面路径见 §4，依赖只新增这一项。
+- Feed 场景读写 `?scene=`；卡片详情写 `/clip/:clipId?from=<来源路径>`，关闭按 `from` 回列表，无 `from` 回 `/feed?scene=latest`；深链数据不在当前列表时用 `GET /api/clips/:clipId` 补齐。
+- 未登录访问深链先跳 `/login?next=`，登录后回跳；未匹配路径渲染 404 页；`nginx.conf` 已有 `try_files $uri $uri/ /index.html`，容器内刷新 `/clip/...` 返回 `index.html`。
+- 实测：`/feed?scene=hot` 直达；卡片打开、关闭回原场景；直接粘贴 `/clip/101` 与刷新均保持弹层；浏览器后退回列表；未知路径显示 404 不白屏；`npm run build` 与 `go build/vet/test` 通过。
