@@ -124,8 +124,8 @@ func (f *fakeFeedRepository) ListCreatorRecentClips(_ context.Context, _ int64, 
 	return nil, nil
 }
 
-// ListLatestClipIDs 返回空集，fake 简化实现（测试不涉及 playback 预加载）。
-func (f *fakeFeedRepository) ListLatestClipIDs(_ context.Context, _ int) ([]int64, error) {
+// ListLatestClipMedia 返回空集，fake 简化实现（测试不涉及 playback 预加载）。
+func (f *fakeFeedRepository) ListLatestClipMedia(_ context.Context, _ int) ([]domfeed.PreloadClip, error) {
 	return nil, nil
 }
 

@@ -32,6 +32,14 @@ type cardRow struct {
 	PublishedAt time.Time `gorm:"column:published_at"`
 }
 
+// preloadRow 是预加载媒体查询的行映射，只取公开媒体字段。
+type preloadRow struct {
+	ID         int64  `gorm:"column:id"`
+	VideoURL   string `gorm:"column:video_url"`
+	CoverURL   string `gorm:"column:cover_url"`
+	DurationMS int64  `gorm:"column:duration_ms"`
+}
+
 // statsRow 是互动计数批量查询的行映射。
 type statsRow struct {
 	ClipID       int64 `gorm:"column:clip_id"`

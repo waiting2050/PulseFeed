@@ -66,7 +66,7 @@ func (f *fanoutWFakeRepo) ListCreatorRecentClips(_ context.Context, _ int64, _ i
 	return nil, nil
 }
 
-func (f *fanoutWFakeRepo) ListLatestClipIDs(_ context.Context, _ int) ([]int64, error) {
+func (f *fanoutWFakeRepo) ListLatestClipMedia(_ context.Context, _ int) ([]domfeed.PreloadClip, error) {
 	return nil, nil
 }
 

@@ -19,6 +19,7 @@ import (
 	appplayback "pulsefeed/internal/application/playback"
 	apprecommendation "pulsefeed/internal/application/recommendation"
 	apprelation "pulsefeed/internal/application/relation"
+	domplayback "pulsefeed/internal/domain/playback"
 	infracache "pulsefeed/internal/infra/cache"
 	"pulsefeed/internal/infra/config"
 	infrajwt "pulsefeed/internal/infra/jwt"
@@ -130,12 +131,25 @@ func Register(engine *gin.Engine, cfg *config.Config, db *sql.DB) error {
 	messageService := appmessage.New(messageRepo)
 	messageHandler := httpmsg.New(messageService)
 
-	// playback 链路：播放配置（预加载条数/QoS 采样率）与 QoS 幂等上报；
-	// 预加载列表数据源复用 feedRepo.ListLatestClipIDs，通过 adapter 桥接接口签名。
+	// playback 链路：播放配置（预加载条数/缓冲时长/QoS 采样率）与 QoS 幂等上报；
+	// 预加载列表数据源复用 feedRepo.ListLatestClipMedia，通过 adapter 桥接接口签名。
 	playbackRepo := infraplayback.New(gormDB)
 	playbackService := appplayback.New(playbackRepo, appplayback.ClipProviderFunc(
-		func(ctx context.Context, limit int) ([]int64, error) {
-			return feedRepo.ListLatestClipIDs(ctx, limit)
+		func(ctx context.Context, limit int) ([]domplayback.PreloadMedia, error) {
+			clips, err := feedRepo.ListLatestClipMedia(ctx, limit)
+			if err != nil {
+				return nil, err
+			}
+			items := make([]domplayback.PreloadMedia, 0, len(clips))
+			for _, clip := range clips {
+				items = append(items, domplayback.PreloadMedia{
+					ClipID:     clip.ClipID,
+					MediaURL:   clip.MediaURL,
+					CoverURL:   clip.CoverURL,
+					DurationMS: clip.DurationMS,
+				})
+			}
+			return items, nil
 		},
 	), appplayback.WithMetrics(apiMetrics))
 	playbackHandler := httpplayback.New(playbackService)

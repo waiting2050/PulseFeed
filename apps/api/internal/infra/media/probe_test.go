@@ -43,6 +43,58 @@ func TestParseDurationMSRejectsInvalid(t *testing.T) {
 	}
 }
 
+// TestParseVideoInfo 验证从 ffprobe JSON 取首个视频流的编码、分辨率与容器时长。
+func TestParseVideoInfo(t *testing.T) {
+	raw := []byte(`{
+		"streams": [
+			{"codec_type": "audio", "codec_name": "aac"},
+			{"codec_type": "video", "codec_name": "H264", "width": 1080, "height": 1920}
+		],
+		"format": {"duration": "125.5"}
+	}`)
+	info, err := ParseVideoInfo(raw)
+	if err != nil {
+		t.Fatalf("解析失败: %v", err)
+	}
+	if info.CodecName != "h264" || info.Width != 1080 || info.Height != 1920 || info.DurationMS != 125500 {
+		t.Fatalf("解析结果不符: %+v", info)
+	}
+}
+
+// TestParseVideoInfoFallsBackToStreamDuration 验证容器时长缺失时回退到视频流时长。
+func TestParseVideoInfoFallsBackToStreamDuration(t *testing.T) {
+	raw := []byte(`{
+		"streams": [{"codec_type": "video", "codec_name": "hevc", "width": 2160, "height": 3840, "duration": "42.0"}],
+		"format": {}
+	}`)
+	info, err := ParseVideoInfo(raw)
+	if err != nil {
+		t.Fatalf("解析失败: %v", err)
+	}
+	if info.DurationMS != 42000 || info.CodecName != "hevc" {
+		t.Fatalf("回退时长结果不符: %+v", info)
+	}
+}
+
+// TestParseVideoInfoRejectsNoVideoStream 验证没有视频流或输出非法时返回错误。
+func TestParseVideoInfoRejectsNoVideoStream(t *testing.T) {
+	for _, raw := range []string{`{"streams":[{"codec_type":"audio"}],"format":{"duration":"3"}}`, `not-json`} {
+		if _, err := ParseVideoInfo([]byte(raw)); err == nil {
+			t.Fatalf("输入 %q 应解析失败", raw)
+		}
+	}
+}
+
+// TestProbeVideoUnavailable 验证 ffprobe 缺失时 ProbeVideo 返回 ErrUnavailable 供调用方降级。
+func TestProbeVideoUnavailable(t *testing.T) {
+	prober := &Prober{lookPath: func(string) (string, error) {
+		return "", errors.New("binary not found")
+	}}
+	if _, err := prober.ProbeVideo(context.Background(), "clip.mp4"); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("缺少 ffprobe 应返回 ErrUnavailable，实际 %v", err)
+	}
+}
+
 // TestProbeUnavailable 验证二进制缺失时两个能力都返回 ErrUnavailable，供调用方降级。
 func TestProbeUnavailable(t *testing.T) {
 	prober := &Prober{lookPath: func(string) (string, error) {

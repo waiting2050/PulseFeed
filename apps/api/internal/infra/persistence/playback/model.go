@@ -4,10 +4,12 @@ package infraplayback
 import "time"
 
 // ConfigModel 映射 pf_playback_configs 表；user_id 唯一索引保证每用户一行。
+// buffer_ms 为后加的缓冲目标时长列，AutoMigrate 只加列不重建表，旧行取默认值 2000。
 type ConfigModel struct {
 	UserID        int64     `gorm:"column:user_id;primaryKey"`
 	PreloadCount  int       `gorm:"column:preload_count;not null;default:8"`
 	QoSSampleRate float64   `gorm:"column:qos_sample_rate;not null;default:0.1"`
+	BufferMS      int       `gorm:"column:buffer_ms;not null;default:2000"`
 	UpdatedAt     time.Time `gorm:"column:updated_at;autoUpdateTime"`
 }
 

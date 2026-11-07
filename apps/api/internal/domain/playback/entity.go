@@ -15,15 +15,25 @@ const QoSSampleRateDefault = 0.1
 // QoSSampleRateMax 是采样率上限，避免上报压力过大。
 const QoSSampleRateMax = 1.0
 
-// Config 是用户级播放配置；每个用户一行，含预加载条数与 QoS 采样率。
+// BufferMSDefault 是播放缓冲目标时长的默认值（毫秒）；短视频场景 2 秒足以覆盖起播抖动。
+const BufferMSDefault = 2000
+
+// BufferMSMin 是缓冲时长下限（毫秒），避免客户端把目标压到无法稳定起播。
+const BufferMSMin = 500
+
+// BufferMSMax 是缓冲时长上限（毫秒），避免客户端缓存过多占用带宽与内存。
+const BufferMSMax = 10000
+
+// Config 是用户级播放配置；每个用户一行，含预加载条数、QoS 采样率与缓冲目标时长。
 type Config struct {
 	UserID        int64
 	PreloadCount  int
 	QoSSampleRate float64
+	BufferMS      int
 	UpdatedAt     time.Time
 }
 
-// Normalize 把配置的两个字段夹取到合法区间；零值或缺失值替换为默认。
+// Normalize 把配置字段夹取到合法区间；零值或缺失值替换为默认。
 func (c *Config) Normalize() {
 	if c.PreloadCount <= 0 {
 		c.PreloadCount = PreloadCountDefault
@@ -35,6 +45,22 @@ func (c *Config) Normalize() {
 	} else if c.QoSSampleRate > QoSSampleRateMax {
 		c.QoSSampleRate = QoSSampleRateMax
 	}
+	switch {
+	case c.BufferMS <= 0:
+		c.BufferMS = BufferMSDefault
+	case c.BufferMS < BufferMSMin:
+		c.BufferMS = BufferMSMin
+	case c.BufferMS > BufferMSMax:
+		c.BufferMS = BufferMSMax
+	}
+}
+
+// PreloadMedia 是预加载队列中的一条媒体信息，只暴露客户端预取所需的公开地址与时长。
+type PreloadMedia struct {
+	ClipID     int64
+	MediaURL   string
+	CoverURL   string
+	DurationMS int64
 }
 
 // QoSReport 是一次 QoS 上报；同一 event_id 重复上报幂等。

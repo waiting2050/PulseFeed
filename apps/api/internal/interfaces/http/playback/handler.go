@@ -33,7 +33,11 @@ func (h *Handler) GetConfig(c *gin.Context) {
 		mapError(c, err)
 		return
 	}
-	respondOK(c, http.StatusOK, configResponse{PreloadCount: cfg.PreloadCount, QoSSampleRate: cfg.QoSSampleRate})
+	respondOK(c, http.StatusOK, configResponse{
+		PreloadCount:  cfg.PreloadCount,
+		QoSSampleRate: cfg.QoSSampleRate,
+		BufferMS:      cfg.BufferMS,
+	})
 }
 
 // UpdateConfig 处理 PUT /api/playback-config，按请求体字段覆盖播放配置；缺省字段继承现有值。
@@ -48,30 +52,40 @@ func (h *Handler) UpdateConfig(c *gin.Context) {
 		fail(c, http.StatusBadRequest, "请求体非法")
 		return
 	}
-	cfg, err := h.service.UpdateConfig(c.Request.Context(), viewerID, req.PreloadCount, req.QoSSampleRate)
+	cfg, err := h.service.UpdateConfig(c.Request.Context(), viewerID, req.PreloadCount, req.QoSSampleRate, req.BufferMS)
 	if err != nil {
 		mapError(c, err)
 		return
 	}
-	respondOK(c, http.StatusOK, configResponse{PreloadCount: cfg.PreloadCount, QoSSampleRate: cfg.QoSSampleRate})
+	respondOK(c, http.StatusOK, configResponse{
+		PreloadCount:  cfg.PreloadCount,
+		QoSSampleRate: cfg.QoSSampleRate,
+		BufferMS:      cfg.BufferMS,
+	})
 }
 
-// GetPreload 处理 GET /api/preload-clips，返回按当前用户配置预加载的 clip_id 列表。
+// GetPreload 处理 GET /api/preload-clips，返回按当前用户配置预加载的媒体列表。
 func (h *Handler) GetPreload(c *gin.Context) {
 	viewerID, authed := middleware.UserIDFromContext(c)
 	if !authed {
 		fail(c, http.StatusUnauthorized, "missing or invalid token")
 		return
 	}
-	ids, err := h.service.GetPreload(c.Request.Context(), viewerID)
+	items, err := h.service.GetPreload(c.Request.Context(), viewerID)
 	if err != nil {
 		mapError(c, err)
 		return
 	}
-	if ids == nil {
-		ids = []int64{}
+	response := preloadResponse{Items: make([]preloadItem, 0, len(items))}
+	for _, item := range items {
+		response.Items = append(response.Items, preloadItem{
+			ClipID:     item.ClipID,
+			MediaURL:   item.MediaURL,
+			CoverURL:   item.CoverURL,
+			DurationMS: item.DurationMS,
+		})
 	}
-	respondOK(c, http.StatusOK, preloadResponse{ClipIDs: ids})
+	respondOK(c, http.StatusOK, response)
 }
 
 // ReportQoS 处理 POST /api/playback-qos-reports（登录），幂等上报。

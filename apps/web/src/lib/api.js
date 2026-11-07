@@ -62,7 +62,7 @@ async function readEnvelope(response) {
   return payload ? payload.data : null
 }
 
-async function request(path, { method = 'GET', body, headers = {} } = {}) {
+async function request(path, { method = 'GET', body, headers = {}, signal } = {}) {
   const finalHeaders = { ...headers }
   if (body !== undefined) finalHeaders['Content-Type'] = 'application/json'
   if (accessToken) finalHeaders.Authorization = `Bearer ${accessToken}`
@@ -76,6 +76,7 @@ async function request(path, { method = 'GET', body, headers = {} } = {}) {
       method,
       headers: finalHeaders,
       body: body === undefined ? undefined : JSON.stringify(body),
+      signal,
     })
   } catch {
     throw new ApiError('网络异常，请检查连接后重试')
@@ -206,7 +207,7 @@ export const api = {
 
   savePlaybackConfig: (config) => request('/playback-config', { method: 'PUT', body: config }),
 
-  preloadClips: () => request('/preload-clips'),
+  preloadClips: ({ signal } = {}) => request('/preload-clips', { signal }),
 }
 
 // 播放配置在登录后拉取一次并缓存；播放结算与配置页共用，避免每次播放都请求。

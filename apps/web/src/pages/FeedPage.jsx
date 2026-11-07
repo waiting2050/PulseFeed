@@ -11,6 +11,7 @@ import DetailSheet from '../components/DetailSheet.jsx'
 import Spinner from '../components/Spinner.jsx'
 import Toast from '../components/Toast.jsx'
 import useApi from '../hooks/useApi.js'
+import useMediaPrefetch from '../hooks/useMediaPrefetch.js'
 import { api, newClientId } from '../lib/api.js'
 
 const SCENES = [
@@ -105,6 +106,13 @@ export default function FeedPage({ onGoPublish, me, onOpenUser }) {
     setCursor(firstPage.data.next_cursor || '')
     setHasMore(Boolean(firstPage.data.has_more))
   }, [firstPage.data])
+
+  // 首屏渲染后再预热预加载队列：条数由服务端配置返回，失败静默；场景切换或离开页面时自动取消。
+  useMediaPrefetch(Boolean(firstPage.data) && !firstPage.loading && !firstPage.error, [
+    scene,
+    firstPage.data,
+    firstPage.loading,
+  ])
 
   // 深链兜底：列表里已有该条就直接复用，否则每个 id 只按需拉取一次。
   useEffect(() => {

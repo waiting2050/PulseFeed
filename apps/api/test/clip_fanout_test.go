@@ -52,7 +52,7 @@ func (f *fanoutFakeRepository) ListCreatorRecentClips(_ context.Context, _ int64
 	return nil, nil
 }
 
-func (f *fanoutFakeRepository) ListLatestClipIDs(_ context.Context, _ int) ([]int64, error) {
+func (f *fanoutFakeRepository) ListLatestClipMedia(_ context.Context, _ int) ([]domfeed.PreloadClip, error) {
 	return nil, nil
 }
 

@@ -9,16 +9,16 @@ import (
 	domplayback "pulsefeed/internal/domain/playback"
 )
 
-// ClipProvider 描述预加载所需的 clip ID 数据源；默认注入 feed 仓储的 ListLatestIDs。
+// ClipProvider 描述预加载所需的媒体数据源；默认注入 feed 仓储的 ListLatestMedia。
 type ClipProvider interface {
-	ListLatestIDs(ctx context.Context, limit int) ([]int64, error)
+	ListLatestMedia(ctx context.Context, limit int) ([]domplayback.PreloadMedia, error)
 }
 
 // ClipProviderFunc 把普通函数适配为 ClipProvider 接口，供组合根桥接不同签名的仓储方法。
-type ClipProviderFunc func(ctx context.Context, limit int) ([]int64, error)
+type ClipProviderFunc func(ctx context.Context, limit int) ([]domplayback.PreloadMedia, error)
 
-// ListLatestIDs 实现 ClipProvider 接口。
-func (f ClipProviderFunc) ListLatestIDs(ctx context.Context, limit int) ([]int64, error) {
+// ListLatestMedia 实现 ClipProvider 接口。
+func (f ClipProviderFunc) ListLatestMedia(ctx context.Context, limit int) ([]domplayback.PreloadMedia, error) {
 	return f(ctx, limit)
 }
 
@@ -57,7 +57,7 @@ func (s *Service) GetConfig(ctx context.Context, userID int64) (*domplayback.Con
 }
 
 // UpsertConfig 写入或更新播放配置；返回落库值。
-func (s *Service) UpsertConfig(ctx context.Context, userID int64, preloadCount int, sampleRate float64) (*domplayback.Config, error) {
+func (s *Service) UpsertConfig(ctx context.Context, userID int64, preloadCount int, sampleRate float64, bufferMS int) (*domplayback.Config, error) {
 	if userID <= 0 {
 		return nil, domplayback.ErrInvalidConfigUser
 	}
@@ -65,13 +65,14 @@ func (s *Service) UpsertConfig(ctx context.Context, userID int64, preloadCount i
 		UserID:        userID,
 		PreloadCount:  preloadCount,
 		QoSSampleRate: sampleRate,
+		BufferMS:      bufferMS,
 	}
 	cfg.Normalize()
 	return s.repo.UpsertConfig(ctx, cfg)
 }
 
-// UpdateConfig 按请求中出现的字段合并当前配置；nil 表示保留库中现有值，两者都为 nil 时原样返回现有配置。
-func (s *Service) UpdateConfig(ctx context.Context, userID int64, preloadCount *int, sampleRate *float64) (*domplayback.Config, error) {
+// UpdateConfig 按请求中出现的字段合并当前配置；nil 表示保留库中现有值，全部为 nil 时原样返回现有配置。
+func (s *Service) UpdateConfig(ctx context.Context, userID int64, preloadCount *int, sampleRate *float64, bufferMS *int) (*domplayback.Config, error) {
 	cfg, err := s.GetConfig(ctx, userID)
 	if err != nil {
 		return nil, err
@@ -82,11 +83,14 @@ func (s *Service) UpdateConfig(ctx context.Context, userID int64, preloadCount *
 	if sampleRate != nil {
 		cfg.QoSSampleRate = *sampleRate
 	}
-	return s.UpsertConfig(ctx, userID, cfg.PreloadCount, cfg.QoSSampleRate)
+	if bufferMS != nil {
+		cfg.BufferMS = *bufferMS
+	}
+	return s.UpsertConfig(ctx, userID, cfg.PreloadCount, cfg.QoSSampleRate, cfg.BufferMS)
 }
 
-// GetPreload 按用户配置返回预加载 clip ID 列表；依赖 ClipProvider；配置缺失或 provider nil 都返回空切片 + nil 错误。
-func (s *Service) GetPreload(ctx context.Context, userID int64) ([]int64, error) {
+// GetPreload 按用户配置返回预加载媒体列表；依赖 ClipProvider；配置缺失或 provider nil 都返回空切片 + nil 错误。
+func (s *Service) GetPreload(ctx context.Context, userID int64) ([]domplayback.PreloadMedia, error) {
 	if userID <= 0 {
 		return nil, domplayback.ErrInvalidConfigUser
 	}
@@ -95,16 +99,16 @@ func (s *Service) GetPreload(ctx context.Context, userID int64) ([]int64, error)
 		return nil, err
 	}
 	if s.clips == nil {
-		return []int64{}, nil
+		return []domplayback.PreloadMedia{}, nil
 	}
-	ids, err := s.clips.ListLatestIDs(ctx, cfg.PreloadCount)
+	items, err := s.clips.ListLatestMedia(ctx, cfg.PreloadCount)
 	if err != nil {
 		return nil, err
 	}
-	if ids == nil {
-		ids = []int64{}
+	if items == nil {
+		items = []domplayback.PreloadMedia{}
 	}
-	return ids, nil
+	return items, nil
 }
 
 // ReportQoS 幂等上报一次 QoS；重复 event_id 不二次落库。

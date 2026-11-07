@@ -10,7 +10,7 @@ import { api, primePlaybackConfig } from '../lib/api.js'
 export default function PlaybackPage() {
   const config = useApi(() => api.playbackConfig(), [])
   const preload = useApi(() => api.preloadClips(), [])
-  const [form, setForm] = useState({ preload_count: '', qos_sample_rate: '' })
+  const [form, setForm] = useState({ preload_count: '', qos_sample_rate: '', buffer_ms: '' })
   const [saving, setSaving] = useState(false)
   const [feedback, setFeedback] = useState(null)
 
@@ -20,6 +20,7 @@ export default function PlaybackPage() {
     setForm({
       preload_count: String(config.data.preload_count),
       qos_sample_rate: String(config.data.qos_sample_rate),
+      buffer_ms: String(config.data.buffer_ms),
     })
   }, [config.data])
 
@@ -33,6 +34,7 @@ export default function PlaybackPage() {
 
     const preloadCount = Number(form.preload_count)
     const sampleRate = Number(form.qos_sample_rate)
+    const bufferMs = Number(form.buffer_ms)
     if (!Number.isInteger(preloadCount) || preloadCount < 1 || preloadCount > 32) {
       setFeedback({ text: '预加载条数需为 1–32 的整数', tone: 'error' })
       return
@@ -41,17 +43,23 @@ export default function PlaybackPage() {
       setFeedback({ text: 'QoS 采样率需在 0.01–1 之间', tone: 'error' })
       return
     }
+    if (!Number.isInteger(bufferMs) || bufferMs < 500 || bufferMs > 10000) {
+      setFeedback({ text: '缓冲时长需为 500–10000 的整数毫秒', tone: 'error' })
+      return
+    }
 
     setSaving(true)
     try {
       const data = await api.savePlaybackConfig({
         preload_count: preloadCount,
         qos_sample_rate: sampleRate,
+        buffer_ms: bufferMs,
       })
       primePlaybackConfig(data)
       setForm({
         preload_count: String(data.preload_count),
         qos_sample_rate: String(data.qos_sample_rate),
+        buffer_ms: String(data.buffer_ms),
       })
       setFeedback({ text: '配置已保存', tone: 'success' })
       preload.retry()
@@ -62,7 +70,7 @@ export default function PlaybackPage() {
     }
   }
 
-  const preloadIds = (preload.data && preload.data.clip_ids) || []
+  const preloadItems = (preload.data && preload.data.items) || []
 
   return (
     <section className="pf-form-page" aria-labelledby="pf-playback-title">
@@ -90,8 +98,24 @@ export default function PlaybackPage() {
               required
             />
             <span className="pf-field-hint">
-              范围 1–32，默认 8；该值决定服务端预加载队列的条数，当前客户端未做预取。
+              范围 1–32，默认 8；该值决定服务端预加载队列的条数，Feed 首屏后会按此条数预取封面与视频元信息。
             </span>
+          </div>
+          <div className="pf-field">
+            <label htmlFor="pf-buffer-ms">缓冲时长（毫秒）</label>
+            <input
+              id="pf-buffer-ms"
+              type="number"
+              inputMode="numeric"
+              min="500"
+              max="10000"
+              step="50"
+              value={form.buffer_ms}
+              onChange={(event) => updateField('buffer_ms', event.target.value)}
+              disabled={saving || config.loading}
+              required
+            />
+            <span className="pf-field-hint">范围 500–10000，默认 2000。</span>
           </div>
           <div className="pf-field">
             <label htmlFor="pf-qos-rate">QoS 采样率</label>
@@ -130,7 +154,7 @@ export default function PlaybackPage() {
               预加载队列
             </h2>
             <p className="pf-page-hint">
-              当前配置命中 <span className="pf-num">{preloadIds.length}</span> 条内容
+              当前配置命中 <span className="pf-num">{preloadItems.length}</span> 条内容
             </p>
           </div>
           <button type="button" className="pf-ghost-btn" onClick={preload.retry} disabled={preload.loading}>
@@ -151,7 +175,7 @@ export default function PlaybackPage() {
           </div>
         ) : null}
 
-        {!preload.error && !preload.loading && preloadIds.length === 0 ? (
+        {!preload.error && !preload.loading && preloadItems.length === 0 ? (
           <EmptyState
             icon="sliders"
             title="队列为空"
@@ -159,12 +183,15 @@ export default function PlaybackPage() {
           />
         ) : null}
 
-        {!preload.error && preloadIds.length > 0 ? (
-          <ul className="pf-chip-list" aria-label="预加载内容编号">
-            {preloadIds.map((clipId) => (
-              <li key={clipId} className="pf-chip">
+        {!preload.error && preloadItems.length > 0 ? (
+          <ul className="pf-chip-list" aria-label="预加载内容列表">
+            {preloadItems.map((item) => (
+              <li key={item.clip_id} className="pf-chip">
                 <span className="pf-chip-label">内容</span>
-                <span className="pf-num">{clipId}</span>
+                <span className="pf-num">{item.clip_id}</span>
+                {item.duration_ms ? (
+                  <span className="pf-chip-label">{Math.round(item.duration_ms / 1000)}s</span>
+                ) : null}
               </li>
             ))}
           </ul>

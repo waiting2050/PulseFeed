@@ -96,6 +96,14 @@ type FeedEntry struct {
 	Score float64
 }
 
+// PreloadClip 是预加载队列中的一条媒体信息，只携带客户端预取所需的公开字段。
+type PreloadClip struct {
+	ClipID     int64
+	MediaURL   string
+	CoverURL   string
+	DurationMS int64
+}
+
 // HotItem 是热度窗口（最近 60 个分钟桶合并）中的一条 clip 及其累计热度增量。
 type HotItem struct {
 	ClipID int64

@@ -77,22 +77,22 @@ func (f *playbackFake) CreateQoS(_ context.Context, report *domplayback.QoSRepor
 	return true, nil
 }
 
-// playbackFakeClips 是内存版预加载数据源，按传入顺序返回最新的 limit 条 clip_id。
+// playbackFakeClips 是内存版预加载数据源，按传入顺序返回最新的 limit 条媒体信息。
 type playbackFakeClips struct {
-	ids      []int64
+	items    []domplayback.PreloadMedia
 	gotCall  int
 	gotLimit int
 }
 
-// ListLatestIDs 模拟按 (published_at, id) 递减的最新列表，最多返回 limit 条。
-func (c *playbackFakeClips) ListLatestIDs(_ context.Context, limit int) ([]int64, error) {
+// ListLatestMedia 模拟按 (published_at, id) 递减的最新列表，最多返回 limit 条。
+func (c *playbackFakeClips) ListLatestMedia(_ context.Context, limit int) ([]domplayback.PreloadMedia, error) {
 	c.gotCall++
 	c.gotLimit = limit
-	if limit > len(c.ids) {
-		limit = len(c.ids)
+	if limit > len(c.items) {
+		limit = len(c.items)
 	}
-	result := make([]int64, limit)
-	copy(result, c.ids[:limit])
+	result := make([]domplayback.PreloadMedia, limit)
+	copy(result, c.items[:limit])
 	return result, nil
 }
 
@@ -110,6 +110,9 @@ func TestPlaybackDefaultConfig(t *testing.T) {
 	if cfg.QoSSampleRate != 0.1 {
 		t.Fatalf("默认 qos_sample_rate 期望 0.1，实际 %v", cfg.QoSSampleRate)
 	}
+	if cfg.BufferMS != 2000 {
+		t.Fatalf("默认 buffer_ms 期望 2000，实际 %d", cfg.BufferMS)
+	}
 }
 
 // TestPlaybackUpsertConfigReadBack 验证更新配置后可读回，零值被归一化为默认。
@@ -117,11 +120,11 @@ func TestPlaybackUpsertConfigReadBack(t *testing.T) {
 	service := appplayback.New(newPlaybackFake(), nil)
 	ctx := context.Background()
 
-	written, err := service.UpsertConfig(ctx, 42, 12, 0.25)
+	written, err := service.UpsertConfig(ctx, 42, 12, 0.25, 3000)
 	if err != nil {
 		t.Fatalf("更新配置失败: %v", err)
 	}
-	if written.PreloadCount != 12 || written.QoSSampleRate != 0.25 {
+	if written.PreloadCount != 12 || written.QoSSampleRate != 0.25 || written.BufferMS != 3000 {
 		t.Fatalf("返回落库值不符: %+v", written)
 	}
 
@@ -129,16 +132,16 @@ func TestPlaybackUpsertConfigReadBack(t *testing.T) {
 	if err != nil {
 		t.Fatalf("读回配置失败: %v", err)
 	}
-	if read.PreloadCount != 12 || read.QoSSampleRate != 0.25 {
-		t.Fatalf("读回配置不符: preload=%d sample=%v", read.PreloadCount, read.QoSSampleRate)
+	if read.PreloadCount != 12 || read.QoSSampleRate != 0.25 || read.BufferMS != 3000 {
+		t.Fatalf("读回配置不符: preload=%d sample=%v buffer=%d", read.PreloadCount, read.QoSSampleRate, read.BufferMS)
 	}
 
-	normalized, err := service.UpsertConfig(ctx, 42, 0, 0)
+	normalized, err := service.UpsertConfig(ctx, 42, 0, 0, 0)
 	if err != nil {
 		t.Fatalf("更新零值配置失败: %v", err)
 	}
-	if normalized.PreloadCount != 8 || normalized.QoSSampleRate != 0.1 {
-		t.Fatalf("零值配置应归一化为默认值，实际 preload=%d sample=%v", normalized.PreloadCount, normalized.QoSSampleRate)
+	if normalized.PreloadCount != 8 || normalized.QoSSampleRate != 0.1 || normalized.BufferMS != 2000 {
+		t.Fatalf("零值配置应归一化为默认值，实际 preload=%d sample=%v buffer=%d", normalized.PreloadCount, normalized.QoSSampleRate, normalized.BufferMS)
 	}
 }
 
@@ -152,32 +155,40 @@ func TestPlaybackPartialUpdateKeepsOtherField(t *testing.T) {
 	service := appplayback.New(newPlaybackFake(), nil)
 	ctx := context.Background()
 
-	if _, err := service.UpsertConfig(ctx, 42, 12, 0.25); err != nil {
+	if _, err := service.UpsertConfig(ctx, 42, 12, 0.25, 3000); err != nil {
 		t.Fatalf("准备配置失败: %v", err)
 	}
 
-	onlyPreload, err := service.UpdateConfig(ctx, 42, intPtr(20), nil)
+	onlyPreload, err := service.UpdateConfig(ctx, 42, intPtr(20), nil, nil)
 	if err != nil {
 		t.Fatalf("只更新预加载条数失败: %v", err)
 	}
-	if onlyPreload.PreloadCount != 20 || onlyPreload.QoSSampleRate != 0.25 {
-		t.Fatalf("只更新预加载条数后应为 20/0.25，实际 %d/%v", onlyPreload.PreloadCount, onlyPreload.QoSSampleRate)
+	if onlyPreload.PreloadCount != 20 || onlyPreload.QoSSampleRate != 0.25 || onlyPreload.BufferMS != 3000 {
+		t.Fatalf("只更新预加载条数后应为 20/0.25/3000，实际 %d/%v/%d", onlyPreload.PreloadCount, onlyPreload.QoSSampleRate, onlyPreload.BufferMS)
 	}
 
-	onlySample, err := service.UpdateConfig(ctx, 42, nil, floatPtr(0.5))
+	onlySample, err := service.UpdateConfig(ctx, 42, nil, floatPtr(0.5), nil)
 	if err != nil {
 		t.Fatalf("只更新采样率失败: %v", err)
 	}
-	if onlySample.PreloadCount != 20 || onlySample.QoSSampleRate != 0.5 {
-		t.Fatalf("只更新采样率后应为 20/0.5，实际 %d/%v", onlySample.PreloadCount, onlySample.QoSSampleRate)
+	if onlySample.PreloadCount != 20 || onlySample.QoSSampleRate != 0.5 || onlySample.BufferMS != 3000 {
+		t.Fatalf("只更新采样率后应为 20/0.5/3000，实际 %d/%v/%d", onlySample.PreloadCount, onlySample.QoSSampleRate, onlySample.BufferMS)
 	}
 
-	unchanged, err := service.UpdateConfig(ctx, 42, nil, nil)
+	onlyBuffer, err := service.UpdateConfig(ctx, 42, nil, nil, intPtr(5000))
 	if err != nil {
-		t.Fatalf("两个字段都不传失败: %v", err)
+		t.Fatalf("只更新缓冲时长失败: %v", err)
 	}
-	if unchanged.PreloadCount != 20 || unchanged.QoSSampleRate != 0.5 {
-		t.Fatalf("两个字段都不传应保留现有值 20/0.5，实际 %d/%v", unchanged.PreloadCount, unchanged.QoSSampleRate)
+	if onlyBuffer.PreloadCount != 20 || onlyBuffer.QoSSampleRate != 0.5 || onlyBuffer.BufferMS != 5000 {
+		t.Fatalf("只更新缓冲时长后应为 20/0.5/5000，实际 %d/%v/%d", onlyBuffer.PreloadCount, onlyBuffer.QoSSampleRate, onlyBuffer.BufferMS)
+	}
+
+	unchanged, err := service.UpdateConfig(ctx, 42, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("三个字段都不传失败: %v", err)
+	}
+	if unchanged.PreloadCount != 20 || unchanged.QoSSampleRate != 0.5 || unchanged.BufferMS != 5000 {
+		t.Fatalf("三个字段都不传应保留现有值 20/0.5/5000，实际 %d/%v/%d", unchanged.PreloadCount, unchanged.QoSSampleRate, unchanged.BufferMS)
 	}
 }
 
@@ -187,54 +198,69 @@ func TestPlaybackConfigBoundary(t *testing.T) {
 		name        string
 		preload     int
 		sample      float64
+		buffer      int
 		wantPreload int
 		wantSample  float64
+		wantBuffer  int
 	}{
-		{name: "preload 33", preload: 33, sample: 0.5, wantPreload: 32, wantSample: 0.5},
-		{name: "preload 0", preload: 0, sample: 0.5, wantPreload: 8, wantSample: 0.5},
-		{name: "preload negative", preload: -3, sample: 0.5, wantPreload: 8, wantSample: 0.5},
-		{name: "sample 33", preload: 5, sample: 33, wantPreload: 5, wantSample: 1},
-		{name: "sample 0", preload: 5, sample: 0, wantPreload: 5, wantSample: 0.1},
-		{name: "sample negative", preload: 5, sample: -0.5, wantPreload: 5, wantSample: 0.1},
-		{name: "sample 0.005", preload: 5, sample: 0.005, wantPreload: 5, wantSample: 0.005},
+		{name: "preload 33", preload: 33, sample: 0.5, buffer: 2000, wantPreload: 32, wantSample: 0.5, wantBuffer: 2000},
+		{name: "preload 0", preload: 0, sample: 0.5, buffer: 2000, wantPreload: 8, wantSample: 0.5, wantBuffer: 2000},
+		{name: "preload negative", preload: -3, sample: 0.5, buffer: 2000, wantPreload: 8, wantSample: 0.5, wantBuffer: 2000},
+		{name: "sample 33", preload: 5, sample: 33, buffer: 2000, wantPreload: 5, wantSample: 1, wantBuffer: 2000},
+		{name: "sample 0", preload: 5, sample: 0, buffer: 2000, wantPreload: 5, wantSample: 0.1, wantBuffer: 2000},
+		{name: "sample negative", preload: 5, sample: -0.5, buffer: 2000, wantPreload: 5, wantSample: 0.1, wantBuffer: 2000},
+		{name: "sample 0.005", preload: 5, sample: 0.005, buffer: 2000, wantPreload: 5, wantSample: 0.005, wantBuffer: 2000},
+		{name: "buffer 0", preload: 5, sample: 0.5, buffer: 0, wantPreload: 5, wantSample: 0.5, wantBuffer: 2000},
+		{name: "buffer below min", preload: 5, sample: 0.5, buffer: 100, wantPreload: 5, wantSample: 0.5, wantBuffer: 500},
+		{name: "buffer above max", preload: 5, sample: 0.5, buffer: 60000, wantPreload: 5, wantSample: 0.5, wantBuffer: 10000},
+		{name: "buffer boundary", preload: 5, sample: 0.5, buffer: 10000, wantPreload: 5, wantSample: 0.5, wantBuffer: 10000},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			service := appplayback.New(newPlaybackFake(), nil)
-			cfg, err := service.UpsertConfig(context.Background(), 44, tc.preload, tc.sample)
+			cfg, err := service.UpsertConfig(context.Background(), 44, tc.preload, tc.sample, tc.buffer)
 			if err != nil {
 				t.Fatalf("写入边界配置失败: %v", err)
 			}
-			if cfg.PreloadCount != tc.wantPreload || cfg.QoSSampleRate != tc.wantSample {
-				t.Fatalf("期望 %d/%v，实际 %d/%v", tc.wantPreload, tc.wantSample, cfg.PreloadCount, cfg.QoSSampleRate)
+			if cfg.PreloadCount != tc.wantPreload || cfg.QoSSampleRate != tc.wantSample || cfg.BufferMS != tc.wantBuffer {
+				t.Fatalf("期望 %d/%v/%d，实际 %d/%v/%d", tc.wantPreload, tc.wantSample, tc.wantBuffer, cfg.PreloadCount, cfg.QoSSampleRate, cfg.BufferMS)
 			}
 		})
 	}
 }
 
-// TestPlaybackPreloadReturnsLatestClips 验证预加载按配置条数返回最新的 clip_id。
+// TestPlaybackPreloadReturnsLatestClips 验证预加载按配置条数返回最新的媒体信息。
 func TestPlaybackPreloadReturnsLatestClips(t *testing.T) {
-	clips := &playbackFakeClips{ids: []int64{101, 102, 103, 104, 105}}
+	clips := &playbackFakeClips{items: []domplayback.PreloadMedia{
+		{ClipID: 101, MediaURL: "/uploads/video/101.mp4", CoverURL: "/uploads/cover/101.jpg", DurationMS: 15000},
+		{ClipID: 102, MediaURL: "/uploads/video/102.mp4", CoverURL: "/uploads/cover/102.jpg", DurationMS: 20000},
+		{ClipID: 103, MediaURL: "/uploads/video/103.mp4", CoverURL: "/uploads/cover/103.jpg", DurationMS: 25000},
+		{ClipID: 104, MediaURL: "/uploads/video/104.mp4", CoverURL: "/uploads/cover/104.jpg", DurationMS: 30000},
+		{ClipID: 105, MediaURL: "/uploads/video/105.mp4", CoverURL: "/uploads/cover/105.jpg", DurationMS: 35000},
+	}}
 	service := appplayback.New(newPlaybackFake(), clips)
 	ctx := context.Background()
 
-	if _, err := service.UpsertConfig(ctx, 43, 3, 0.5); err != nil {
+	if _, err := service.UpsertConfig(ctx, 43, 3, 0.5, 2000); err != nil {
 		t.Fatalf("更新预加载条数失败: %v", err)
 	}
 
-	ids, err := service.GetPreload(ctx, 43)
+	items, err := service.GetPreload(ctx, 43)
 	if err != nil {
 		t.Fatalf("读取预加载列表失败: %v", err)
 	}
 	if clips.gotLimit != 3 {
 		t.Fatalf("预加载数据源应收到 limit=3，实际 %d", clips.gotLimit)
 	}
-	if len(ids) != 3 {
-		t.Fatalf("期望返回 3 条 clip_id，实际 %d", len(ids))
+	if len(items) != 3 {
+		t.Fatalf("期望返回 3 条媒体信息，实际 %d", len(items))
 	}
 	for i, want := range []int64{101, 102, 103} {
-		if ids[i] != want {
-			t.Fatalf("第 %d 条 clip_id 期望 %d，实际 %d", i+1, want, ids[i])
+		if items[i].ClipID != want {
+			t.Fatalf("第 %d 条 clip_id 期望 %d，实际 %d", i+1, want, items[i].ClipID)
+		}
+		if items[i].MediaURL == "" || items[i].CoverURL == "" || items[i].DurationMS <= 0 {
+			t.Fatalf("第 %d 条媒体信息字段不完整: %+v", i+1, items[i])
 		}
 	}
 }

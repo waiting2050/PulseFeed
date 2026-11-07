@@ -329,20 +329,30 @@ func (r *Repository) ListCreatorRecentClips(ctx context.Context, creatorID int64
 	return entries, nil
 }
 
-// ListLatestClipIDs 按 (published_at, id) 递减返回最近发布的 N 个可见 clip_id；
-// 供 playback 预加载列表使用（S16 接入）。
-func (r *Repository) ListLatestClipIDs(ctx context.Context, limit int) ([]int64, error) {
-	var ids []int64
+// ListLatestClipMedia 按 (published_at, id) 递减返回最近发布的 N 条可见 clip 的预加载媒体信息；
+// 只查询公开字段（clip_id、video_url、cover_url、duration_ms），供 playback 预加载列表使用（S16 接入）。
+func (r *Repository) ListLatestClipMedia(ctx context.Context, limit int) ([]domfeed.PreloadClip, error) {
+	var rows []preloadRow
 	err := r.db.WithContext(ctx).
 		Table("pf_clips").
+		Select("id, video_url, cover_url, duration_ms").
 		Where("status = ?", domclip.StatusPublished).
 		Order("published_at DESC, id DESC").
 		Limit(limit).
-		Pluck("id", &ids).Error
+		Scan(&rows).Error
 	if err != nil {
 		return nil, err
 	}
-	return ids, nil
+	items := make([]domfeed.PreloadClip, 0, len(rows))
+	for i := range rows {
+		items = append(items, domfeed.PreloadClip{
+			ClipID:     rows[i].ID,
+			MediaURL:   rows[i].VideoURL,
+			CoverURL:   rows[i].CoverURL,
+			DurationMS: rows[i].DurationMS,
+		})
+	}
+	return items, nil
 }
 
 // BatchGetViewerStates 批量读取读者对条目的互动状态：

@@ -101,7 +101,7 @@ func (f *feedFakeRepo) ListCreatorRecentClips(_ context.Context, _ int64, _ int)
 	return nil, nil
 }
 
-func (f *feedFakeRepo) ListLatestClipIDs(_ context.Context, _ int) ([]int64, error) {
+func (f *feedFakeRepo) ListLatestClipMedia(_ context.Context, _ int) ([]domfeed.PreloadClip, error) {
 	return nil, nil
 }
 

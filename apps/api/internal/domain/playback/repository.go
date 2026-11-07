@@ -15,9 +15,9 @@ type Repository interface {
 	CreateQoS(ctx context.Context, report *QoSReport) (inserted bool, err error)
 }
 
-// ClipReader 描述应用层从 feed 域取预加载 clip ID 列表的端口；
+// ClipReader 描述应用层从 feed 域取预加载媒体列表的端口；
 // 放在 playback 域接口中避免 playback 反向依赖 feed 仓储。
 type ClipReader interface {
-	// ListLatestIDs 按 (published_at, id) 递减返回上限 limit 条 clip_id，供预加载。
-	ListLatestIDs(ctx context.Context, limit int) ([]int64, error)
+	// ListLatestMedia 按 (published_at, id) 递减返回上限 limit 条媒体信息，供预加载。
+	ListLatestMedia(ctx context.Context, limit int) ([]PreloadMedia, error)
 }
