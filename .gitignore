@@ -1,8 +1,6 @@
+# 本地上传与测试产物不入库
+apps/api/uploads/
+
+# 本地端口覆盖文件不入库（从 apps/.env.example 复制）
+apps/.env
 .env
-*.log
-bin/
-dist/
-uploads/
-coverage.out
-.idea/
-.vscode/

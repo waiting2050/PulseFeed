@@ -1,0 +1,133 @@
+// main.go 是异步 Worker 的主入口：校验配置、迁移数据库、连接 MQ、启动指标端口与 ActionWorker，并响应信号退出。
+package main
+
+import (
+	"context"
+	"flag"
+	"log"
+	"os"
+	"os/signal"
+	"syscall"
+
+	appclip "pulsefeed/internal/application/clip"
+	appembedding "pulsefeed/internal/application/embedding"
+	appimpression "pulsefeed/internal/application/impression"
+	appaction "pulsefeed/internal/application/interaction"
+	infracache "pulsefeed/internal/infra/cache"
+	"pulsefeed/internal/infra/config"
+	infradatabase "pulsefeed/internal/infra/database"
+	inframetrics "pulsefeed/internal/infra/metrics"
+	inframq "pulsefeed/internal/infra/mq"
+	infraembedding "pulsefeed/internal/infra/persistence/embedding"
+	infrafeed "pulsefeed/internal/infra/persistence/feed"
+	infraimpression "pulsefeed/internal/infra/persistence/impression"
+	infraaction "pulsefeed/internal/infra/persistence/interaction"
+	"pulsefeed/internal/infra/persistence/migration"
+
+	gormmysql "gorm.io/driver/mysql"
+	"gorm.io/gorm"
+)
+
+func main() {
+	configPath := flag.String("config", "configs/config.yaml", "配置文件路径")
+	metricsAddr := flag.String("metrics-addr", ":9092", "Worker 独立指标监听地址，9092 被系统保留时可改用 :9093")
+	flag.Parse()
+
+	cfg, err := config.Load(*configPath)
+	if err != nil {
+		log.Fatalf("加载配置失败: %v", err)
+	}
+	// Worker 强依赖 MQ 与 Redis：缺失任一项直接退出，不带着残缺链路空转。
+	if cfg.RabbitMQ.URL == "" {
+		log.Fatalf("Worker 启动失败: rabbitmq.url 为空，异步链路需要 MQ")
+	}
+	if cfg.Redis.Addr == "" {
+		log.Fatalf("Worker 启动失败: redis.addr 为空，异步链路需要 Redis")
+	}
+
+	db, err := infradatabase.New(cfg.Database)
+	if err != nil {
+		log.Fatalf("数据库初始化失败: %v", err)
+	}
+	defer db.Close()
+
+	gormDB, err := gorm.Open(gormmysql.New(gormmysql.Config{Conn: db}), &gorm.Config{})
+	if err != nil {
+		log.Fatalf("初始化 GORM 失败: %v", err)
+	}
+	if err := migration.AutoMigrate(gormDB, migration.Models()...); err != nil {
+		log.Fatalf("数据库迁移失败: %v", err)
+	}
+	log.Printf("worker migrate done (models=%d)", len(migration.Models()))
+
+	mqClient, err := inframq.New(cfg.RabbitMQ)
+	if err != nil {
+		log.Fatalf("RabbitMQ 初始化失败: %v", err)
+	}
+	defer mqClient.Close()
+
+	actionWorker := appaction.NewActionWorker(infraaction.New(gormDB))
+
+	// 播放事件消费链路：对 API 同步链路未完成曝光聚合的事件做二次 upsert 补偿（D7 修正）。
+	playEventWorker := appimpression.NewPlayEventWorker(infraimpression.New(gormDB))
+
+	// 向量生成链路：消费 clip.embedding 事件，按标题 hash n-gram 写入 pf_clip_embeddings。
+	embeddingWorker := appembedding.NewWorker(appembedding.New(infraembedding.New(gormDB)))
+
+	// 发布扇出链路：复用与 API 相同的 Redis 缓存实现，把新 clip 推入粉丝 inbox 或大 V outbox。
+	redisClient := infracache.New(cfg.Redis)
+	feedCache := infracache.NewFeedCache(redisClient)
+	fanoutWorker := appclip.NewFanoutWorker(infrafeed.New(gormDB), feedCache)
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// 指标注册表与 API 进程隔离；监听地址可由 -metrics-addr 覆盖（Windows 端口保留段场景）。
+	workerMetrics := inframetrics.New("worker")
+	go func() {
+		if err := inframetrics.RunServer(*metricsAddr, workerMetrics.Registry()); err != nil {
+			log.Printf("Worker metrics 端口异常退出: %v", err)
+		}
+	}()
+
+	// 四个消费者各自持有独立 AMQP 通道并发消费；任一异常退出即终止进程。
+	log.Printf("worker 已启动: %s (queue=%s)", actionWorker.Name(), cfg.RabbitMQ.ActionChangedQueue)
+	log.Printf("worker 已启动: %s (queue=%s)", fanoutWorker.Name(), cfg.RabbitMQ.ClipPublishedQueue)
+	log.Printf("worker 已启动: %s (queue=%s)", embeddingWorker.Name(), cfg.RabbitMQ.ClipEmbeddingQueue)
+	log.Printf("worker 已启动: %s (queue=%s)", playEventWorker.Name(), cfg.RabbitMQ.PlayEventRecordedQueue)
+	errCh := make(chan error, 4)
+	go func() {
+		errCh <- mqClient.Consume(ctx, cfg.RabbitMQ.ActionChangedQueue,
+			observeWorker(workerMetrics, actionWorker.Name(), actionWorker.Handle))
+	}()
+	go func() {
+		errCh <- mqClient.Consume(ctx, cfg.RabbitMQ.ClipPublishedQueue,
+			observeWorker(workerMetrics, fanoutWorker.Name(), fanoutWorker.Handle))
+	}()
+	go func() {
+		errCh <- mqClient.Consume(ctx, cfg.RabbitMQ.ClipEmbeddingQueue,
+			observeWorker(workerMetrics, embeddingWorker.Name(), embeddingWorker.Handle))
+	}()
+	go func() {
+		errCh <- mqClient.Consume(ctx, cfg.RabbitMQ.PlayEventRecordedQueue,
+			observeWorker(workerMetrics, playEventWorker.Name(), playEventWorker.Handle))
+	}()
+	if err := <-errCh; err != nil {
+		log.Fatalf("Worker 消费异常退出: %v", err)
+	}
+
+	log.Printf("worker 收到退出信号，已停止消费（metrics 端口 %s）", *metricsAddr)
+}
+
+// observeWorker 包装消息处理器，按 Worker 名称记录 ok/error 计数。
+func observeWorker(metrics *inframetrics.Metrics, name string, handler func(context.Context, []byte) error) func(context.Context, []byte) error {
+	return func(ctx context.Context, body []byte) error {
+		err := handler(ctx, body)
+		result := "ok"
+		if err != nil {
+			result = "error"
+		}
+		metrics.ObserveWorker(name, result)
+		return err
+	}
+}

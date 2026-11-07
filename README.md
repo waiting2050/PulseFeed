@@ -1,217 +1,203 @@
 # PulseFeed
 
-PulseFeed 是一个短视频 Feed 系统，后端采用 Go 单体架构，按业务垂直切片组织代码。当前已完成账户鉴权、视频上传与发布能力，Feed 分发、互动、推荐等模块按里程碑继续推进。
+PulseFeed 是一个按领域分层实现的 Feed 系统示例项目：后端提供账号、发布、Feed、互动、关注、推荐、热榜、消息与播放配置，前端提供登录、四场景 Feed、发布、互动、消息与播放配置页面。
 
 ## 技术栈
 
-- Go 1.26、Gin
-- GORM、MySQL 8
-- Redis 7
-- JWT
-- Docker Compose
-
-## 当前进度
-
-- [x] 工程骨架：配置、日志、MySQL/Redis 连接、优雅退出
-- [x] 账户模块：注册、登录、JWT、个人资料
-- [x] 视频模块：文件上传、发布、详情、幂等、作者作品列表
-- [x] Feed 模块：Timeline 游标分页、Redis 页缓存、统计字段组装
-- [x] Hot Feed：Redis 分钟桶 ZSET、窗口合并
-- [x] 互动模块：点赞、收藏、评论、计数与热榜联动
-- [ ] 互动异步落库：RabbitMQ 削峰
-- [x] 关系模块：关注、取关、关注流
-- [x] 推荐与曝光：多路召回、曝光去重、作者打散
-- [x] 消息通知：事件驱动、通知列表与未读数
-- [x] 监控与治理：指标采集、请求追踪、健康检查、限流
-- [x] Web 客户端：原生单页、Feed 无限滚动、发布、互动与通知
+| 层 | 选型 |
+|---|---|
+| 语言 | Go 1.22 |
+| Web 框架 | Gin（ReleaseMode） |
+| 持久化 | MySQL 8.4 + GORM AutoMigrate |
+| 缓存 | Redis 7.4（页/卡片/计数缓存、热度分钟桶、互动状态） |
+| 消息队列 | RabbitMQ 3.13（发布扇出、互动落库、向量生成、播放事件） |
+| 鉴权 | JWT HS256（`Authorization: Bearer`），内部接口使用 `X-Internal-Token` |
+| 配置 | goccy/go-yaml，配置文件缺失即报错，不做默认值兜底 |
+| 指标 | Prometheus client，API 与 Worker 独立 Registry，前缀 `pulsefeed_` |
+| 前端 | React 18 + Vite 5 + react-router-dom 6，开发态代理 `/api`、`/uploads` 到 8090 |
+| 编排 | Docker Compose；Prometheus + Grafana 位于 `monitoring` profile |
 
 ## 目录结构
 
-```text
-cmd/api/                    服务启动与依赖装配
-internal/
-  shared/                   配置、日志、数据库、Redis、JWT、响应、中间件、游标、事件总线、指标
-  account/                  账户垂直切片
-    domain/                 实体、领域错误、仓储接口
-    app/                    注册、登录、资料更新用例
-    infra/                  GORM 仓储
-    http/                   路由、DTO、Handler
-  video/                    视频垂直切片
-    domain/                 视频实体、统计实体、仓储接口
-    app/                    发布、详情、作品列表用例
-    infra/                  GORM 仓储
-    http/                   路由、DTO、Handler
-  feed/                     Feed 垂直切片
-    domain/                 Feed 卡片实体、分页结果、仓储与缓存接口
-    app/                    Timeline / Hot 查询、游标编解码、页缓存读写
-    infra/                  GORM 回源查询、Redis 页缓存
-    http/                   路由、DTO、Handler
-  interaction/              互动垂直切片
-    domain/                 行为、评论实体与仓储接口
-    app/                    点赞、收藏、评论用例
-    infra/                  GORM 仓储、计数事务
-    http/                   路由、DTO、Handler
-  relation/                 关系垂直切片
-    domain/                 关注关系实体与仓储接口
-    app/                    关注、取关用例
-    infra/                  GORM 仓储
-    http/                   路由、DTO、Handler
-  message/                  消息垂直切片
-    domain/                 通知实体与仓储接口
-    app/                    事件转通知、通知列表、未读数
-    infra/                  GORM 仓储、操作者信息回填
-    http/                   路由、DTO、Handler
-  recommend/                推荐垂直切片
-    domain/                 召回源、曝光存储接口
-    app/                    多路召回合并、曝光去重、作者打散
-    infra/                  热榜/关注/时间线召回、Redis 曝光集合
-    http/                   路由、DTO、Handler
-  upload/                   文件上传
-  httpapi/                  Gin 引擎、健康检查、指标端点、静态文件
-web/                        Web 客户端（原生 HTML/CSS/JS，由 API 服务托管）
+```
+pulsefeed/
+├── README.md
+├── docs/
+│   ├── architecture.md            # 分层边界与关键数据流
+│   ├── frontend-redesign.md       # 前端视觉与交互重构记录
+│   └── routes-snapshot.md         # HTTP 路由与端口快照
+├── scripts/start.sh               # 本地三进程启动与信号清理
+└── apps/
+    ├── api/                       # Go module（module: pulsefeed）
+    │   ├── cmd/
+    │   │   ├── api/               # HTTP 组合根
+    │   │   └── worker/            # MQ 消费者组合根
+    │   ├── configs/               # config.yaml / config.docker.yaml
+    │   ├── internal/
+    │   │   ├── domain/            # 实体、错误哨兵、仓储端口
+    │   │   ├── application/       # 用例编排与 Worker
+    │   │   ├── infra/             # MySQL/Redis/RabbitMQ/JWT/指标实现
+    │   │   └── interfaces/http/   # handler、dto、路由、中间件
+    │   └── test/                  # 基于内存 fake 的接口测试；test/integration 为 build tag 集成测试
+    ├── web/                       # React + Vite 前端
+    ├── monitoring/                # Prometheus 配置与 Grafana provisioning
+    ├── docker-compose.yml
+    └── deploy.yaml                # K8s 清单（Namespace/Secret/PVC/Deployment/Service）
 ```
 
-每个业务切片内部保持 `domain -> app -> infra/http` 的依赖方向，切片之间不直接依赖对方的 infra 实现。
+分层依赖方向：`interfaces → application → domain`，`infra` 实现 `domain` 端口并在组合根注入；`application` 不直接 import `infra`。
 
-## 快速启动
+## 两个组合根
 
-### Docker Compose
+- `apps/api/cmd/api`：加载并校验配置 → 初始化 MySQL/Redis/RabbitMQ/指标 → 装配仓储、服务、Handler 与路由 → 监听 HTTP（默认 `:8090`），提供 `/health`、`/metrics`、`/uploads` 与业务路由。
+- `apps/api/cmd/worker`：加载配置 → 执行迁移 → 连接 MQ → 启动 `ActionWorker`、`FanoutWorker`、`EmbeddingWorker`、`PlayEventWorker` → 在独立指标端口提供 `/metrics`（`-metrics-addr` 默认 `:9092`，可覆盖）→ 收到信号后优雅退出。
+
+## 本地启动
+
+前置依赖：MySQL（3306）、Redis（6379）、RabbitMQ（5672）。连接参数位于 `apps/api/configs/config.yaml`，首次启动自动迁移；配置项包含 `port`、`jwt{secret,access_ttl}`、`internal{token}`、`database`、`redis`、`rabbitmq{url,三组 exchange/queue/routing}`。
 
 ```bash
+# 后端 API
+cd pulsefeed/apps/api
+go run ./cmd/api
+
+# 异步 Worker（本机 9092 可能被 Hyper-V 保留段占用，可显式覆盖）
+cd pulsefeed/apps/api
+go run ./cmd/worker -metrics-addr :19092
+
+# 前端
+cd pulsefeed/apps/web
+npm install
+npm run dev            # http://127.0.0.1:5173
+```
+
+前端开发态将 `/api`、`/uploads` 代理到 `http://127.0.0.1:8090`，目标地址可用环境变量 `PULSEFEED_API` 覆盖。
+
+健康检查与指标：`GET :8090/health`、`GET :8090/metrics`；Worker 按上面的 `-metrics-addr` 启动时为 `GET :19092/metrics`（缺省 `:9092`）。
+
+## 容器化与监控
+
+```bash
+cd pulsefeed/apps
+docker compose up -d --build
+docker compose --profile monitoring up -d prometheus grafana
+docker compose --profile monitoring down   # 只停止并移除容器，保留数据卷
+```
+
+宿主端口全部可配置：下表为「默认宿主端口 + 覆盖变量 + 容器端口」，模板见 `apps/.env.example`（复制为 `apps/.env` 后生效，`.env` 不提交）。
+
+| 服务 | 默认宿主端口 | 覆盖变量 | 容器端口 | 说明 |
+|---|---|---|---|---|
+| web | 8088 | `WEB_PORT` | 80 | nginx 托管构建产物，反代 `/api/`、`/uploads/` |
+| api | 8090 | `API_PORT` | 8090 | HTTP API 与 `/health`、`/metrics` |
+| worker | 19092 | `WORKER_METRICS_PORT` | 9092 | 指标端口，默认值避开 Win11 Hyper-V 保留段 9020–9119 |
+| mysql | 3307 | `MYSQL_PORT` | 3306 | |
+| redis | 6380 | `REDIS_PORT` | 6379 | |
+| rabbitmq | 5673 / 15673 | `RABBITMQ_PORT` / `RABBITMQ_UI_PORT` | 5672 / 15672 | 15673 为管理台 |
+| prometheus | 19090 | `PROMETHEUS_PORT` | 9090 | 仅 `monitoring` profile；9090 同样落在保留段，故默认映射 19090 |
+| grafana | 3000 | `GRAFANA_PORT` | 3000 | 仅 `monitoring` profile，预置数据源与 16 面板仪表盘 |
+
+### 端口被占用怎么办
+
+宿主端口全部可由 `.env` 覆盖，不用改 `docker-compose.yml`：
+
+```bash
+cd pulsefeed/apps
+cp .env.example .env        # Windows PowerShell: Copy-Item .env.example .env
+# 编辑 .env，例如 REDIS_PORT=6381、MYSQL_PORT=3308
+docker compose config --quiet   # 先校验变量替换后的配置
 docker compose up -d --build
 ```
 
-服务地址：
+容器内端口与服务名固定不变（`mysql:3306`、`redis:6379`、`rabbitmq:5672`），因此改宿主映射不影响服务间通信。Windows 上 9020–9119 可能被 Hyper-V/WinNAT 动态保留，默认值 19090/19092 已避开；仍冲突时改 `PROMETHEUS_PORT` / `WORKER_METRICS_PORT` 即可。可用 `netsh interface ipv4 show excludedportrange protocol=tcp` 查看当前保留段。
 
-| 服务 | 地址 |
-| --- | --- |
-| Web 客户端 | `http://127.0.0.1:8080/` |
-| API | `http://127.0.0.1:8080/api` |
-| 存活检查 | `http://127.0.0.1:8080/health` |
-| 就绪检查 | `http://127.0.0.1:8080/ready` |
-| 指标 | `http://127.0.0.1:8080/metrics` |
-| MySQL | `127.0.0.1:3307` |
-| Redis | `127.0.0.1:6379` |
+监控验收口径为 `http://localhost:19090`（Prometheus）与 `http://localhost:3000`（Grafana，默认账号 `admin` / `pulsefeed`）。K8s 清单 `deploy.yaml` 含 6 个 Deployment（mysql/redis/rabbitmq/api/worker/web）。
 
-停止并清理数据：
+## 当前进度
+
+以下清单逐条对照代码与本地运行结果核实；未实现或未验证的能力不勾选。
+
+- [x] 后端主链路：账号、Clip 发布（`Idempotency-Key` 幂等）、Feed 四场景（latest / following / for-you / hot）、互动（点赞 / 收藏 / 评论）、关注、推荐、热榜、消息、播放配置与 Prometheus 指标。
+- [x] 互动异步落库：点赞/收藏先写 Redis，再投递 `pulsefeed.interaction.action_changed`，由 Worker 的 `ActionWorker` 落库；Redis 或 MQ 不可用时回退同步落库。真实 compose 运行中该队列有 1 个消费者（`clip.published`、`clip.embedding`、`impression.play_recorded` 同样各 1 个）。
+- [x] 播放事件幂等：`event_id` 唯一键拦住 `pf_play_events` 重复写入；与 `pf_playback_qos_reports` 同 `event_id` 时不再累加 `play_count`。集成测试覆盖并发去重（见下方「集成测试」）。
+- [x] 前端：React 18 + Vite 5，5 个页面（登录 / Feed / 发布 / 消息 / 播放配置）走独立路由；Feed 场景由 `/feed?scene=latest|hot|following|for-you` 直达，详情为 `/clip/:id?from=...` 深链弹层，刷新、前进后退与直接粘贴 URL 均正常，关闭后回到来源列表；Feed 分页仍用「加载更多」按钮，不是无限滚动。卡片与详情内联播放器支持播放 / 暂停 / 静音 / 进度 / 全屏自控，并按首帧延迟、卡顿次数、播放时长、完播状态上报 QoS（`event_id` 幂等）。依赖仅新增 `react-router-dom` 6。
+- [x] 容器化与监控：Compose 编排、宿主端口可由 `.env` 覆盖；Prometheus/Grafana 位于 `monitoring` profile；K8s 清单已提供但未做集群级实测。
+- [x] 测试与 CI：`go build/vet/test`、前端 `npm run build`、GitHub Actions；真实依赖集成测试通过 `-tags=integration` 手动运行。
+- [x] 媒体探测：上传媒体文件时由 `ffprobe` / `ffmpeg` 读取时长与首帧，工具缺失或失败时降级，不影响发布。
+- [x] RabbitMQ 重投递与死信：四组消费队列均声明 `x-dead-letter-exchange`，对应死信交换机 `pulsefeed.<域>.dlx` 与死信队列 `<原队列>.dead`；消费失败先 `basic.nack(requeue=true)` 回原队列，同一消费进程累计失败 3 次（含首次）后 nack 不重入原队列，由 broker 转进死信；不可重试错误（消息体非法、必需字段缺失、目标 clip 不可见等）直接进死信，不消耗重试次数。旧队列参数不一致时 broker 返回 406 PreconditionFailed，Worker 中止启动并提示删除旧队列。
+- [ ] 前端自动化：目前只有构建校验，没有组件测试或 E2E，交互回归仍靠手工。
+
+### 字符计数口径
+
+- 后端按字符（Go `utf8.RuneCountInString`，Unicode 码点）计数：标题上限 128、昵称上限 64、评论上限 1000，均先 `TrimSpace` 再判定；与 `pf_clips.title`、`pf_user_profiles.nickname`、`pf_comments.content` 的列宽一致，不额外放宽。
+- 前端发布页按码点展示 `X/120`，沿用既有 120 字提示上限；HTML `maxLength` 取 128（浏览器按 UTF-16 单元计数，不会少于码点数），因此不会出现前端放行、后端拒绝。昵称输入同步限制 64。
+
+### 媒体时长与首帧封面
+
+- 上传媒体文件时调用 `ffprobe` 读取时长（写入 `pf_clips.duration_ms`，毫秒）、调用 `ffmpeg` 抽取首帧写入 `uploads/cover/` 并作为 `cover_url` 回传；前端卡片按 `mm:ss` 展示时长角标，`duration_ms=0` 时不占位。
+- 工具缺失或执行失败时只记录 `warning` 并降级为“无时长、无封面”，上传与发布照常成功；前端回退为暗色首字占位封面。
+- 数据库沿用 GORM `AutoMigrate` 增量新增 `duration_ms` 列；API 镜像（`apps/api/Dockerfile`）已内置 `ffmpeg`，本地 Windows 不安装也能运行。
+
+## 接口表
+
+统一响应信封 `{code, message, data}`，成功 `code=0`。完整请求响应字段见 `docs/routes-snapshot.md`。
+
+| 分组 | 方法与路径 | 鉴权 |
+|---|---|---|
+| 账号 | `POST /api/users`、`POST /api/sessions`、`DELETE /api/sessions/current` | 公开 / 登录 |
+| 资料 | `GET/PATCH /api/users/me`、`GET /api/users/:userId`、`GET /api/users/:userId/clips` | 登录 / 公开 |
+| Feed | `GET /api/feed`、`POST /api/feed-search`（`scene=latest,following,for-you,hot`） | 可选登录 |
+| 发布 | `POST /api/clips`（可选 `duration_ms`）、`DELETE /api/clips/:clipId`、`GET /api/clips/:clipId`、`GET /api/users/me/clips` | 登录 / 公开 |
+| 上传 | `POST /api/uploads`（`kind=video,cover,avatar`；媒体文件额外回传 `cover_url`/`duration_ms`） | 登录 |
+| 互动 | `PUT/DELETE /api/clips/:clipId/like`、`PUT/DELETE /api/clips/:clipId/save`、`POST/GET /api/clips/:clipId/comments`、`DELETE /api/comments/:commentId` | 登录 / 公开 |
+| 播放 | `POST /api/clip-play-events`、`POST /api/playback-qos-reports`、`GET/PUT /api/playback-config`、`GET /api/preload-clips` | 登录 |
+| 关注 | `PUT/DELETE /api/users/me/following/:targetUserId`、`GET /api/users/me/following`、`GET /api/users/me/followers` | 登录 |
+| 消息 | `GET /api/messages`、`GET /api/message-stats/unread`、`PATCH /api/messages` | 登录 |
+| 内部 | `POST /internal/recommendation-candidates`、`GET /internal/impression-decisions`、`GET /internal/impressions`、`POST /internal/messages`、`POST /internal/playback-qos-reports` | `X-Internal-Token` |
+
+前端对发布与评论写请求携带 `Idempotency-Key`：发布要求非空且同 key 返回同一 clip，评论同 key 重放返回同一评论；互动、关注、评论对去空白后超 128 字符的 key 返回 400，点赞/收藏/关注由唯一行天然幂等。
+
+## 测试与校验
 
 ```bash
-docker compose down -v
+cd pulsefeed/apps/api
+gofmt -l .            # 工作区为 CRLF 时需按 LF 归一化复核
+go build ./...
+go vet ./...
+go test ./...
+
+cd ../web
+npm run build
 ```
 
-### 本地运行
+禁用字样自查：对仓库执行关键词检索，输出为空即通过；具体关键词不在文档中重复。
 
-需要本地已有 MySQL 和 Redis，并创建 `pulsefeed` 数据库。复制 `.env.example` 为 `.env` 后按需修改，然后启动：
+### 集成测试（需真实 MySQL / Redis / RabbitMQ）
+
+用 build tag 隔离，默认 `go test ./...` 不编译该目录。测试每次运行会创建独立 schema（`pulsefeed_it_<timestamp>`），跑完自动 `DROP`，不会读写演示数据。
 
 ```bash
-go run ./cmd/api
-```
+cd pulsefeed/apps
+docker compose up -d mysql redis rabbitmq   # 端口被占用时先按上文用 .env 换端口
 
-常用环境变量：
+cd api
+# PowerShell 用 $env:VAR='...' 逐条设置；默认端口对应 compose 默认值
+PULSEFEED_IT_MYSQL_DSN='root:pulsefeed-root@tcp(127.0.0.1:3307)/?charset=utf8mb4&parseTime=True&loc=Local' \
+PULSEFEED_IT_REDIS_ADDR='127.0.0.1:6380' \
+PULSEFEED_IT_RABBITMQ_URL='amqp://pulsefeed:pulsefeed@127.0.0.1:5673/' \
+go test -tags=integration ./test/integration -v -count=1
+```
 
 | 变量 | 默认值 | 说明 |
-| --- | --- | --- |
-| `APP_ENV` | `dev` | `prod` 时输出 JSON 日志并关闭调试提示 |
-| `APP_VERSION` | `dev` | 写入 `pulsefeed_build_info` 指标 |
-| `WEB_DIR` | `web` | Web 客户端静态目录，置空则不托管前端 |
-| `RATE_LIMIT_PER_MINUTE` | `120` | 单 IP 每分钟请求上限，`0` 表示关闭限流 |
+|---|---|---|
+| `PULSEFEED_IT_MYSQL_DSN` | `root:pulsefeed-root@tcp(127.0.0.1:3307)/...` | 需 root 权限创建/删除独立 schema |
+| `PULSEFEED_IT_REDIS_ADDR` | `127.0.0.1:6380` | 仅连通性检查 |
+| `PULSEFEED_IT_RABBITMQ_URL` | `amqp://pulsefeed:pulsefeed@127.0.0.1:5673/` | 仅连通性检查 |
 
-## API
+排障：先 `docker compose ps` 确认三个依赖为 healthy；`CREATE DATABASE` 报权限不足时检查 DSN 是否用了 root；连接超时优先核对 `.env` 实际映射的宿主端口与上述变量是否一致。测试覆盖：`play_count` 跨表同 `event_id` 去重（含两个 goroutine 并发上报）、latest 场景逐页游标边界（含跨分钟）与死信路由（不可重试直接入死信、连续失败 3 次后入死信、原队列无残留）。
 
-统一响应结构：
+## 文档
 
-```json
-{
-  "code": 0,
-  "message": "ok",
-  "data": {}
-}
-```
-
-已实现接口：
-
-| 方法 | 路径 | 鉴权 | 功能 |
-| --- | --- | --- | --- |
-| POST | `/api/users` | 否 | 注册 |
-| POST | `/api/sessions` | 否 | 登录并获取 JWT |
-| DELETE | `/api/sessions/current` | 是 | 退出登录 |
-| GET | `/api/users/me` | 是 | 当前用户资料 |
-| PATCH | `/api/users/me` | 是 | 更新昵称、头像、简介 |
-| GET | `/api/profiles/{userId}` | 否 | 公开用户资料 |
-| POST | `/api/uploads` | 是 | 上传视频、封面或头像 |
-| POST | `/api/videos` | 是 | 发布视频，支持 `Idempotency-Key` |
-| GET | `/api/videos/{videoId}` | 否 | 视频详情 |
-| GET | `/api/users/me/videos` | 是 | 我的作品列表 |
-| GET | `/api/profiles/{userId}/videos` | 否 | 指定用户的作品列表 |
-| GET | `/api/feed-items` | 否 | Timeline Feed，支持 `scene`、`cursor`、`limit` |
-| POST | `/api/videos/{videoId}/likes` | 是 | 点赞 |
-| DELETE | `/api/videos/{videoId}/likes` | 是 | 取消点赞 |
-| POST | `/api/videos/{videoId}/favorites` | 是 | 收藏 |
-| DELETE | `/api/videos/{videoId}/favorites` | 是 | 取消收藏 |
-| POST | `/api/videos/{videoId}/comments` | 是 | 发表评论 |
-| GET | `/api/videos/{videoId}/comments` | 否 | 评论列表，支持 `cursor`、`limit` |
-| DELETE | `/api/comments/{commentId}` | 是 | 删除自己的评论 |
-| POST | `/api/users/{userId}/follow` | 是 | 关注用户 |
-| DELETE | `/api/users/{userId}/follow` | 是 | 取消关注 |
-| GET | `/api/feed-items/following` | 是 | 关注流，支持 `cursor`、`limit` |
-| GET | `/api/feed-items/recommend` | 是 | 推荐 Feed，多路召回与曝光去重 |
-| GET | `/api/notifications` | 是 | 通知列表，游标分页 |
-| GET | `/api/notifications/unread-count` | 是 | 未读通知数 |
-| POST | `/api/notifications/read` | 是 | 全部标记已读 |
-
-### 上传示例
-
-```bash
-curl -X POST http://127.0.0.1:8080/api/uploads \
-  -H "Authorization: Bearer <token>" \
-  -F "kind=video" \
-  -F "file=@demo.mp4"
-```
-
-返回的 `url` 可直接用于发布视频的 `media_url`。
-
-### 发布示例
-
-```bash
-curl -X POST http://127.0.0.1:8080/api/videos \
-  -H "Authorization: Bearer <token>" \
-  -H "Content-Type: application/json" \
-  -H "Idempotency-Key: publish-demo-1" \
-  -d '{"title":"第一条视频","media_url":"/uploads/video/demo.mp4"}'
-```
-
-相同的 `Idempotency-Key` 重复提交会返回同一条视频，不会重复创建。
-
-## 设计说明
-
-- **垂直切片**：每个业务模块自带 domain、app、infra、http，模块边界清晰，后续可独立拆分。
-- **JWT 鉴权**：HS256 签名，中间件解析后把用户 ID 注入请求上下文。
-- **发布幂等**：`Idempotency-Key` 先查后建，并由数据库唯一索引兜底并发写入。
-- **游标分页**：作品列表与 Feed 都按 `published_at DESC, id DESC` 排序，游标编码最后一条的排序字段，翻页稳定。
-- **Feed 页缓存**：一页 Feed 以 `feed:page:v1:{scene}:{limit}:{cursor}` 整体写入 Redis，TTL 60 秒；未命中时回源 MySQL 一次取出 `limit+1` 条判断 `has_more`，Redis 不可用时自动退化为直查数据库。
-- **Hot Feed**：互动分数写入 `feed:hot:minute:v1:{yyyyMMddHHmm}` 分钟桶 ZSET，查询时把最近 60 个桶合并成临时 ZSET 取 TopN，游标编码 `(score, video_id)` 保证翻页稳定；Redis 未就绪时热榜返回空页。
-- **互动幂等与计数**：`interaction_actions` 以 `(user_id, video_id, action)` 唯一索引兜底重复点赞与收藏；行为写入和 `video_stats` 计数更新在同一事务内完成，计数用单条 `UPDATE ... GREATEST(...)` 自增自减，避免并发覆盖和负数。
-- **互动与热榜联动**：只有行为真正发生变化时才写入热榜分数，权重为 like=1、favorite=2、comment=3，取消操作写负分；热榜写入失败不阻断互动主流程。
-- **关注流**：`user_relations` 以 `(follower_id, followee_id)` 唯一索引保证重复关注幂等；关注流先取当前用户的关注列表（最多 1000 人），再用 `author_id IN (...)` 回源视频并按发布时间游标翻页，不做整页缓存以反映关注关系的最新变化。
-- **推荐流**：热榜、关注作者作品、时间线三路各召回 50 条，合并去重后过滤 Redis 中 `recommend:exposed:v1:{userID}` 已曝光的视频，再按“单页同一作者最多 2 条”打散并截断到 `limit`；本页结果写回曝光集合（TTL 24 小时），Redis 不可用时自动跳过曝光过滤。
-- **消息通知**：点赞、收藏、评论、关注在状态真正变化后向进程内事件总线发布事件，消息模块订阅后写入 `notifications`，自己操作自己不产生通知；评论内容截断为 100 字摘要，通知列表按 `created_at DESC, id DESC` 游标分页，并回填操作者昵称与头像。
-- **可观测性**：请求 ID 中间件复用合法的 `X-Request-ID` 或重新生成，贯穿访问日志、panic 日志与响应头；访问日志输出 method、route、status、latency、user_id 等结构化字段，`/metrics` 按 Prometheus 文本格式暴露请求数、耗时直方图、并发数、限流次数与依赖状态，HTTP 指标以路由模板作为标签避免基数膨胀。
-- **健康检查**：`/health` 只表示进程存活，供容器存活探针使用；`/ready` 在 2 秒超时内探测 MySQL 与 Redis，任一异常返回 503 并输出各依赖状态，Redis 未启用时标记为 `disabled` 而不是失败。
-- **限流与自我保护**：`/api` 按客户端 IP 做固定窗口计数（Redis `INCR` + `EXPIRE`，默认 120 次/分钟），超限返回 429 与 `Retry-After`；Redis 不可用时放行请求，避免缓存故障放大为全站不可用；路由不信任代理头，防止伪造 `X-Forwarded-For` 影响限流维度。
-- **panic 恢复**：自定义 Recovery 捕获 panic 后记录堆栈与请求 ID，并返回统一错误响应，避免连接被直接断开。
-- **Web 客户端**：`web/` 下为无构建步骤的原生 HTML/CSS/JS 单页，由 Go 服务通过 `/web` 静态目录与根路径托管；前端统一封装 `fetch` 处理 `{code,message,data}`、401 清理登录态与 204 空响应，Feed 按游标做无限滚动并用请求序号丢弃过期结果，点赞/收藏先乐观更新再以接口返回值校正。
-- **上传校验**：按业务类型限制扩展名和文件大小，文件名由服务端生成，避免路径注入。
-- **统一错误映射**：领域错误在 HTTP 层映射为对应状态码，内部错误只记录日志，不向外暴露细节。
-
-## 验证
-
-```bash
-go build ./...
-go test ./...
-go vet ./...
-docker compose config
-```
-
-## 后续路线
-
-1. 互动异步化：RabbitMQ 削峰、点赞评论异步落库
+- [架构与数据流](docs/architecture.md)
+- [路由与端口快照](docs/routes-snapshot.md)
+- [前端重构与实施记录](docs/frontend-redesign.md)

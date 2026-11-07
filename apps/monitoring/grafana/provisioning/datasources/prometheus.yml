@@ -1,0 +1,12 @@
+# prometheus.yml 预置 Grafana 数据源，指向 compose 网络内的 prometheus 服务；
+# uid 与 dashboard JSON 中的 datasource.uid 保持一致，避免面板落空。
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: pulsefeed-prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: true

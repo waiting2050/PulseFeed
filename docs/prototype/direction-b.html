@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>PulseFeed · 方向 B 草图（明亮杂志栅格）</title>
+<style>
+  :root {
+    --paper: #f7f6f2;
+    --paper-2: #ffffff;
+    --ink: #12100e;
+    --ink-2: #5c574f;
+    --ink-3: #8c857a;
+    --rule: #dcd8cf;
+    --accent: #e5402a;
+    --serif: "Songti SC", "Noto Serif SC", Georgia, "Times New Roman", serif;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--paper); color: var(--ink); font-family: var(--sans); }
+  a { color: inherit; text-decoration: none; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 0 40px 80px; }
+  header {
+    display: flex; align-items: baseline; gap: 40px;
+    padding: 34px 0 22px; border-bottom: 1px solid var(--rule);
+  }
+  .brand { font-family: var(--serif); font-size: 30px; letter-spacing: -0.02em; }
+  .brand span { color: var(--accent); }
+  .nav { display: flex; gap: 26px; font-size: 13px; color: var(--ink-2); }
+  .nav a { padding-bottom: 4px; }
+  .nav a.active { color: var(--ink); border-bottom: 2px solid var(--ink); }
+  .meta-right { margin-left: auto; display: flex; gap: 18px; align-items: baseline; font-size: 12px; color: var(--ink-3); letter-spacing: 0.08em; text-transform: uppercase; }
+  .meta-right a.login { color: var(--ink); border-bottom: 1px solid var(--ink); }
+
+  .kicker {
+    display: flex; justify-content: space-between; align-items: baseline;
+    padding: 30px 0 18px; font-size: 11px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--ink-3);
+  }
+  .kicker strong { color: var(--accent); font-weight: 600; }
+
+  .masonry { display: grid; grid-template-columns: 1fr 1fr; gap: 0 40px; }
+  .item { padding: 26px 0 30px; border-top: 1px solid var(--rule); display: flex; flex-direction: column; gap: 14px; }
+  .item:nth-child(1), .item:nth-child(2) { border-top: 0; }
+  .item-head { display: flex; gap: 14px; align-items: baseline; }
+  .index { font-family: var(--serif); font-size: 13px; color: var(--accent); letter-spacing: 0.06em; flex: none; }
+  .tag { margin-left: auto; font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-3); border: 1px solid var(--rule); padding: 3px 8px; border-radius: 999px; }
+  .art {
+    aspect-ratio: 4 / 3; border-radius: 3px; position: relative; overflow: hidden;
+    background: var(--art); transform: translateZ(0);
+  }
+  .art::after {
+    content: ""; position: absolute; inset: 0;
+    background: linear-gradient(180deg, rgba(0,0,0,0.04), rgba(0,0,0,0.30));
+  }
+  .art .glyph {
+    position: absolute; left: 20px; bottom: 14px; z-index: 2;
+    font-family: var(--serif); font-size: 34px; color: rgba(255,255,255,0.94); letter-spacing: 0.1em;
+    text-shadow: 0 2px 18px rgba(0,0,0,0.35);
+  }
+  .art .time {
+    position: absolute; right: 12px; bottom: 12px; z-index: 2;
+    font-size: 11px; color: #fff; background: rgba(0,0,0,0.42); padding: 2px 7px;
+    font-variant-numeric: tabular-nums; letter-spacing: 0.04em;
+  }
+  .item:nth-child(1) .art { aspect-ratio: 3 / 2; }
+  .item:nth-child(4) .art { aspect-ratio: 5 / 4; }
+  h2.title {
+    margin: 0; font-family: var(--serif); font-weight: 600;
+    font-size: 24px; line-height: 1.35; letter-spacing: -0.01em;
+  }
+  .item:nth-child(3) h2.title, .item:nth-child(4) h2.title { font-size: 21px; }
+  .byline { display: flex; align-items: baseline; gap: 10px; font-size: 12px; color: var(--ink-2); }
+  .byline b { font-weight: 600; color: var(--ink); }
+  .byline .sep { color: var(--rule); }
+  .stats { display: flex; gap: 14px; font-size: 11px; color: var(--ink-3); font-variant-numeric: tabular-nums; }
+  .stats span::before { content: "· "; color: var(--rule); }
+  .stats span:first-child::before { content: ""; }
+  .read {
+    align-self: flex-start; margin-top: 2px; font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase;
+    color: var(--accent); border-bottom: 1px solid currentColor; padding-bottom: 2px;
+  }
+  .footer { margin-top: 40px; padding-top: 22px; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-3); }
+
+  @media (max-width: 860px) {
+    .wrap { padding: 0 20px 60px; }
+    header { flex-wrap: wrap; gap: 16px 24px; padding: 24px 0 16px; }
+    .nav { order: 3; width: 100%; gap: 18px; }
+    .meta-right { font-size: 11px; }
+    .masonry { grid-template-columns: 1fr; }
+    .item:nth-child(2) { border-top: 1px solid var(--rule); }
+    h2.title, .item:nth-child(3) h2.title, .item:nth-child(4) h2.title { font-size: 21px; }
+    .kicker { padding-top: 20px; }
+  }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="brand">Pulse<span>Feed</span></div>
+    <nav class="nav" aria-label="场景">
+      <a class="active" aria-current="page">最新</a>
+      <a>热门</a>
+      <a>关注</a>
+      <a>推荐</a>
+    </nav>
+    <div class="meta-right">
+      <span>2026 · 第 11 期</span>
+      <a class="login">登录</a>
+    </div>
+  </header>
+
+  <div class="kicker"><span><strong>今日精选</strong> · 12 条新内容</span><span>按时间倒序</span></div>
+
+  <main class="masonry">
+    <article class="item">
+      <div class="item-head"><span class="index">01</span><span class="tag">城市</span></div>
+      <div class="art" style="--art: linear-gradient(140deg,#0d1330 0%,#3a2260 40%,#a57ad6 68%,#f0c7a0 100%)">
+        <span class="glyph" aria-hidden="true">雨</span><span class="time">00:42</span>
+      </div>
+      <h2 class="title">雨夜霓虹：在城市天桥上等一场光</h2>
+      <div class="byline"><b>林一舟</b><span class="sep">/</span><span>2 小时前</span></div>
+      <div class="stats"><span>播放 12.8 万</span><span>点赞 3,241</span><span>收藏 892</span></div>
+      <a class="read">观看</a>
+    </article>
+
+    <article class="item">
+      <div class="item-head"><span class="index">02</span><span class="tag">夜宵</span></div>
+      <div class="art" style="--art: linear-gradient(145deg,#20120a 0%,#7a3d12 45%,#e0912f 78%,#f6d08a 100%)">
+        <span class="glyph" aria-hidden="true">面</span><span class="time">01:18</span>
+      </div>
+      <h2 class="title">凌晨两点的豚骨拉面，汤底熬了十二个小时</h2>
+      <div class="byline"><b>阿岚的深夜食堂</b><span class="sep">/</span><span>5 小时前</span></div>
+      <div class="stats"><span>播放 4.6 万</span><span>点赞 1,904</span><span>收藏 576</span></div>
+      <a class="read">观看</a>
+    </article>
+
+    <article class="item">
+      <div class="item-head"><span class="index">03</span><span class="tag">户外</span></div>
+      <div class="art" style="--art: linear-gradient(160deg,#071720 0%,#0d5566 44%,#2fb8c8 72%,#ffd7a1 100%)">
+        <span class="glyph" aria-hidden="true">云</span><span class="time">00:56</span>
+      </div>
+      <h2 class="title">海拔 3200 米的日出，帐篷外全是云海</h2>
+      <div class="byline"><b>山野小周</b><span class="sep">/</span><span>昨天</span></div>
+      <div class="stats"><span>播放 9.1 万</span><span>点赞 2,118</span><span>收藏 1,043</span></div>
+      <a class="read">观看</a>
+    </article>
+
+    <article class="item">
+      <div class="item-head"><span class="index">04</span><span class="tag">生活</span></div>
+      <div class="art" style="--art: linear-gradient(150deg,#141a1a 0%,#33443f 40%,#7c9483 70%,#d8e0cf 100%)">
+        <span class="glyph" aria-hidden="true">冲</span><span class="time">00:38</span>
+      </div>
+      <h2 class="title">手冲咖啡：水温 92℃ 的三个理由</h2>
+      <div class="byline"><b>豆子先生</b><span class="sep">/</span><span>2 天前</span></div>
+      <div class="stats"><span>播放 2.2 万</span><span>点赞 731</span><span>收藏 265</span></div>
+      <a class="read">观看</a>
+    </article>
+  </main>
+
+  <div class="footer"><span>PulseFeed · 编辑台</span><span>加载更多</span></div>
+</div>
+</body>
+</html>

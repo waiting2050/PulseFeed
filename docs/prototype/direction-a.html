@@ -1,0 +1,674 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>PulseFeed · 方向 A 原型（暗色沉浸内容流）</title>
+<style>
+  :root {
+    --n-0: #000000;
+    --n-1: #000000;
+    --n-2: #161823;
+    --n-3: #1c1c1e;
+    --n-4: #26272b;
+    --line: rgba(255, 255, 255, 0.08);
+    --text-1: #ffffff;
+    --text-2: rgba(255, 255, 255, 0.75);
+    --text-3: rgba(255, 255, 255, 0.45);
+    --a-500: #fe2c55;
+    --a-400: #ff4d70;
+    --a-600: #e01f46;
+    --a-soft: rgba(254, 44, 85, 0.14);
+    --c-400: #25f4ee;
+    --success: #34d399;
+    --warning: #ffb020;
+    --error: #ff6b6b;
+    --r-sm: 8px;
+    --r-md: 10px;
+    --r-lg: 12px;
+    --r-pill: 999px;
+    --w-app: 1240px;
+    --w-narrow: 420px;
+    --dur-fast: 120ms;
+    --dur-base: 200ms;
+    --ease-standard: cubic-bezier(0.2, 0.8, 0.2, 1);
+    --shadow-md: 0 12px 32px rgba(0, 0, 0, 0.45);
+    --font: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--n-1);
+    color: var(--text-1);
+    font-family: var(--font);
+    font-size: 14px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  button { font: inherit; color: inherit; }
+  a { color: inherit; text-decoration: none; }
+  .num { font-variant-numeric: tabular-nums; }
+  .hidden { display: none !important; }
+  :focus-visible { outline: 2px solid var(--c-400); outline-offset: 2px; border-radius: 4px; }
+
+  /* ---------- top bar ---------- */
+  .topbar {
+    position: sticky; top: 0; z-index: 10;
+    background: rgba(7, 8, 11, 0.82);
+    backdrop-filter: blur(14px);
+    border-bottom: 1px solid var(--line);
+  }
+  .topbar-inner {
+    max-width: var(--w-app); margin: 0 auto; height: 64px;
+    padding: 0 24px; display: flex; align-items: center; gap: 20px;
+  }
+  .brand { display: flex; align-items: center; gap: 10px; flex: none; }
+  .brand-mark {
+    width: 28px; height: 28px; border-radius: 8px;
+    background: var(--a-500);
+    display: grid; place-items: center;
+  }
+  .brand-name { font-size: 18px; font-weight: 700; letter-spacing: -0.01em; }
+  .brand-name em { color: inherit; font-style: normal; }
+  .search {
+    margin-left: auto; width: 240px; height: 36px; border-radius: var(--r-pill);
+    background: var(--n-3); border: 1px solid var(--line);
+    display: flex; align-items: center; gap: 8px; padding: 0 14px;
+    color: var(--text-3); font-size: 13px;
+  }
+  .icon-btn {
+    width: 40px; height: 40px; border-radius: var(--r-sm);
+    background: transparent; border: 1px solid var(--line);
+    display: grid; place-items: center; cursor: pointer;
+    color: var(--text-2); transition: background var(--dur-fast), color var(--dur-fast);
+  }
+  .icon-btn:hover { background: var(--n-3); color: var(--text-1); }
+  .avatar {
+    width: 34px; height: 34px; border-radius: 50%; flex: none;
+    background: var(--n-4); border: 1px solid var(--line); color: var(--text-2);
+    display: grid; place-items: center; font-size: 13px; font-weight: 600;
+  }
+  .btn-ghost {
+    height: 36px; padding: 0 16px; border-radius: var(--r-sm);
+    background: transparent; border: 1px solid rgba(255,255,255,0.14);
+    color: var(--text-1); font-size: 13px; cursor: pointer;
+    transition: background var(--dur-fast), border-color var(--dur-fast);
+  }
+  .btn-ghost:hover { background: var(--n-3); border-color: rgba(255,255,255,0.24); }
+
+  /* ---------- shell ---------- */
+  .shell { max-width: var(--w-app); margin: 0 auto; padding: 28px 24px 96px; }
+  .scene-row {
+    display: flex; align-items: center; gap: 16px; margin-bottom: 22px; flex-wrap: wrap;
+  }
+  .scene-tabs { display: flex; gap: 4px; background: var(--n-2); padding: 4px; border-radius: var(--r-md); border: 1px solid var(--line); }
+  .scene {
+    border: 0; background: transparent; color: var(--text-2);
+    padding: 7px 16px; border-radius: var(--r-sm); font-size: 13px; cursor: pointer;
+    transition: color var(--dur-fast), background var(--dur-fast);
+  }
+  .scene:hover { color: var(--text-1); }
+  .scene[aria-selected="true"] { background: var(--n-4); color: var(--text-1); font-weight: 600; }
+  .scene-hint { color: var(--text-3); font-size: 12px; }
+  .state-switch { margin-left: auto; display: flex; gap: 6px; align-items: center; color: var(--text-3); font-size: 12px; }
+  .state-switch button {
+    border: 1px solid var(--line); background: var(--n-2); color: var(--text-2);
+    border-radius: var(--r-pill); padding: 4px 10px; font-size: 12px; cursor: pointer;
+  }
+  .state-switch button.active { border-color: rgba(255,255,255,0.24); color: var(--text-1); background: var(--n-4); }
+
+  /* ---------- grid + card ---------- */
+  .grid { display: grid; gap: 20px; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .card {
+    background: var(--n-2); border: 1px solid var(--line); border-radius: var(--r-md);
+    overflow: hidden; display: flex; flex-direction: column;
+    transition: background var(--dur-fast), border-color var(--dur-fast);
+  }
+  .card:hover, .card:focus-within { background: var(--n-3); border-color: rgba(255,255,255,0.16); }
+  .cover { position: relative; aspect-ratio: 16 / 9; overflow: hidden; }
+  .cover-art { position: absolute; inset: 0; background: var(--art); }
+  .cover-art::after {
+    content: ""; position: absolute; inset: 0;
+    background: linear-gradient(180deg, transparent 42%, rgba(0,0,0,0.52));
+  }
+  .cover-initial {
+    position: absolute; left: 18px; bottom: 14px; z-index: 2;
+    font-size: 28px; font-weight: 600; color: rgba(255,255,255,0.72);
+    letter-spacing: 0.08em;
+  }
+  .chip-duration {
+    position: absolute; right: 10px; bottom: 10px; z-index: 3;
+    background: rgba(0,0,0,0.66); border: 1px solid rgba(255,255,255,0.16);
+    padding: 2px 8px; border-radius: 6px; font-size: 11px; font-weight: 500;
+    font-variant-numeric: tabular-nums;
+  }
+  .chip-scene {
+    position: absolute; left: 10px; top: 10px; z-index: 3;
+    padding: 3px 9px; border-radius: var(--r-pill); font-size: 11px;
+    background: rgba(0,0,0,0.5); border: 1px solid rgba(255,255,255,0.18); color: #fff;
+    backdrop-filter: blur(6px);
+  }
+  .play {
+    position: absolute; inset: 0; z-index: 2; display: grid; place-items: center;
+    opacity: 0; transition: opacity var(--dur-base);
+  }
+  .card:hover .play, .card:focus-within .play { opacity: 1; }
+  .play span {
+    width: 48px; height: 48px; border-radius: 50%;
+    background: rgba(0,0,0,0.62); border: 1px solid rgba(255,255,255,0.22);
+    display: grid; place-items: center;
+  }
+  .card-body { padding: 12px 12px 8px; display: flex; flex-direction: column; gap: 8px; }
+  .card-title {
+    margin: 0; font-size: 16px; line-height: 22px; font-weight: 700; letter-spacing: -0.01em;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  }
+  .creator { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .creator .avatar { width: 20px; height: 20px; font-size: 11px; }
+  .creator-name { font-size: 12px; color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .creator-time { font-size: 12px; color: var(--text-3); margin-left: auto; flex: none; }
+  .actions { display: flex; align-items: center; gap: 2px; border-top: 1px solid var(--line); padding-top: 8px; }
+  .act {
+    flex: 1; height: 40px; border: 0; background: transparent; color: var(--text-2);
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+    border-radius: var(--r-sm); font-size: 12px; cursor: pointer;
+    transition: color var(--dur-fast), background var(--dur-fast);
+  }
+  .act:hover { background: var(--n-3); color: var(--text-1); }
+  .act[aria-pressed="true"] { color: var(--a-400); }
+  .act[aria-pressed="true"] .act-icon { fill: rgba(254,44,85,0.22); }
+  .act-icon { width: 20px; height: 20px; }
+  .act-count { font-variant-numeric: tabular-nums; }
+  .play-count { color: var(--text-3); }
+
+  /* ---------- skeleton ---------- */
+  .sk-card { background: var(--n-2); border: 1px solid var(--line); border-radius: var(--r-md); overflow: hidden; }
+  .sk-cover { aspect-ratio: 16 / 9; background: var(--n-3); position: relative; overflow: hidden; }
+  .sk-line { height: 12px; border-radius: 6px; background: var(--n-3); margin: 12px 14px 0; position: relative; overflow: hidden; }
+  .sk-line.short { width: 42%; }
+  .sk-actions { height: 36px; margin: 14px; border-radius: var(--r-sm); background: var(--n-3); position: relative; overflow: hidden; }
+  .shimmer::before, .sk-cover::before, .sk-line::before, .sk-actions::before {
+    content: ""; position: absolute; inset: 0;
+    background: linear-gradient(100deg, transparent 20%, rgba(255,255,255,0.07) 50%, transparent 80%);
+    transform: translateX(-100%); animation: sweep 1.4s var(--ease-standard) infinite;
+  }
+  @keyframes sweep { to { transform: translateX(100%); } }
+
+  /* ---------- empty / end ---------- */
+  .empty {
+    border: 1px dashed var(--n-4); border-radius: var(--r-lg);
+    padding: 64px 24px; text-align: center; background: var(--n-2);
+  }
+  .empty h3 { margin: 16px 0 6px; font-size: 20px; }
+  .empty p { margin: 0 0 20px; color: var(--text-2); font-size: 13px; }
+  .btn-primary {
+    height: 44px; padding: 0 22px; border: 0; border-radius: var(--r-sm);
+    background: var(--a-500); color: #fff; font-size: 14px; font-weight: 600; cursor: pointer;
+    transition: background var(--dur-fast);
+  }
+  .btn-primary:hover { background: var(--a-400); }
+  .end { display: flex; align-items: center; gap: 14px; justify-content: center; color: var(--text-3); font-size: 12px; margin-top: 32px; }
+  .end::before, .end::after { content: ""; width: 56px; height: 1px; background: var(--line); }
+
+  /* ---------- login ---------- */
+  .login-wrap { display: grid; grid-template-columns: 1.1fr 1fr; gap: 48px; align-items: center; min-height: calc(100vh - 64px); padding: 40px 0; }
+  .stage {
+    border-radius: var(--r-lg); min-height: 520px; padding: 48px;
+    position: relative; overflow: hidden; border: 1px solid var(--line);
+    background: linear-gradient(180deg, #17181d 0%, #0b0b0d 62%, #000 100%);
+    display: flex; flex-direction: column; justify-content: flex-end;
+  }
+  .stage > * { position: relative; z-index: 2; }
+  .stage .brand { position: absolute; top: 40px; left: 48px; }
+  .stage h1 { font-size: 32px; line-height: 1.2; letter-spacing: -0.02em; margin: 0 0 12px; max-width: 16em; }
+  .stage p.lead { color: var(--text-2); font-size: 14px; margin: 0 0 28px; max-width: 30em; }
+  .stage ul { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 12px; }
+  .stage li { display: flex; gap: 10px; align-items: flex-start; font-size: 13px; color: var(--text-2); }
+  .stage li b { color: var(--text-1); font-weight: 600; }
+  .dot { width: 6px; height: 6px; border-radius: 50%; background: rgba(255,255,255,0.16); margin-top: 8px; flex: none; }
+  .login-card {
+    width: 100%; max-width: var(--w-narrow); background: var(--n-2);
+    border: 1px solid var(--line); border-radius: var(--r-lg); padding: 32px;
+    justify-self: center;
+  }
+  .login-card h2 { margin: 0 0 4px; font-size: 24px; letter-spacing: -0.01em; }
+  .login-card .sub { margin: 0 0 24px; color: var(--text-3); font-size: 13px; }
+  .seg { display: flex; gap: 4px; background: var(--n-3); border: 1px solid var(--line); padding: 4px; border-radius: var(--r-sm); margin-bottom: 22px; }
+  .seg button { flex: 1; height: 34px; border: 0; border-radius: 6px; background: transparent; color: var(--text-2); font-size: 13px; cursor: pointer; }
+  .seg button[aria-selected="true"] { background: var(--n-4); color: var(--text-1); font-weight: 600; }
+  .field { display: flex; flex-direction: column; gap: 7px; margin-bottom: 16px; }
+  .field label { font-size: 12px; color: var(--text-2); }
+  .field input {
+    height: 46px; border-radius: var(--r-sm); border: 1px solid var(--line);
+    background: var(--n-3); color: var(--text-1); padding: 0 14px; font-size: 14px;
+  }
+  .field input::placeholder { color: var(--text-3); }
+  .field input:focus { border-color: rgba(255,255,255,0.16); }
+  .form-error {
+    display: flex; gap: 8px; align-items: center; border-left: 3px solid var(--error);
+    background: rgba(248,113,113,0.1); color: #ffb4b4; font-size: 12px;
+    padding: 10px 12px; border-radius: 6px; margin-bottom: 14px;
+  }
+  .login-card .btn-primary { width: 100%; height: 46px; margin-top: 4px; }
+  .login-foot { margin-top: 18px; display: flex; justify-content: space-between; color: var(--text-3); font-size: 12px; }
+  .login-foot a { color: var(--text-2); border-bottom: 1px dashed var(--n-4); cursor: pointer; }
+  .demo-row { display: flex; gap: 10px; margin-top: 14px; }
+  .demo-row button { background: none; border: 0; color: var(--text-3); font-size: 12px; cursor: pointer; text-decoration: underline; }
+  .demo-row button:hover { color: var(--text-2); }
+
+  /* ---------- toast ---------- */
+  .toast {
+    position: fixed; left: 50%; bottom: 32px; transform: translate(-50%, 16px);
+    background: var(--n-3); border: 1px solid rgba(255,255,255,0.14);
+    border-radius: var(--r-sm); padding: 12px 18px; font-size: 13px;
+    box-shadow: var(--shadow-md); opacity: 0; pointer-events: none;
+    transition: opacity var(--dur-base), transform var(--dur-base); z-index: 40;
+  }
+  .toast.show { opacity: 1; transform: translate(-50%, 0); }
+  .toast.ok { border-color: rgba(52,211,153,0.45); }
+  .toast.ok::before { content: "✓"; color: var(--success); margin-right: 8px; }
+
+  /* ---------- responsive ---------- */
+  @media (max-width: 1279px) { .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  @media (max-width: 1023px) {
+    .search { display: none; }
+    .login-wrap { grid-template-columns: 1fr; gap: 28px; }
+    .stage { min-height: 320px; padding: 96px 28px 28px; }
+    .stage .brand { top: 28px; left: 28px; }
+    .stage h1 { font-size: 24px; }
+    .stage p.lead, .stage ul { display: none; }
+  }
+  @media (max-width: 640px) {
+    .grid { grid-template-columns: 1fr; gap: 16px; }
+    .shell { padding: 18px 14px 72px; }
+    .topbar-inner { height: 56px; padding: 0 14px; gap: 10px; }
+    .brand-name { font-size: 16px; }
+    .brand-mark { width: 24px; height: 24px; }
+    .icon-btn { width: 36px; height: 36px; }
+    .scene-row { gap: 10px; margin-bottom: 16px; }
+    .scene-tabs { width: 100%; overflow-x: auto; scrollbar-width: none; }
+    .scene-tabs::-webkit-scrollbar { display: none; }
+    .scene { flex: none; }
+    .scene-hint, .state-switch { display: none; }
+    .card-body { padding: 12px 12px 10px; }
+    .card-title { font-size: 15px; line-height: 1.45; }
+    .act { height: 44px; }
+    .login-card { padding: 22px; }
+    .stage { display: none; }
+    .login-wrap { min-height: auto; padding: 12px 0; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
+  }
+</style>
+</head>
+<body data-view="feed">
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round">
+          <path d="M2 12h4l3-8 4 16 3-8h6" />
+        </svg>
+      </span>
+      <span class="brand-name">Pulse<em>Feed</em></span>
+    </div>
+    <div class="search" role="search" aria-label="搜索">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+        <circle cx="11" cy="11" r="7" /><path d="m20 20-4-4" />
+      </svg>
+      搜索创作者或内容
+    </div>
+    <button class="icon-btn" aria-label="消息通知">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+        <path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9" /><path d="M13.7 21a2 2 0 0 1-3.4 0" />
+      </svg>
+    </button>
+    <button class="btn-ghost" id="to-login">登录</button>
+    <span class="avatar" aria-label="当前用户：评审访客">评</span>
+  </div>
+</header>
+
+<main class="shell">
+  <!-- Feed -->
+  <section id="feed-view" aria-labelledby="feed-title">
+    <h1 id="feed-title" class="hidden">Feed</h1>
+    <div class="scene-row">
+      <div class="scene-tabs" role="tablist" aria-label="内容场景">
+        <button class="scene" role="tab" aria-selected="true" data-scene="latest">最新</button>
+        <button class="scene" role="tab" aria-selected="false" data-scene="hot">热门</button>
+        <button class="scene" role="tab" aria-selected="false" data-scene="following">关注</button>
+        <button class="scene" role="tab" aria-selected="false" data-scene="for-you">推荐</button>
+      </div>
+      <span class="scene-hint">按发布时间倒序 · 下拉刷新</span>
+      <div class="state-switch" aria-label="原型状态演示">
+        状态：
+        <button class="active" data-state="content">内容</button>
+        <button data-state="loading">加载中</button>
+        <button data-state="empty">空态</button>
+      </div>
+    </div>
+
+    <div class="grid" id="grid">
+      <article class="card">
+        <div class="cover">
+          <div class="cover-art" style="--art: linear-gradient(140deg,#1c1d22 0%,#2e2a2d 100%)"></div>
+          <span class="cover-initial" aria-hidden="true">雨</span>
+          <span class="chip-scene">最新</span>
+          <span class="chip-duration num">00:42</span>
+          <div class="play" aria-hidden="true">
+            <span><svg width="20" height="20" viewBox="0 0 24 24" fill="#fff"><path d="M8 5v14l11-7z"/></svg></span>
+          </div>
+        </div>
+        <div class="card-body">
+          <h3 class="card-title">雨夜霓虹：在城市天桥上等一场光</h3>
+          <div class="creator">
+            <span class="avatar" aria-hidden="true">舟</span>
+            <span class="creator-name">林一舟</span>
+            <span class="creator-time">2 小时前</span>
+          </div>
+          <div class="actions">
+            <button class="act" aria-pressed="false" data-act="like">
+              <svg class="act-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M12 21s-7-4.6-9.3-8.1A5 5 0 0 1 12 6a5 5 0 0 1 9.3 6.9C18.3 16.4 12 21 12 21z"/></svg>
+              <span class="act-count num">3,241</span>
+            </button>
+            <button class="act" aria-pressed="false" data-act="save">
+              <svg class="act-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M6 4h12v17l-6-4-6 4z"/></svg>
+              <span class="act-count num">892</span>
+            </button>
+            <button class="act" aria-pressed="false" data-act="comment">
+              <svg class="act-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M21 12a8 8 0 0 1-8 8H7l-4 3V12a8 8 0 0 1 8-8h2a8 8 0 0 1 8 8z"/></svg>
+              <span class="act-count num">128</span>
+            </button>
+            <button class="act" aria-label="播放次数">
+              <svg class="act-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M5 4v16l15-8z"/></svg>
+              <span class="act-count play-count num">12.8w</span>
+            </button>
+          </div>
+        </div>
+      </article>
+
+      <article class="card">
+        <div class="cover">
+          <div class="cover-art" style="--art: linear-gradient(140deg,#211c16 0%,#33281c 100%)"></div>
+          <span class="cover-initial" aria-hidden="true">面</span>
+          <span class="chip-duration num">01:18</span>
+          <div class="play" aria-hidden="true">
+            <span><svg width="20" height="20" viewBox="0 0 24 24" fill="#fff"><path d="M8 5v14l11-7z"/></svg></span>
+          </div>
+        </div>
+        <div class="card-body">
+          <h3 class="card-title">凌晨两点的豚骨拉面，汤底熬了十二个小时</h3>
+          <div class="creator">
+            <span class="avatar" aria-hidden="true">岚</span>
+            <span class="creator-name">阿岚的深夜食堂</span>
+            <span class="creator-time">5 小时前</span>
+          </div>
+          <div class="actions">
+            <button class="act" aria-pressed="true" data-act="like">
+              <svg class="act-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M12 21s-7-4.6-9.3-8.1A5 5 0 0 1 12 6a5 5 0 0 1 9.3 6.9C18.3 16.4 12 21 12 21z"/></svg>
+              <span class="act-count num">1,904</span>
+            </button>
+            <button class="act" aria-pressed="true" data-act="save">
+              <svg class="act-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M6 4h12v17l-6-4-6 4z"/></svg>
+              <span class="act-count num">576</span>
+            </button>
+            <button class="act" aria-pressed="false" data-act="comment">
+              <svg class="act-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M21 12a8 8 0 0 1-8 8H7l-4 3V12a8 8 0 0 1 8-8h2a8 8 0 0 1 8 8z"/></svg>
+              <span class="act-count num">86</span>
+            </button>
+            <button class="act" aria-label="播放次数">
+              <svg class="act-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M5 4v16l15-8z"/></svg>
+              <span class="act-count play-count num">4.6w</span>
+            </button>
+          </div>
+        </div>
+      </article>
+
+      <article class="card">
+        <div class="cover">
+          <div class="cover-art" style="--art: linear-gradient(140deg,#171f22 0%,#1f3034 100%)"></div>
+          <span class="cover-initial" aria-hidden="true">云</span>
+          <span class="chip-scene">热门</span>
+          <span class="chip-duration num">00:56</span>
+          <div class="play" aria-hidden="true">
+            <span><svg width="20" height="20" viewBox="0 0 24 24" fill="#fff"><path d="M8 5v14l11-7z"/></svg></span>
+          </div>
+        </div>
+        <div class="card-body">
+          <h3 class="card-title">海拔 3200 米的日出，帐篷外全是云海</h3>
+          <div class="creator">
+            <span class="avatar" aria-hidden="true">周</span>
+            <span class="creator-name">山野小周</span>
+            <span class="creator-time">昨天</span>
+          </div>
+          <div class="actions">
+            <button class="act" aria-pressed="false" data-act="like">
+              <svg class="act-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M12 21s-7-4.6-9.3-8.1A5 5 0 0 1 12 6a5 5 0 0 1 9.3 6.9C18.3 16.4 12 21 12 21z"/></svg>
+              <span class="act-count num">2,118</span>
+            </button>
+            <button class="act" aria-pressed="false" data-act="save">
+              <svg class="act-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M6 4h12v17l-6-4-6 4z"/></svg>
+              <span class="act-count num">1,043</span>
+            </button>
+            <button class="act" aria-pressed="false" data-act="comment">
+              <svg class="act-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M21 12a8 8 0 0 1-8 8H7l-4 3V12a8 8 0 0 1 8-8h2a8 8 0 0 1 8 8z"/></svg>
+              <span class="act-count num">203</span>
+            </button>
+            <button class="act" aria-label="播放次数">
+              <svg class="act-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M5 4v16l15-8z"/></svg>
+              <span class="act-count play-count num">9.1w</span>
+            </button>
+          </div>
+        </div>
+      </article>
+
+      <article class="card">
+        <div class="cover">
+          <div class="cover-art" style="--art: linear-gradient(140deg,#161f19 0%,#233028 100%)"></div>
+          <span class="cover-initial" aria-hidden="true">冲</span>
+          <span class="chip-scene">推荐</span>
+          <span class="chip-duration num">00:38</span>
+          <div class="play" aria-hidden="true">
+            <span><svg width="20" height="20" viewBox="0 0 24 24" fill="#fff"><path d="M8 5v14l11-7z"/></svg></span>
+          </div>
+        </div>
+        <div class="card-body">
+          <h3 class="card-title">手冲咖啡：水温 92℃ 的三个理由</h3>
+          <div class="creator">
+            <span class="avatar" aria-hidden="true">豆</span>
+            <span class="creator-name">豆子先生</span>
+            <span class="creator-time">2 天前</span>
+          </div>
+          <div class="actions">
+            <button class="act" aria-pressed="false" data-act="like">
+              <svg class="act-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M12 21s-7-4.6-9.3-8.1A5 5 0 0 1 12 6a5 5 0 0 1 9.3 6.9C18.3 16.4 12 21 12 21z"/></svg>
+              <span class="act-count num">731</span>
+            </button>
+            <button class="act" aria-pressed="false" data-act="save">
+              <svg class="act-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M6 4h12v17l-6-4-6 4z"/></svg>
+              <span class="act-count num">265</span>
+            </button>
+            <button class="act" aria-pressed="false" data-act="comment">
+              <svg class="act-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M21 12a8 8 0 0 1-8 8H7l-4 3V12a8 8 0 0 1 8-8h2a8 8 0 0 1 8 8z"/></svg>
+              <span class="act-count num">41</span>
+            </button>
+            <button class="act" aria-label="播放次数">
+              <svg class="act-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M5 4v16l15-8z"/></svg>
+              <span class="act-count play-count num">2.2w</span>
+            </button>
+          </div>
+        </div>
+      </article>
+    </div>
+
+    <div class="grid hidden" id="skeleton" aria-hidden="true">
+      <div class="sk-card"><div class="sk-cover shimmer"></div><div class="sk-line shimmer"></div><div class="sk-line short shimmer"></div><div class="sk-actions shimmer"></div></div>
+      <div class="sk-card"><div class="sk-cover shimmer"></div><div class="sk-line shimmer"></div><div class="sk-line short shimmer"></div><div class="sk-actions shimmer"></div></div>
+      <div class="sk-card"><div class="sk-cover shimmer"></div><div class="sk-line shimmer"></div><div class="sk-line short shimmer"></div><div class="sk-actions shimmer"></div></div>
+      <div class="sk-card"><div class="sk-cover shimmer"></div><div class="sk-line shimmer"></div><div class="sk-line short shimmer"></div><div class="sk-actions shimmer"></div></div>
+    </div>
+
+    <div class="empty hidden" id="empty">
+      <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.45)" stroke-width="1.6" aria-hidden="true">
+        <rect x="3" y="5" width="18" height="14" rx="2" /><path d="m3 9 5 4 4-2 4 3 5-4" />
+      </svg>
+      <h3>这个场景还没有内容</h3>
+      <p>关注更多创作者，或者发布你的第一条 clip。</p>
+      <button class="btn-primary">去发布</button>
+    </div>
+
+    <div class="end" id="end">已经到底了</div>
+  </section>
+
+  <!-- 登录 -->
+  <section id="login-view" class="hidden" aria-labelledby="login-title">
+    <div class="login-wrap">
+      <div class="stage">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round"><path d="M2 12h4l3-8 4 16 3-8h6" /></svg>
+          </span>
+          <span class="brand-name">Pulse<em>Feed</em></span>
+        </div>
+        <h1>把值得看的那一小段，<br />留在时间线上。</h1>
+        <p class="lead">四条内容场景、创作者关注、互动与播放偏好，一个页面完成浏览与发布。</p>
+        <ul>
+          <li><span class="dot"></span><span><b>四场景切换</b>：最新、热门、关注、推荐各自独立游标。</span></li>
+          <li><span class="dot"></span><span><b>轻量发布</b>：拖入视频，自动取封面，三步完成。</span></li>
+          <li><span class="dot"></span><span><b>播放偏好</b>：预加载条数与采样率按账号保存。</span></li>
+        </ul>
+      </div>
+
+      <div class="login-card">
+        <h2 id="login-title">欢迎回来</h2>
+        <p class="sub">登录后可以点赞、收藏、评论与发布。</p>
+        <div class="seg" role="tablist" aria-label="登录或注册">
+          <button role="tab" aria-selected="true" data-auth="login">登录</button>
+          <button role="tab" aria-selected="false" data-auth="register">注册</button>
+        </div>
+        <form id="login-form" novalidate>
+          <div class="form-error hidden" id="login-error">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v6M12 16h.01"/></svg>
+            账号或密码不正确，请重试。
+          </div>
+          <div class="field">
+            <label for="account">账号</label>
+            <input id="account" name="account" autocomplete="username" placeholder="邮箱或用户名" />
+          </div>
+          <div class="field">
+            <label for="password">密码</label>
+            <input id="password" name="password" type="password" autocomplete="current-password" placeholder="至少 8 位" />
+          </div>
+          <button class="btn-primary" type="submit" id="login-submit">登录</button>
+        </form>
+        <div class="login-foot">
+          <span>还没有账号？<a data-auth="register">立即注册</a></span>
+          <a>忘记密码</a>
+        </div>
+        <div class="demo-row">
+          <button id="demo-error">演示错误态</button>
+          <button id="to-feed">返回 Feed（跳过登录）</button>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<script>
+  const $ = (s, root = document) => root.querySelector(s);
+  const $$ = (s, root = document) => Array.from(root.querySelectorAll(s));
+  const toast = (text) => {
+    const el = $('#toast');
+    el.textContent = text;
+    el.classList.add('show', 'ok');
+    clearTimeout(el._t);
+    el._t = setTimeout(() => el.classList.remove('show'), 2000);
+  };
+
+  // 视图切换
+  function setView(view) {
+    document.body.dataset.view = view;
+    $('#feed-view').classList.toggle('hidden', view !== 'feed');
+    $('#login-view').classList.toggle('hidden', view !== 'login');
+    $('.topbar').classList.toggle('hidden', view === 'login');
+    window.scrollTo({ top: 0 });
+  }
+  $('#to-login').addEventListener('click', () => setView('login'));
+  $('#to-feed').addEventListener('click', () => setView('feed'));
+
+  // 场景切换
+  $$('.scene').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      $$('.scene').forEach((b) => b.setAttribute('aria-selected', String(b === btn)));
+      toast(`已切换到「${btn.textContent}」`);
+    });
+  });
+
+  // 状态演示
+  $$('.state-switch button').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      $$('.state-switch button').forEach((b) => b.classList.toggle('active', b === btn));
+      const state = btn.dataset.state;
+      $('#grid').classList.toggle('hidden', state !== 'content');
+      $('#skeleton').classList.toggle('hidden', state !== 'loading');
+      $('#empty').classList.toggle('hidden', state !== 'empty');
+      $('#end').classList.toggle('hidden', state !== 'content');
+    });
+  });
+
+  // 操作栏
+  $$('.act[data-act]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const on = btn.getAttribute('aria-pressed') === 'true';
+      btn.setAttribute('aria-pressed', String(!on));
+      const count = btn.querySelector('.act-count');
+      if (count) {
+        const raw = count.textContent.replace(/,/g, '');
+        const n = Number(raw);
+        if (Number.isFinite(n)) count.textContent = (n + (on ? -1 : 1)).toLocaleString('en-US');
+      }
+      const map = { like: ['已点赞', '已取消点赞'], save: ['已收藏', '已取消收藏'] };
+      if (map[btn.dataset.act]) toast(map[btn.dataset.act][on ? 1 : 0]);
+    });
+  });
+
+  // 登录分段 + 提交
+  $$('.seg [data-auth], .login-foot [data-auth]').forEach((el) => {
+    el.addEventListener('click', (e) => {
+      e.preventDefault();
+      $$('.seg [data-auth]').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.auth === el.dataset.auth)));
+      $('#login-submit').textContent = el.dataset.auth === 'login' ? '登录' : '注册并登录';
+      $('.seg [data-auth="' + el.dataset.auth + '"]').focus();
+    });
+  });
+
+  $('#demo-error').addEventListener('click', () => {
+    $('#login-error').classList.remove('hidden');
+    $('#account').setAttribute('aria-invalid', 'true');
+    $('#password').setAttribute('aria-invalid', 'true');
+    $('#account').focus();
+  });
+
+  $('#login-form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const btn = $('#login-submit');
+    const label = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = '登录中…';
+    setTimeout(() => {
+      btn.disabled = false;
+      btn.textContent = label;
+      $('#login-error').classList.add('hidden');
+      $('#account').removeAttribute('aria-invalid');
+      $('#password').removeAttribute('aria-invalid');
+      setView('feed');
+      toast('登录成功（原型演示）');
+    }, 800);
+  });
+</script>
+</body>
+</html>

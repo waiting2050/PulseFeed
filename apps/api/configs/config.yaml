@@ -1,0 +1,33 @@
+port: 8090
+
+jwt:
+  secret: placeholder-secret
+  access_ttl: 15m
+
+internal:
+  token: placeholder-internal-token
+
+database:
+  host: 127.0.0.1
+  port: 3306
+  user: root
+  password: "123456"
+  name: PulseFeed
+
+redis:
+  addr: 127.0.0.1:6379
+  password: ""
+  db: 0
+
+rabbitmq:
+  url: amqp://guest:guest@127.0.0.1:5672/
+  clip_exchange: pulsefeed.clip
+  clip_published_queue: pulsefeed.clip.published
+  clip_published_routing: clip.published
+  clip_embedding_queue: pulsefeed.clip.embedding
+  interaction_exchange: pulsefeed.interaction
+  action_changed_queue: pulsefeed.interaction.action_changed
+  action_changed_routing: interaction.action_changed
+  impression_exchange: pulsefeed.impression
+  play_event_recorded_queue: pulsefeed.impression.play_recorded
+  play_event_recorded_routing: impression.play_recorded
