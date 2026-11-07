@@ -40,6 +40,7 @@ func (h *Handler) Publish(c *gin.Context) {
 		c.Request.Context(),
 		creatorID,
 		req.Title,
+		req.Description,
 		req.VideoURL,
 		req.CoverURL,
 		req.DurationMS,
@@ -140,6 +141,7 @@ func toClipResponse(clip *domclip.Clip) clipResponse {
 		ClipID:      clip.ID,
 		CreatorID:   clip.CreatorID,
 		Title:       clip.Title,
+		Description: clip.Description,
 		VideoURL:    clip.VideoURL,
 		CoverURL:    clip.CoverURL,
 		DurationMS:  clip.DurationMS,
@@ -151,6 +153,7 @@ func toClipResponse(clip *domclip.Clip) clipResponse {
 func mapError(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, domclip.ErrInvalidTitle),
+		errors.Is(err, domclip.ErrInvalidDescription),
 		errors.Is(err, domclip.ErrInvalidVideoURL),
 		errors.Is(err, domclip.ErrInvalidIdempotencyKey),
 		errors.Is(err, domclip.ErrInvalidCursor),

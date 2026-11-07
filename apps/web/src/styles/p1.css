@@ -1315,6 +1315,51 @@ button:disabled {
   }
 }
 
+/* ---------- 简介输入与展示 ---------- */
+.pf-field textarea {
+  min-height: 96px;
+  padding: var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+  color: var(--text-1);
+  font: inherit;
+  font-size: var(--fs-body);
+  line-height: var(--lh-body);
+  resize: vertical;
+}
+
+.pf-field textarea::placeholder {
+  color: var(--text-3);
+}
+
+.pf-field textarea:focus {
+  border-color: var(--line-strong);
+  outline: none;
+}
+
+.pf-card-desc {
+  margin: var(--space-2) 0 0;
+  color: var(--text-2);
+  font-size: var(--fs-caption);
+  line-height: var(--lh-body);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.pf-sheet-desc {
+  margin: 0 0 var(--space-3);
+  color: var(--text-2);
+  font-size: var(--fs-caption);
+  line-height: var(--lh-body);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 7.5em;
+  overflow-y: auto;
+}
+
 /* 减少动态偏好：关闭位移与旋转类动画，仅保留颜色/明暗的状态切换。 */
 @media (prefers-reduced-motion: reduce) {
   .pf-cover-play,

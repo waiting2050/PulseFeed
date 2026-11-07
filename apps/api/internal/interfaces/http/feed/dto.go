@@ -24,6 +24,7 @@ type feedEntryResponse struct {
 	CreatorID    int64               `json:"creator_id"`
 	Creator      feedCreatorResponse `json:"creator"`
 	Title        string              `json:"title"`
+	Description  string              `json:"description"`
 	VideoURL     string              `json:"video_url"`
 	CoverURL     string              `json:"cover_url"`
 	DurationMS   int64               `json:"duration_ms"`

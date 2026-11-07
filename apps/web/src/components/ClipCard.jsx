@@ -153,6 +153,7 @@ export default function ClipCard({
             {title}
           </button>
         </h3>
+        {item.description ? <p className="pf-card-desc">{item.description}</p> : null}
         <div className="pf-creator">
           <Avatar name={creatorName} src={creator && creator.avatar_url} size="sm" />
           {onCreator ? (

@@ -141,7 +141,7 @@ func (p *clipFakePublisher) PublishClipEmbedding(_ context.Context, event appcli
 
 // clipFakeSeed 直接写入一条可指定发布时间与状态的 clip，供列表/详情用例构造数据。
 func clipFakeSeed(repo *clipFakeRepo, id, creatorID int64, title, mediaURL string, publishedAt time.Time, status int) {
-	repo.clips[id] = domclip.RestoreClip(id, creatorID, title, mediaURL, "", 0, status, fmt.Sprintf("seed-%d", id), publishedAt)
+	repo.clips[id] = domclip.RestoreClip(id, creatorID, title, "", mediaURL, "", 0, status, fmt.Sprintf("seed-%d", id), publishedAt)
 	if id > repo.nextID {
 		repo.nextID = id
 	}
@@ -154,7 +154,7 @@ func TestClipCreatePublishedPublishesEvents(t *testing.T) {
 	publisher := &clipFakePublisher{}
 	svc := appclip.New(repo, appclip.WithPublisher(publisher))
 
-	clip, err := svc.CreatePublished(ctx, 7, "  新 clip  ", " /media/1.mp4 ", " /cover/1.png ", 0, "key-1")
+	clip, err := svc.CreatePublished(ctx, 7, "  新 clip  ", "  首行简介 🎬\n第二行  ", " /media/1.mp4 ", " /cover/1.png ", 0, "key-1")
 	if err != nil {
 		t.Fatalf("合法发布不应失败: %v", err)
 	}
@@ -163,6 +163,9 @@ func TestClipCreatePublishedPublishesEvents(t *testing.T) {
 	}
 	if clip.Title != "新 clip" || clip.VideoURL != "/media/1.mp4" || clip.CoverURL != "/cover/1.png" {
 		t.Fatalf("发布字段未去空白: %+v", clip)
+	}
+	if clip.Description != "首行简介 🎬\n第二行" {
+		t.Fatalf("简介未去首尾空白或内容丢失: %q", clip.Description)
 	}
 	if clip.Status != domclip.StatusPublished || clip.IdempotencyKey != "key-1" {
 		t.Fatalf("发布状态/幂等键不正确: %+v", clip)
@@ -194,11 +197,11 @@ func TestClipCreatePublishedIsIdempotent(t *testing.T) {
 	publisher := &clipFakePublisher{}
 	svc := appclip.New(repo, appclip.WithPublisher(publisher))
 
-	first, err := svc.CreatePublished(ctx, 7, "首个标题", "/media/1.mp4", "", 0, "same-key")
+	first, err := svc.CreatePublished(ctx, 7, "首个标题", "", "/media/1.mp4", "", 0, "same-key")
 	if err != nil {
 		t.Fatalf("首次发布不应失败: %v", err)
 	}
-	second, err := svc.CreatePublished(ctx, 7, "另一个标题", "/media/2.mp4", "", 0, "same-key")
+	second, err := svc.CreatePublished(ctx, 7, "另一个标题", "", "/media/2.mp4", "", 0, "same-key")
 	if err != nil {
 		t.Fatalf("重复发布不应失败: %v", err)
 	}
@@ -240,7 +243,7 @@ func TestClipCreatePublishedRejectsInvalidFields(t *testing.T) {
 			publisher := &clipFakePublisher{}
 			svc := appclip.New(repo, appclip.WithPublisher(publisher))
 
-			if _, err := svc.CreatePublished(ctx, 7, tt.title, tt.mediaURL, "", 0, tt.key); !errors.Is(err, tt.wantError) {
+			if _, err := svc.CreatePublished(ctx, 7, tt.title, "", tt.mediaURL, "", 0, tt.key); !errors.Is(err, tt.wantError) {
 				t.Fatalf("期望错误 %v，实际 %v", tt.wantError, err)
 			}
 			if repo.createCalls != 0 {
@@ -261,7 +264,7 @@ func TestClipCreatePublishedIgnoresPublisherFailure(t *testing.T) {
 	publisher := &clipFakePublisher{publishedErr: brokerErr, embeddingErr: brokerErr}
 	svc := appclip.New(repo, appclip.WithPublisher(publisher))
 
-	clip, err := svc.CreatePublished(ctx, 7, "标题", "/media/1.mp4", "", 0, "key-1")
+	clip, err := svc.CreatePublished(ctx, 7, "标题", "", "/media/1.mp4", "", 0, "key-1")
 	if err != nil {
 		t.Fatalf("事件投递失败不应阻塞发布: %v", err)
 	}
@@ -295,6 +298,39 @@ func TestClipGetRespectsVisibility(t *testing.T) {
 		if _, err := svc.Get(ctx, id); !errors.Is(err, domclip.ErrClipNotFound) {
 			t.Fatalf("clip %d 期望 ErrClipNotFound，实际 %v", id, err)
 		}
+	}
+}
+
+// TestClipDescriptionValidationAndLegacyRead 验证空简介可发布、超长简介写库前被拒，
+// 以及无简介的旧记录读取时按空串返回，不触发任何错误。
+func TestClipDescriptionValidationAndLegacyRead(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 2, 1, 12, 0, 0, 0, time.UTC)
+	repo := newClipFakeRepo()
+	svc := appclip.New(repo)
+
+	if _, err := svc.CreatePublished(ctx, 7, "标题", strings.Repeat("中", 1001), "/media/1.mp4", "", 0, "too-long"); !errors.Is(err, domclip.ErrInvalidDescription) {
+		t.Fatalf("超长简介期望 ErrInvalidDescription，实际 %v", err)
+	}
+	if repo.createCalls != 0 {
+		t.Fatalf("超长简介不应写库, create_calls=%d", repo.createCalls)
+	}
+
+	clip, err := svc.CreatePublished(ctx, 7, "标题", "", "/media/2.mp4", "", 0, "empty-desc")
+	if err != nil {
+		t.Fatalf("空简介发布不应失败: %v", err)
+	}
+	if clip.Description != "" {
+		t.Fatalf("空简介应为空串, 实际 %q", clip.Description)
+	}
+
+	clipFakeSeed(repo, 9, 7, "旧内容", "/media/9.mp4", base, domclip.StatusPublished)
+	legacy, err := svc.Get(ctx, 9)
+	if err != nil {
+		t.Fatalf("无简介旧记录读取不应失败: %v", err)
+	}
+	if legacy.Description != "" {
+		t.Fatalf("无简介旧记录应返回空串, 实际 %q", legacy.Description)
 	}
 }
 

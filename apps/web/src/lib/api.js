@@ -162,12 +162,14 @@ export const api = {
     return upload('/uploads', form)
   },
 
-  // 沿用既有发布契约：先上传素材，再提交 title / video_url / cover_url；duration_ms 由上传探测回传。
-  publishClip: ({ title, fileUrl, coverUrl, durationMs }) =>
+  // 沿用既有发布契约：先上传素材，再提交 title / description / video_url / cover_url；
+  // description 可选，最长 1000 字符；duration_ms 由上传探测回传。
+  publishClip: ({ title, description, fileUrl, coverUrl, durationMs }) =>
     request('/clips', {
       method: 'POST',
       body: {
         title,
+        description: description || '',
         video_url: fileUrl,
         cover_url: coverUrl || '',
         duration_ms: Number(durationMs) || 0,

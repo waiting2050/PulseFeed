@@ -133,6 +133,7 @@ export default function DetailSheet({ item, onClose, onLike, onSave, onCommentAd
             <h2 id="pf-sheet-title" className="pf-sheet-title">
               {title}
             </h2>
+            {item.description ? <p className="pf-sheet-desc">{item.description}</p> : null}
             <div className="pf-creator">
               <Avatar name={creatorName} src={creator && creator.avatar_url} size="sm" />
               {onCreator ? (

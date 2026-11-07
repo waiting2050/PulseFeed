@@ -83,6 +83,7 @@ type FeedEntry struct {
 	ClipID      int64
 	CreatorID   int64
 	Title       string
+	Description string
 	VideoURL    string
 	CoverURL    string
 	DurationMS  int64

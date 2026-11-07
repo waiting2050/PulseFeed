@@ -17,6 +17,8 @@ const (
 
 	// 标题长度上限（按字符/rune 计，去空白后判定；列宽 128 字符）。
 	titleMaxLen = 128
+	// 简介长度上限（按字符/rune 计，去首尾空白后判定；列为 TEXT，由领域层统一约束）。
+	descriptionMaxLen = 1000
 
 	// MaxListLimit 是创作者列表单页条数上限。
 	MaxListLimit = 50
@@ -24,12 +26,13 @@ const (
 	DefaultListLimit = 20
 )
 
-// Clip 是内容聚合根，记录创作者、标题与媒体地址；发布即可见，删除为状态置位。
+// Clip 是内容聚合根，记录创作者、标题、简介与媒体地址；发布即可见，删除为状态置位。
 // DurationMS 是媒体时长（毫秒），探测不可用时为 0，读取侧按“无时长”处理。
 type Clip struct {
 	ID             int64
 	CreatorID      int64
 	Title          string
+	Description    string
 	VideoURL       string
 	CoverURL       string
 	DurationMS     int64
@@ -38,12 +41,16 @@ type Clip struct {
 	PublishedAt    time.Time
 }
 
-// NewClip 创建并发布一条 clip：标题去空白非空且限长，视频地址与幂等键非空；
-// 时长由上传探测提供，负值按 0 处理，避免脏数据进入展示层。
-func NewClip(creatorID int64, title, videoURL, coverURL string, durationMS int64, idempotencyKey string) (*Clip, error) {
+// NewClip 创建并发布一条 clip：标题去空白非空且限长，简介可选但限长，
+// 视频地址与幂等键非空；时长由上传探测提供，负值按 0 处理，避免脏数据进入展示层。
+func NewClip(creatorID int64, title, description, videoURL, coverURL string, durationMS int64, idempotencyKey string) (*Clip, error) {
 	title = strings.TrimSpace(title)
 	if title == "" || utf8.RuneCountInString(title) > titleMaxLen {
 		return nil, ErrInvalidTitle
+	}
+	description = strings.TrimSpace(description)
+	if utf8.RuneCountInString(description) > descriptionMaxLen {
+		return nil, ErrInvalidDescription
 	}
 	videoURL = strings.TrimSpace(videoURL)
 	if videoURL == "" {
@@ -59,6 +66,7 @@ func NewClip(creatorID int64, title, videoURL, coverURL string, durationMS int64
 	return &Clip{
 		CreatorID:      creatorID,
 		Title:          title,
+		Description:    description,
 		VideoURL:       videoURL,
 		CoverURL:       strings.TrimSpace(coverURL),
 		DurationMS:     durationMS,
@@ -69,11 +77,12 @@ func NewClip(creatorID int64, title, videoURL, coverURL string, durationMS int64
 }
 
 // RestoreClip 从持久化记录恢复实体，读取路径不再执行发布校验。
-func RestoreClip(id, creatorID int64, title, videoURL, coverURL string, durationMS int64, status int, idempotencyKey string, publishedAt time.Time) *Clip {
+func RestoreClip(id, creatorID int64, title, description, videoURL, coverURL string, durationMS int64, status int, idempotencyKey string, publishedAt time.Time) *Clip {
 	return &Clip{
 		ID:             id,
 		CreatorID:      creatorID,
 		Title:          title,
+		Description:    description,
 		VideoURL:       videoURL,
 		CoverURL:       coverURL,
 		DurationMS:     durationMS,

@@ -80,8 +80,8 @@ func (h *Handler) serve(c *gin.Context, req *appfeed.FeedRequest) {
 // toFeedEntryResponse 将领域条目转换为传输层响应。
 func toFeedEntryResponse(entry *domfeed.FeedEntry) feedEntryResponse {
 	return feedEntryResponse{
-		ClipID:       entry.ClipID,
-		CreatorID:    entry.CreatorID,
+		ClipID:    entry.ClipID,
+		CreatorID: entry.CreatorID,
 		Creator: feedCreatorResponse{
 			UserID:    entry.Creator.UserID,
 			Nickname:  entry.Creator.Nickname,
@@ -89,6 +89,7 @@ func toFeedEntryResponse(entry *domfeed.FeedEntry) feedEntryResponse {
 			Following: entry.Creator.Following,
 		},
 		Title:        entry.Title,
+		Description:  entry.Description,
 		VideoURL:     entry.VideoURL,
 		CoverURL:     entry.CoverURL,
 		DurationMS:   entry.DurationMS,
