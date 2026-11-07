@@ -45,9 +45,9 @@ interfaces/http  →  application  →  domain
 1. `POST /api/clip-play-events` 按 `event_id` 幂等写入 `pf_play_events`，并 upsert 当日展示聚合；同一 `event_id` 不重复累加 `play_count`，与 `pf_playback_qos_reports` 相同的 `event_id` 也只计一次。
 2. 事件投递 `impression.play_recorded`；`PlayEventWorker`（D7 修正）消费后完成展示聚合补偿，避免“只发不收”。
 3. `POST /api/playback-qos-reports` 按 `event_id` 幂等写入 QoS 表；仅首次插入参与采样与延迟/卡顿/完播聚合。
-4. 播放配置按用户持久化 `preload_count`、`qos_sample_rate`；预加载接口返回最新 N 个可见 clip。
+4. 播放配置按用户持久化 `preload_count`、`qos_sample_rate`；`GET /api/preload-clips` 返回最新 N 个可见 `clip_id`，该接口面向客户端预取，当前前端未接入，只展示队列；后续接入需评估接口是否补充媒体地址。
 5. 前端播放器采集口径：会话开始（调用 `play()`）到首次 `playing` 记为 `latency_ms`（首帧等待）；播放中每次 `waiting` 计 1 次 `stall_count`；`client_info.duration_ms` 只累计实际播放墙钟时间（暂停与缓冲不计）；`ended` 或 `currentTime` 距视频总时长 ≤0.5s 记为完播。
-6. 每次播放会话生成一个 `event_id`（`crypto.randomUUID`，缺失时用时间戳随机串），会话内只上报一次；重复提交由后端 `event_id` 唯一键吸收，返回 `inserted=false`，不重复聚合。
+6. 每次播放会话生成一个 `event_id`（`crypto.randomUUID`，缺失时用时间戳随机串）；会话结算时按 `qos_sample_rate` 抽样一次，命中才上报，未命中不上报也不写上报标记；同一会话不重复随机。重复提交由后端 `event_id` 唯一键吸收，返回 `inserted=false`，不重复聚合。
 
 ### 2.4 Feed 读取
 
@@ -74,7 +74,7 @@ interfaces/http  →  application  →  domain
 
 - 写接口按 `Idempotency-Key` 去重；MQ 事件按 `event_id` 去重。
 - 互动计数只在状态变化时更新，重复点赞/收藏不累加。
-- 播放计数与 QoS 聚合均以首次插入为准；QoS 采样率只影响上报与否，不影响已落库数据。
+- 播放计数与 QoS 聚合均以首次插入为准；QoS 采样率由前端在会话结算时抽样，只影响是否上报，不影响已落库数据；后端不按该值过滤上报。
 - 字符计数统一按 Unicode 码点（Go `utf8.RuneCountInString`）：标题 128、昵称 64、评论 1000，去首尾空白后判定，与数据库列宽一致；前端 `maxLength` 与提示口径见 README「字符计数口径」。
 - GORM `AutoMigrate` 对重复列/索引错误做 3 次退避重试；Worker 等待 API 迁移完成后再启动，避免并发建表。
 

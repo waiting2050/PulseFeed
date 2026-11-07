@@ -31,7 +31,7 @@
 | 播放事件幂等 | `event_id` 唯一键拦住 `pf_play_events` 重复写入；同一 `event_id` 的 QoS 上报不会二次累加 `play_count`。 |
 | 向量召回 | 发布后由 Embedding Worker 生成 256 维 hash n-gram 向量；`for-you` 以读者互动内容的兴趣向量做余弦相似度加权。 |
 | 消息中心 | 站内消息列表、未读计数与全部已读；当前由关注事件产生 `followed` 消息。 |
-| 播放配置与 QoS | 预加载条数、QoS 采样率可读写；客户端上报首帧延迟、卡顿次数、实际播放时长与完播状态。 |
+| 播放配置与 QoS | 预加载条数、QoS 采样率可读写；客户端在会话结算时按采样率决定是否上报首帧延迟、卡顿次数、实际播放时长与完播状态。`GET /api/preload-clips` 是给客户端预取用的接口，当前前端尚未接入（见「当前进度」中的预加载条目）。 |
 | 监控指标 | API 与 Worker 使用独立 Prometheus Registry，指标前缀 `pulsefeed_`；`monitoring` profile 提供 Prometheus 与 Grafana。 |
 | 容器化 | Docker Compose 编排全栈；宿主端口可由 `.env` 覆盖。另附 K8s 清单，未做集群级实测。 |
 
@@ -211,7 +211,7 @@ docker compose up -d --build
 **播放**
 
 - `POST /api/clip-play-events`、`POST /api/playback-qos-reports`（登录）
-- `GET/PUT /api/playback-config`、`GET /api/preload-clips`（登录）
+- `GET/PUT /api/playback-config`、`GET /api/preload-clips`（登录；后者供客户端预取，当前前端未接入）
 
 **关注与消息**
 
@@ -282,7 +282,8 @@ go test -tags=integration ./test/integration -v -count=1
 - [x] 互动异步落库：点赞/收藏先写 Redis，再投递 `pulsefeed.interaction.action_changed`，由 Worker 的 `ActionWorker` 落库；Redis 或 MQ 不可用时回退同步落库。
 - [x] 播放事件幂等：`event_id` 唯一键拦住 `pf_play_events` 重复写入；与 `pf_playback_qos_reports` 同 `event_id` 时不再累加 `play_count`。集成测试覆盖并发去重。
 - [x] 前端：5 个页面（登录 / Feed / 发布 / 消息 / 播放配置）走独立路由；`/feed?scene=latest|hot|following|for-you` 直达场景，`/clip/:id?from=...` 为深链弹层，刷新、前进后退与直接粘贴 URL 均正常，关闭后回到来源列表；分页为「加载更多」按钮，不是无限滚动。
-- [x] 播放器：卡片与详情内联播放器支持播放 / 暂停 / 静音 / 进度 / 全屏，并按首帧延迟、卡顿次数、播放时长、完播状态上报 QoS（`event_id` 幂等）。前端运行时依赖仅新增 `react-router-dom`。
+- [x] 播放器：卡片与详情内联播放器支持播放 / 暂停 / 静音 / 进度 / 全屏，并按首帧延迟、卡顿次数、播放时长、完播状态上报 QoS（`event_id` 幂等）；上报前按 `qos_sample_rate` 做会话级抽样。
+- [ ] 预加载：`GET /api/preload-clips` 已按用户配置返回最新 N 条 `clip_id`，但前端未接入预取；配置页只展示队列，播放器仍按需加载 `video` 地址。后续接入需评估接口是否补充媒体地址。
 - [x] 容器化与监控：Compose 编排、宿主端口可由 `.env` 覆盖；Prometheus/Grafana 位于 `monitoring` profile；K8s 清单已提供但未做集群级实测。
 - [x] 测试与 CI：`go build/vet/test`、前端 `npm run build` 与 GitHub Actions；真实依赖集成测试通过 `-tags=integration` 手动运行。
 - [x] 媒体探测：上传媒体文件时由 `ffprobe` / `ffmpeg` 读取时长与首帧，工具缺失或失败时降级，不影响发布。
