@@ -20,7 +20,7 @@ interfaces/http  →  application  →  domain
 
 ### 2.1 发布与扇出
 
-1. `POST /api/clips` 校验登录、标题与地址，按 `Idempotency-Key` 幂等写入 `pf_clips` 与 `pf_clip_stats`。
+1. `POST /api/clips` 校验登录、标题、可选简介与媒体地址，按 `Idempotency-Key` 幂等写入 `pf_clips` 与 `pf_clip_stats`。简介为 `TEXT` 列，去首尾空白后按码点上限 1000 校验，超限返回 400 且不截断。
 2. 发布成功后投递 `clip.published`（含 `clip_id`、`creator_id`、`published_at`）。
 3. `FanoutWorker` 读取创作者粉丝数：达到大 V 阈值只写创作者 outbox（拉模型）；否则按 500/批写入粉丝 inbox（推模型），并预热卡片与计数缓存。
 4. 关注类 Feed 优先读 inbox/outbox，未命中时回源 DB 并按游标分页。
@@ -31,6 +31,7 @@ interfaces/http  →  application  →  domain
 2. 状态变化后投递 `interaction.action_changed`；`ActionWorker` 消费后维护计数与消息事件。
 3. 评论走同步落库，按 `Idempotency-Key` 去重；评论数随创建/删除同步更新。
 4. 前端对点赞/收藏做乐观更新，请求失败时回滚。
+5. 站内消息分四类：点赞、评论、关注在状态真正生效时投递通知，系统消息只保留内部写入入口；自己操作自己的内容不产生消息，取消点赞或删除评论不撤回历史消息。消息带标题与正文，已读状态复用 `read_at` 派生布尔值，不新增 `is_read` 列；`PATCH /api/messages` 传 ID 列表时按条已读，不传 ID 时保持全部已读。
 
 ### 2.2.1 消费失败与死信分流
 
@@ -42,12 +43,14 @@ interfaces/http  →  application  →  domain
 
 ### 2.3 展示（impression）、播放与 QoS
 
-1. `POST /api/clip-play-events` 按 `event_id` 幂等写入 `pf_play_events`，并 upsert 当日展示聚合；同一 `event_id` 不重复累加 `play_count`，与 `pf_playback_qos_reports` 相同的 `event_id` 也只计一次。
-2. 事件投递 `impression.play_recorded`；`PlayEventWorker`（D7 修正）消费后完成展示聚合补偿，避免“只发不收”。
-3. `POST /api/playback-qos-reports` 按 `event_id` 幂等写入 QoS 表；仅首次插入参与采样与延迟/卡顿/完播聚合。
-4. 播放配置按用户持久化 `preload_count`、`qos_sample_rate`；`GET /api/preload-clips` 返回最新 N 个可见 `clip_id`，该接口面向客户端预取，当前前端未接入，只展示队列；后续接入需评估接口是否补充媒体地址。
-5. 前端播放器采集口径：会话开始（调用 `play()`）到首次 `playing` 记为 `latency_ms`（首帧等待）；播放中每次 `waiting` 计 1 次 `stall_count`；`client_info.duration_ms` 只累计实际播放墙钟时间（暂停与缓冲不计）；`ended` 或 `currentTime` 距视频总时长 ≤0.5s 记为完播。
-6. 每次播放会话生成一个 `event_id`（`crypto.randomUUID`，缺失时用时间戳随机串）；会话结算时按 `qos_sample_rate` 抽样一次，命中才上报，未命中不上报也不写上报标记；同一会话不重复随机。重复提交由后端 `event_id` 唯一键吸收，返回 `inserted=false`，不重复聚合。
+1. `POST /api/clip-play-events` 接受四类 `event_type`：`exposed`（卡片进入视口）、`play`（开始播放）、`complete`（播放到结尾）、`skip`（展示后未播放即划走）；空值与旧客户端语义一致，按 `play` 处理，其余未知值返回 400。`scene` 必须属于 Feed 场景或为空，`request_id` 上限 128 字符，`watch_ms` 取值 0–24 小时。
+2. `event_id` 全局唯一，重复上报不二次写入 `pf_play_events`；`play_count` 只在 `event_type=play` 且首次插入时累加，并与 `pf_playback_qos_reports` 按同一 `event_id` 跨表去重。`exposed` / `skip` / `complete` 只 upsert 当日展示聚合，其中 `complete` 额外累加完播数，不影响 `play_count`。
+3. 事件投递 `impression.play_recorded`；`PlayEventWorker`（D7 修正）消费后完成展示聚合补偿，避免“只发不收”。
+4. `POST /api/playback-qos-reports` 按 `event_id` 幂等写入 QoS 表；仅首次插入参与采样与延迟/卡顿/完播聚合。
+5. 播放配置按用户持久化 `preload_count`（默认 8，上限 32）、`qos_sample_rate`（默认 0.1，上限 1）、`buffer_ms`（默认 2000，夹取到 500–10000，越界按边界值落库）。`buffer_ms` 目前只有全局维度，平台/网络维度细分需要调整配置表主键，本轮未做。
+6. `GET /api/preload-clips` 按用户 `preload_count` 返回最新 N 条可见内容的 `clip_id`、`media_url`、`cover_url`、`duration_ms`。前端在首屏数据就绪后调用该接口，以并发 3 的队列预取封面并读取媒体元信息；媒体元信息使用游离的媒体元素（`preload="metadata"`）拉取，5 秒超时兜底。场景切换或离开页面时通过 `AbortController` 统一取消，单个条目失败静默跳过，不阻塞渲染。
+7. 前端播放器采集口径：会话开始（调用 `play()`）到首次 `playing` 记为 `latency_ms`（首帧等待）；播放中每次 `waiting` 计 1 次 `stall_count`；`client_info.duration_ms` 只累计实际播放墙钟时间（暂停与缓冲不计）；`ended` 或 `currentTime` 距媒体总时长 ≤0.5s 记为完播。
+8. 每次播放会话生成一个 `event_id`（`crypto.randomUUID`，缺失时用时间戳随机串）；会话结算时按 `qos_sample_rate` 抽样一次，命中才上报，未命中不上报也不写上报标记；同一会话不重复随机。重复提交由后端 `event_id` 唯一键吸收，返回 `inserted=false`，不重复聚合。
 
 ### 2.4 Feed 读取
 
@@ -64,18 +67,21 @@ interfaces/http  →  application  →  domain
 
 ### 2.5 上传与媒体探测
 
-1. `POST /api/uploads` 先按 `kind` 校验扩展名白名单并落盘；仅 `kind=video` 额外用 `ffprobe` 校验内容可读性（5s 超时）。`cover` / `avatar` 只做扩展名校验。
-2. 校验通过后由 `infra/media.Prober` 读取时长（`ffprobe`，5s 超时，四舍五入为毫秒）并调用 `ffmpeg` 抽取首帧（10s 超时，`-frames:v 1` 输出 JPEG）。
-3. 首帧写入 `uploads/cover/<媒体文件名>.jpg`，响应回传 `cover_url` 与 `duration_ms`；发布时前端把两者一并提交，`duration_ms` 写入 `pf_clips`，负值按 0 处理。
-4. 降级策略：`ffprobe`/`ffmpeg` 缺失、执行失败或超时只记录 `warning`，响应仍为 201，仅省略 `cover_url`/`duration_ms`；`ffprobe` 明确判定内容非法则不降级，删除已落盘文件并返回 400。
-5. 前端在缺少 `cover_url` 时回退为暗色首字占位封面，`duration_ms=0` 时不渲染时长角标。
+1. `POST /api/uploads` 的 `kind` 取媒体 / 封面 / 头像三类，扩展名白名单分别为 `.mp4`/`.mov`/`.webm` 与 `.jpg`/`.jpeg`/`.png`/`.webp`。校验顺序固定为大小 → 扩展名 → 内容探测：超限文件不落盘、不探测。
+2. 硬校验上限：媒体单文件 512MB、图片单文件 20MB、媒体时长 10 分钟、分辨率长边 3840（允许 2160×3840 竖屏 4K，按长边而非短边判定）。媒体编码白名单为 `h264`/`hevc`/`vp9`，其余编码返回 400。
+3. 媒体内容探测由 `infra/media.Prober` 单次 `ffprobe` 完成（5 秒超时），一次读取时长、宽高与编码名，避免重复探测；时长无法识别、宽高缺失、超时长/超长边/编码不在白名单均删除已落盘文件并返回 400。
+4. 图片内容校验：jpg/png 用标准库 `image.DecodeConfig` 校验真实格式与扩展名一致；webp 因标准库无解码器，只做容器级校验（RIFF/WEBP 头、声明长度不越界、至少包含 VP8/VP8L/VP8X 块），不校验像素可解码性。
+5. 封面抽取：探测完成后（`ffprobe` 不可用时降级后同样执行）由 `ffmpeg` 抽取首帧（10 秒超时，`-frames:v 1` 输出 JPEG），写入 `uploads/cover/<媒体文件名>.jpg`，响应回传 `cover_url` 与 `duration_ms`；发布时前端把两者一并提交，`duration_ms` 写入 `pf_clips`，负值按 0 处理。
+6. 降级策略：`ffprobe`/`ffmpeg` 缺失、执行失败或超时只记录 `warning`，响应仍为 201，仅省略 `cover_url`/`duration_ms`；`ffprobe` 不可用时跳过时长/分辨率/编码校验，只保留扩展名校验，并在日志写明跳过项。`ffprobe` 明确判定内容非法则不降级，删除已落盘文件并返回 400。
+7. 前端在缺少 `cover_url` 时回退为暗色首字占位封面，`duration_ms=0` 时不渲染时长角标。
+8. 已知限制：不做 faststart 强制校验，理由见 6.4。
 
 ## 3. 一致性与幂等
 
 - 写接口按 `Idempotency-Key` 去重；MQ 事件按 `event_id` 去重。
 - 互动计数只在状态变化时更新，重复点赞/收藏不累加。
 - 播放计数与 QoS 聚合均以首次插入为准；QoS 采样率由前端在会话结算时抽样，只影响是否上报，不影响已落库数据；后端不按该值过滤上报。
-- 字符计数统一按 Unicode 码点（Go `utf8.RuneCountInString`）：标题 128、昵称 64、评论 1000，去首尾空白后判定，与数据库列宽一致；前端 `maxLength` 与提示口径见 README「字符计数口径」。
+- 字符计数统一按 Unicode 码点（Go `utf8.RuneCountInString`）：标题 128、简介 1000、昵称 64、评论 1000，去首尾空白后判定，与数据库列宽一致；前端 `maxLength` 与提示口径见 README「字符计数口径」。
 - GORM `AutoMigrate` 对重复列/索引错误做 3 次退避重试；Worker 等待 API 迁移完成后再启动，避免并发建表。
 
 ## 4. 可观测性
@@ -114,3 +120,13 @@ interfaces/http  →  application  →  domain
 - **前端自动化**：`apps/web` 目前只有 CI 构建（`npm ci` + `vite build`），没有组件测试或 E2E；交互回归仍靠手工。
 - **真实 MySQL 迁移**：索引建法只在本地 8.0 实例验证过，没有 testcontainers 回归，MySQL 版本升级时需要重新跑 EXPLAIN。
 - **已补覆盖**：`apps/api/test/integration`（`//go:build integration`）已覆盖 `play_count` 跨表同 `event_id` 去重（含并发）、latest 游标分页边界与死信路由；每次运行使用独立 schema，跑完清理。
+
+### 6.4 已知限制（本轮不做）
+
+- **faststart 不做强制校验**：静态路由已支持 Range，解析 moov/mdat 顺序对 mov/webm 容易误判，收益与实现成本不成比例。
+- **WebP 只做容器级校验**：Go 标准库没有 WebP 解码器，当前只校验 RIFF/WEBP 头与 VP8/VP8L/VP8X 块存在性，不解码像素。
+- **`buffer_ms` 仅全局维度**：按平台/网络维度细分需要调整播放配置表主键，本轮未做。
+
+### 6.5 词汇与命名约束
+
+- `video_url`、`kind=video`、`<video>` 等既有对外契约字段与标签保留原名，不做重命名；词汇约束只适用于新增命名与文案，目的是避免出现项目名与可追溯措辞，不构成待办事项。后续新增字段与文案继续使用 clip / media / impression 等词汇。
