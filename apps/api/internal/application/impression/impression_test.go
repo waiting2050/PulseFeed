@@ -410,12 +410,12 @@ func TestPlayEventWorkerConfirmsSyncedEvent(t *testing.T) {
 	repo.synced["evt-1"] = true
 
 	body, err := json.Marshal(appimpression.PlayRecorded{
-		EventID:        "evt-1",
-		ViewerID:       7,
-		ClipID:         10,
-		WatchMs:        1200,
-		Impression:     true,
-		OccurredAt:     time.Now(),
+		EventID:    "evt-1",
+		ViewerID:   7,
+		ClipID:     10,
+		WatchMs:    1200,
+		Impression: true,
+		OccurredAt: time.Now(),
 	})
 	if err != nil {
 		t.Fatalf("序列化事件失败: %v", err)
@@ -438,14 +438,14 @@ func TestPlayEventWorkerCompensatesUnsyncedEvent(t *testing.T) {
 	occurredAt := time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC)
 	repo := newImpressionFakeRepository(10)
 	body, err := json.Marshal(appimpression.PlayRecorded{
-		EventID:        "evt-2",
-		ViewerID:       7,
-		ClipID:         10,
-		EventType:      "complete",
-		WatchMs:        1500,
-		Completed:      true,
-		Impression:     true,
-		OccurredAt:     occurredAt,
+		EventID:    "evt-2",
+		ViewerID:   7,
+		ClipID:     10,
+		EventType:  "complete",
+		WatchMs:    1500,
+		Completed:  true,
+		Impression: true,
+		OccurredAt: occurredAt,
 	})
 	if err != nil {
 		t.Fatalf("序列化事件失败: %v", err)
@@ -489,11 +489,11 @@ func TestPlayEventWorkerCompensatesUnsyncedEvent(t *testing.T) {
 func TestPlayEventWorkerDeadLettersMissingClip(t *testing.T) {
 	repo := newImpressionFakeRepository(10)
 	body, err := json.Marshal(appimpression.PlayRecorded{
-		EventID:        "evt-3",
-		ViewerID:       7,
-		ClipID:         99,
-		WatchMs:        1000,
-		OccurredAt:     time.Now(),
+		EventID:    "evt-3",
+		ViewerID:   7,
+		ClipID:     99,
+		WatchMs:    1000,
+		OccurredAt: time.Now(),
 	})
 	if err != nil {
 		t.Fatalf("序列化事件失败: %v", err)
