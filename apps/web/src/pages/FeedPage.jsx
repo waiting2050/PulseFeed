@@ -1,5 +1,7 @@
 // FeedPage.jsx 组织场景切换、栅格、骨架屏、空态/错误态、分页与详情弹层。
-import React, { useCallback, useEffect, useState } from 'react'
+// 场景与详情都由 URL 驱动：/feed?scene=hot 直达场景，/clip/:clipId?from=... 直达详情弹层。
+import React, { useCallback, useEffect, useRef, useState } from 'react'
+import { useLocation, useMatch, useNavigate } from 'react-router-dom'
 import SceneTabs from '../components/SceneTabs.jsx'
 import ClipCard from '../components/ClipCard.jsx'
 import SkeletonCard from '../components/SkeletonCard.jsx'
@@ -25,13 +27,63 @@ const SCENE_HINTS = {
   'for-you': '按兴趣推荐',
 }
 
-export default function FeedPage({ scene, onScene, onGoPublish }) {
+const SCENE_KEYS = SCENES.map((entry) => entry.key)
+const DEFAULT_SCENE = 'latest'
+
+// readScene 校验 URL 里的场景取值，非法值回落到默认场景。
+function readScene(search) {
+  const value = new URLSearchParams(search).get('scene')
+  return SCENE_KEYS.includes(value) ? value : DEFAULT_SCENE
+}
+
+// readFrom 只接受站内绝对路径，并从中解析来源路径与来源场景。
+function readFrom(raw) {
+  if (!raw || !raw.startsWith('/') || raw.startsWith('//')) return null
+  const queryIndex = raw.indexOf('?')
+  return {
+    path: raw,
+    scene: readScene(queryIndex === -1 ? '' : raw.slice(queryIndex)),
+  }
+}
+
+// normalizeClip 把单条查询结果补齐为详情弹层所需的完整视图字段。
+function normalizeClip(data, clipId) {
+  return {
+    clip_id: Number(data && data.clip_id) || Number(clipId),
+    creator_id: data ? data.creator_id : 0,
+    title: (data && data.title) || '',
+    video_url: (data && data.video_url) || '',
+    cover_url: (data && data.cover_url) || '',
+    duration_ms: (data && data.duration_ms) || 0,
+    published_at: data ? data.published_at : '',
+    liked: Boolean(data && data.liked),
+    saved: Boolean(data && data.saved),
+    like_count: Number(data && data.like_count) || 0,
+    save_count: Number(data && data.save_count) || 0,
+    comment_count: Number(data && data.comment_count) || 0,
+    play_count: Number(data && data.play_count) || 0,
+  }
+}
+
+export default function FeedPage({ onGoPublish }) {
+  const navigate = useNavigate()
+  const location = useLocation()
+  const clipMatch = useMatch('/clip/:clipId')
+  const clipId = clipMatch ? clipMatch.params.clipId : null
+
+  // 详情路由下场景从 from 还原，保证弹层背后的列表与打开前一致。
+  const from = readFrom(new URLSearchParams(location.search).get('from'))
+  const scene = clipId ? (from ? from.scene : DEFAULT_SCENE) : readScene(location.search)
+  const backPath = from ? from.path : `/feed?scene=${scene}`
+
   const [items, setItems] = useState([])
   const [cursor, setCursor] = useState('')
   const [hasMore, setHasMore] = useState(false)
   const [loadingMore, setLoadingMore] = useState(false)
   const [actionError, setActionError] = useState('')
-  const [activeId, setActiveId] = useState(null)
+  const [deepItem, setDeepItem] = useState(null)
+  const [deepError, setDeepError] = useState('')
+  const deepFetchRef = useRef('')
   const [playingId, setPlayingId] = useState(null)
 
   const firstPage = useApi(() => api.feed({ scene, limit: 10 }), [scene])
@@ -40,7 +92,6 @@ export default function FeedPage({ scene, onScene, onGoPublish }) {
     setItems([])
     setCursor('')
     setHasMore(false)
-    setActiveId(null)
     setPlayingId(null)
   }, [scene])
 
@@ -51,8 +102,38 @@ export default function FeedPage({ scene, onScene, onGoPublish }) {
     setHasMore(Boolean(firstPage.data.has_more))
   }, [firstPage.data])
 
-  const patchItem = useCallback((clipId, patch) => {
-    setItems((prev) => prev.map((item) => (item.clip_id === clipId ? { ...item, ...patch } : item)))
+  // 深链兜底：列表里已有该条就直接复用，否则每个 id 只按需拉取一次。
+  useEffect(() => {
+    if (!clipId) {
+      deepFetchRef.current = ''
+      setDeepItem(null)
+      setDeepError('')
+      return undefined
+    }
+    if (items.some((item) => String(item.clip_id) === clipId)) {
+      setDeepError('')
+      return undefined
+    }
+    if (deepFetchRef.current === clipId) return undefined
+    deepFetchRef.current = clipId
+    let alive = true
+    setDeepError('')
+    api
+      .getClip(clipId)
+      .then((data) => {
+        if (alive) setDeepItem(normalizeClip(data, clipId))
+      })
+      .catch((err) => {
+        if (alive) setDeepError(err.message)
+      })
+    return () => {
+      alive = false
+    }
+  }, [clipId, items])
+
+  const patchItem = useCallback((id, patch) => {
+    setItems((prev) => prev.map((item) => (item.clip_id === id ? { ...item, ...patch } : item)))
+    setDeepItem((prev) => (prev && prev.clip_id === id ? { ...prev, ...patch } : prev))
   }, [])
 
   async function toggleLike(item) {
@@ -113,31 +194,58 @@ export default function FeedPage({ scene, onScene, onGoPublish }) {
     }
   }
 
-  // 打开详情时暂停所有卡片播放器，避免弹层与卡片同时出声。
-  const openDetail = useCallback((clip) => {
-    setPlayingId(null)
-    setActiveId(clip.clip_id)
-  }, [])
-  const closeDetail = useCallback(() => setActiveId(null), [])
+  // 切换场景写回 URL，前进后退与刷新都能回到同一场景。
+  const handleScene = useCallback(
+    (next) => {
+      navigate(`/feed?scene=${next}`)
+    },
+    [navigate],
+  )
+
+  // 打开详情时暂停所有卡片播放器，并把详情地址写入 URL；from 记录来源列表。
+  const openDetail = useCallback(
+    (clip) => {
+      setPlayingId(null)
+      navigate(`/clip/${clip.clip_id}?from=${encodeURIComponent(`/feed?scene=${scene}`)}`)
+    },
+    [navigate, scene],
+  )
+
+  // 关闭弹层回到来源列表；直接粘贴链接进来的默认回最新场景。
+  const closeDetail = useCallback(() => {
+    navigate(backPath, { replace: true })
+  }, [navigate, backPath])
+
   const handleCommentAdded = useCallback(
-    (clipId, count) => {
-      patchItem(clipId, { comment_count: count })
+    (id, count) => {
+      patchItem(id, { comment_count: count })
     },
     [patchItem],
   )
 
-  const activeItem = items.find((item) => item.clip_id === activeId)
+  const activeItem = clipId
+    ? items.find((item) => String(item.clip_id) === clipId) || deepItem
+    : null
   const showSkeleton = firstPage.loading && items.length === 0
   const showEmpty = !firstPage.loading && !firstPage.error && items.length === 0
 
   return (
     <div className="pf-feed-page">
       <h1 className="pf-sr-only">内容流</h1>
-      <SceneTabs scenes={SCENES} scene={scene} onChange={onScene} hint={SCENE_HINTS[scene]} />
+      <SceneTabs scenes={SCENES} scene={scene} onChange={handleScene} hint={SCENE_HINTS[scene]} />
 
       <ErrorBanner message={firstPage.error} onRetry={firstPage.retry} />
 
       {actionError ? <Toast message={actionError} tone="error" onDismiss={() => setActionError('')} /> : null}
+
+      {clipId && deepError && !activeItem ? (
+        <Toast
+          message={deepError}
+          tone="error"
+          action={{ label: '回到内容流', onClick: closeDetail }}
+          onDismiss={closeDetail}
+        />
+      ) : null}
 
       {showSkeleton ? (
         <section className="pf-grid" aria-busy="true" aria-label="内容加载中">
@@ -169,7 +277,7 @@ export default function FeedPage({ scene, onScene, onGoPublish }) {
               onLike={toggleLike}
               onSave={toggleSave}
               onOpen={openDetail}
-              suspended={activeId !== null || (playingId !== null && playingId !== item.clip_id)}
+              suspended={clipId !== null || (playingId !== null && playingId !== item.clip_id)}
               onPlay={setPlayingId}
             />
           ))}

@@ -115,6 +115,9 @@ export const api = {
 
   feed: ({ scene, cursor = '', limit = 10 }) => request(`/feed${buildQuery({ scene, cursor, limit })}`),
 
+  // 单条内容查询支撑 /clip/:id 深链，列表里没有该条时用它补齐详情。
+  getClip: (clipId) => request(`/clips/${clipId}`),
+
   comments: (clipId, { limit = 20, cursor = '' } = {}) =>
     request(`/clips/${clipId}/comments${buildQuery({ limit, cursor })}`),
 

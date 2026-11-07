@@ -1,6 +1,9 @@
-// App.jsx 只保留应用外壳与登录态：顶栏、页面切换、用户资料与未读数；各页自行加载数据。
+// App.jsx 只保留应用外壳与登录态：顶栏、路由页面、用户资料与未读数；各页自行加载数据。
+// 路由把原先的 tab/scene 状态搬进 URL，刷新与前进后退都能还原当前页面。
 import React, { useCallback, useEffect, useState } from 'react'
+import { Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
 import TopBar from './components/TopBar.jsx'
+import EmptyState from './components/EmptyState.jsx'
 import LoginPage from './pages/LoginPage.jsx'
 import FeedPage from './pages/FeedPage.jsx'
 import PublishPage from './pages/PublishPage.jsx'
@@ -8,11 +11,39 @@ import MessagesPage from './pages/MessagesPage.jsx'
 import PlaybackPage from './pages/PlaybackPage.jsx'
 import { api, getToken, hydrateToken, setToken } from './lib/api.js'
 
+// readNext 只接受站内绝对路径，避免登录回跳被外部地址利用。
+function readNext(search) {
+  const value = new URLSearchParams(search).get('next')
+  if (!value || !value.startsWith('/') || value.startsWith('//')) return ''
+  return value
+}
+
+function tabForPath(pathname) {
+  if (pathname.startsWith('/publish')) return 'publish'
+  if (pathname.startsWith('/messages')) return 'messages'
+  if (pathname.startsWith('/playback')) return 'playback'
+  return 'feed'
+}
+
+// NotFound 兜住未匹配路径，给出返回内容流的入口而不是白屏。
+function NotFound({ onBack }) {
+  return (
+    <div className="pf-feed-page">
+      <EmptyState
+        title="页面不存在"
+        description="这个地址没有对应的页面，返回内容流继续浏览。"
+        actionLabel="回到内容流"
+        onAction={onBack}
+      />
+    </div>
+  )
+}
+
 export default function App() {
+  const location = useLocation()
+  const navigate = useNavigate()
   const [token, setTokenState] = useState(() => hydrateToken())
   const [me, setMe] = useState(null)
-  const [tab, setTab] = useState('feed')
-  const [scene, setScene] = useState('latest')
   const [unread, setUnread] = useState(0)
 
   const [mode, setMode] = useState('login')
@@ -59,8 +90,7 @@ export default function App() {
       if (!nextToken) throw new Error('登录响应缺少 access_token')
       setToken(nextToken)
       setTokenState(nextToken)
-      setTab('feed')
-      setScene('latest')
+      navigate(readNext(location.search) || '/feed', { replace: true })
     } catch (err) {
       setAuthError(err.message)
     } finally {
@@ -78,40 +108,69 @@ export default function App() {
     setTokenState('')
     setMe(null)
     setUnread(0)
-    setTab('feed')
+    navigate('/login', { replace: true })
   }
 
   const handleUnreadChange = useCallback((value) => setUnread(value), [])
 
+  const handleTab = useCallback(
+    (key) => {
+      navigate(key === 'feed' ? '/feed' : `/${key}`)
+    },
+    [navigate],
+  )
+
   if (!token || !getToken()) {
     return (
-      <LoginPage
-        mode={mode}
-        onMode={setMode}
-        account={account}
-        onAccount={setAccount}
-        password={password}
-        onPassword={setPassword}
-        nickname={nickname}
-        onNickname={setNickname}
-        authError={authError}
-        busy={busy}
-        onSubmit={handleAuth}
-      />
+      <Routes>
+        <Route
+          path="/login"
+          element={
+            <LoginPage
+              mode={mode}
+              onMode={setMode}
+              account={account}
+              onAccount={setAccount}
+              password={password}
+              onPassword={setPassword}
+              nickname={nickname}
+              onNickname={setNickname}
+              authError={authError}
+              busy={busy}
+              onSubmit={handleAuth}
+            />
+          }
+        />
+        {/* 未登录访问任意深链都先去登录，登录成功后回到原地址。 */}
+        <Route
+          path="*"
+          element={
+            <Navigate
+              to={`/login?next=${encodeURIComponent(location.pathname + location.search)}`}
+              replace
+            />
+          }
+        />
+      </Routes>
     )
   }
 
   return (
     <div className="pf-app">
-      <TopBar tab={tab} onTab={setTab} unread={unread} me={me} onLogout={handleLogout} />
+      <TopBar tab={tabForPath(location.pathname)} onTab={handleTab} unread={unread} me={me} onLogout={handleLogout} />
 
       <main className="pf-main">
-        {tab === 'feed' ? (
-          <FeedPage scene={scene} onScene={setScene} onGoPublish={() => setTab('publish')} />
-        ) : null}
-        {tab === 'publish' ? <PublishPage onPublished={() => setTab('feed')} /> : null}
-        {tab === 'messages' ? <MessagesPage unread={unread} onUnreadChange={handleUnreadChange} /> : null}
-        {tab === 'playback' ? <PlaybackPage /> : null}
+        <Routes>
+          <Route index element={<Navigate to="/feed" replace />} />
+          <Route path="/login" element={<Navigate to="/feed" replace />} />
+          <Route path="/feed" element={<FeedPage onGoPublish={() => navigate('/publish')} />} />
+          <Route path="/publish" element={<PublishPage onPublished={() => navigate('/feed')} />} />
+          <Route path="/messages" element={<MessagesPage unread={unread} onUnreadChange={handleUnreadChange} />} />
+          <Route path="/playback" element={<PlaybackPage />} />
+          {/* 单条内容深链：详情弹层由 FeedPage 按 URL 渲染，列表仍留在背后作为关闭后的落点。 */}
+          <Route path="/clip/:clipId" element={<FeedPage onGoPublish={() => navigate('/publish')} />} />
+          <Route path="*" element={<NotFound onBack={() => navigate('/feed')} />} />
+        </Routes>
       </main>
     </div>
   )
