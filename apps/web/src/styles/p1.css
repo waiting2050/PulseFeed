@@ -18,19 +18,40 @@ button:disabled {
   cursor: default;
 }
 
-/* ---------- 卡片可点击区域 ---------- */
-.pf-card-open {
-  display: block;
-  width: 100%;
-  padding: 0;
-  border: 0;
-  background: none;
-  color: inherit;
-  text-align: left;
+/* ---------- 卡片媒体区与详情入口 ---------- */
+.pf-card-media {
+  position: relative;
 }
 
-.pf-card-open .pf-cover {
-  display: block;
+.pf-card-open {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #fff;
+  cursor: pointer;
+}
+
+.pf-card-detail {
+  position: absolute;
+  top: var(--space-2);
+  right: var(--space-2);
+  z-index: 3;
+  padding: 2px var(--space-2);
+  border-radius: var(--r-pill);
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  background: rgba(0, 0, 0, 0.62);
+  color: #fff;
+  font-size: var(--fs-micro);
+  line-height: 18px;
+}
+
+.pf-card-detail:hover {
+  background: rgba(0, 0, 0, 0.82);
 }
 
 .pf-card-title {
@@ -58,15 +79,124 @@ button:disabled {
   color: var(--text-1);
 }
 
-/* ---------- 卡片悬停预览与时长角标 ---------- */
-.pf-cover-preview-video {
+/* ---------- 媒体播放器 ---------- */
+.pf-player {
   position: absolute;
   inset: 0;
   z-index: 1;
+  overflow: hidden;
+  background: #000;
+}
+
+.pf-player-video {
+  display: block;
   width: 100%;
   height: 100%;
   object-fit: cover;
   background: #000;
+}
+
+.pf-player-sheet .pf-player-video {
+  object-fit: contain;
+}
+
+.pf-player-center {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  z-index: 2;
+  width: 44px;
+  height: 44px;
+  transform: translate(-50%, -50%);
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  background: rgba(0, 0, 0, 0.66);
+  color: #fff;
+}
+
+.pf-player-sheet .pf-player-center {
+  width: 64px;
+  height: 64px;
+}
+
+.pf-player-center:hover {
+  background: rgba(0, 0, 0, 0.82);
+}
+
+.pf-player-buffering {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  z-index: 2;
+  transform: translate(-50%, -50%);
+  padding: 2px var(--space-2);
+  border-radius: var(--r-pill);
+  background: rgba(0, 0, 0, 0.72);
+  color: var(--text-2);
+  font-size: var(--fs-micro);
+}
+
+.pf-player-bar {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-2);
+  background: linear-gradient(180deg, transparent, rgba(0, 0, 0, 0.74));
+}
+
+.pf-player-sheet .pf-player-bar {
+  padding: var(--space-2) var(--space-3);
+}
+
+.pf-player-btn {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-xs);
+  background: transparent;
+  color: var(--text-1);
+}
+
+.pf-player-btn:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.pf-player-btn[aria-pressed='true'] {
+  color: var(--cyan);
+}
+
+.pf-player-seek {
+  flex: 1;
+  min-width: 48px;
+  height: 20px;
+  margin: 0;
+  accent-color: var(--cyan);
+  cursor: pointer;
+}
+
+.pf-player-time {
+  flex: none;
+  color: var(--text-2);
+  font-size: var(--fs-micro);
+}
+
+.pf-player:fullscreen {
+  background: #000;
+}
+
+.pf-player:fullscreen .pf-player-video {
+  object-fit: contain;
 }
 
 .pf-cover-duration {
@@ -248,41 +378,6 @@ button:disabled {
 .pf-sheet-media .pf-cover {
   border-radius: var(--r-sm);
   border: 1px solid var(--line);
-}
-
-.pf-sheet-video {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  background: #000;
-}
-
-.pf-sheet-play {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  border: 0;
-  background: transparent;
-  display: grid;
-  place-items: center;
-}
-
-.pf-sheet-play span {
-  width: 64px;
-  height: 64px;
-  border-radius: 50%;
-  display: grid;
-  place-items: center;
-  color: #fff;
-  background: rgba(0, 0, 0, 0.66);
-  border: 1px solid rgba(255, 255, 255, 0.24);
-  transition: background var(--dur-fast);
-}
-
-.pf-sheet-play:hover span {
-  background: rgba(0, 0, 0, 0.82);
 }
 
 .pf-sheet-info {
@@ -737,7 +832,8 @@ button:disabled {
   .pf-primary-btn,
   .pf-toast-action,
   .pf-toast-close,
-  .pf-sheet-play span {
+  .pf-player-center,
+  .pf-player-btn {
     transition: none;
   }
 

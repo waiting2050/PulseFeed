@@ -1,92 +1,65 @@
-// ClipCard.jsx 渲染 Feed 卡片：封面（含时长角标与悬停预览）、标题、作者行与操作栏。
-// 点击封面或标题进入详情弹层；悬停预览仅在支持 hover 的设备且有真实 video_url 时启用。
-import React, { useEffect, useRef, useState } from 'react'
+// ClipCard.jsx 渲染 Feed 卡片：有 video_url 时展示内联播放器，否则保持封面 + 首字兜底。
+// 播放器负责播放/暂停、静音、进度与全屏；标题与「详情」按钮进入详情弹层。
+import React, { useState } from 'react'
 import Icon from './Icon.jsx'
 import Avatar from './Avatar.jsx'
 import ClipCover from './ClipCover.jsx'
+import VideoPlayer from './VideoPlayer.jsx'
 import { formatCount, formatDuration, formatTime } from '../lib/format.js'
 
-// HOVER_PREVIEW 在模块加载时判定一次，触屏设备不注册预览，避免误触后自动播放。
-const HOVER_PREVIEW =
-  typeof window !== 'undefined' &&
-  typeof window.matchMedia === 'function' &&
-  window.matchMedia('(hover: hover) and (pointer: fine)').matches
-
-export default function ClipCard({ item, busy, onLike, onSave, onOpen }) {
+export default function ClipCard({ item, busy, onLike, onSave, onOpen, suspended = false, onPlay }) {
   const title = item.title || '未命名内容'
   const duration = formatDuration(item.duration_ms)
-  const canPreview = HOVER_PREVIEW && Boolean(item.video_url)
-  const [previewing, setPreviewing] = useState(false)
-  const [previewFailed, setPreviewFailed] = useState(false)
-  const previewRef = useRef(null)
-
-  // 开始预览才挂载 video；播放被拒或资源异常时立即停止并标记失败，后续悬停不再重试。
-  useEffect(() => {
-    const video = previewRef.current
-    if (!previewing || !video) return
-    video.currentTime = 0
-    const attempt = video.play()
-    if (attempt && typeof attempt.catch === 'function') {
-      attempt.catch(() => {
-        setPreviewing(false)
-        setPreviewFailed(true)
-      })
-    }
-  }, [previewing])
-
-  function startPreview() {
-    if (canPreview && !previewFailed) setPreviewing(true)
-  }
-
-  function stopPreview() {
-    const video = previewRef.current
-    if (video) {
-      video.pause()
-      video.currentTime = 0
-    }
-    setPreviewing(false)
-  }
+  const [videoFailed, setVideoFailed] = useState(false)
+  const hasVideo = Boolean(item.video_url) && !videoFailed
 
   return (
     <article className="pf-card">
-      <button
-        type="button"
-        className="pf-card-open"
-        onClick={() => onOpen(item)}
-        onPointerEnter={startPreview}
-        onPointerLeave={stopPreview}
-        onPointerCancel={stopPreview}
-      >
+      <div className="pf-card-media">
         <ClipCover clipId={item.clip_id} title={title} coverUrl={item.cover_url}>
-          {previewing ? (
-            <video
-              ref={previewRef}
-              className="pf-cover-preview-video"
+          {hasVideo ? (
+            <VideoPlayer
+              clipId={item.clip_id}
               src={item.video_url}
-              muted
-              playsInline
-              preload="none"
-              aria-hidden="true"
-              tabIndex={-1}
-              onError={() => {
-                setPreviewing(false)
-                setPreviewFailed(true)
-              }}
+              poster={item.cover_url}
+              title={title}
+              variant="card"
+              suspended={suspended}
+              onPlayStart={() => onPlay?.(item.clip_id)}
+              onError={() => setVideoFailed(true)}
             />
           ) : null}
-          {!previewing ? (
-            <span className="pf-cover-play" aria-hidden="true">
-              <span>
-                <Icon name="play" size={24} />
+          {!hasVideo ? (
+            <button
+              type="button"
+              className="pf-card-open"
+              onClick={() => onOpen(item)}
+              aria-label={`查看详情：${title}`}
+            >
+              <span className="pf-cover-play" aria-hidden="true">
+                <span>
+                  <Icon name="play" size={24} />
+                </span>
               </span>
-            </span>
+            </button>
           ) : null}
           {duration ? (
-            <span className="pf-cover-badge pf-cover-duration pf-num">{duration}</span>
+            <span className={`pf-cover-badge ${hasVideo ? '' : 'pf-cover-duration'} pf-num`.trim()}>
+              {duration}
+            </span>
           ) : null}
         </ClipCover>
-        <span className="pf-sr-only">查看详情：{title}</span>
-      </button>
+        {hasVideo ? (
+          <button
+            type="button"
+            className="pf-card-detail"
+            onClick={() => onOpen(item)}
+            aria-label={`查看详情：${title}`}
+          >
+            详情
+          </button>
+        ) : null}
+      </div>
 
       <div className="pf-card-body">
         <h3 className="pf-card-title" title={title}>
@@ -135,7 +108,7 @@ export default function ClipCard({ item, busy, onLike, onSave, onOpen }) {
             <Icon name="comment" size={20} className="pf-act-icon" />
             <span className="pf-act-count">{formatCount(item.comment_count)}</span>
           </button>
-          <span className="pf-act" data-kind="play" role="text" aria-label={`播放 ${item.play_count} 次`}>
+          <span className="pf-act" data-kind="play" aria-label={`播放 ${item.play_count} 次`}>
             <Icon name="play" size={20} className="pf-act-icon" />
             <span className="pf-act-count">{formatCount(item.play_count)}</span>
           </span>

@@ -32,6 +32,7 @@ export default function FeedPage({ scene, onScene, onGoPublish }) {
   const [loadingMore, setLoadingMore] = useState(false)
   const [actionError, setActionError] = useState('')
   const [activeId, setActiveId] = useState(null)
+  const [playingId, setPlayingId] = useState(null)
 
   const firstPage = useApi(() => api.feed({ scene, limit: 10 }), [scene])
 
@@ -40,6 +41,7 @@ export default function FeedPage({ scene, onScene, onGoPublish }) {
     setCursor('')
     setHasMore(false)
     setActiveId(null)
+    setPlayingId(null)
   }, [scene])
 
   useEffect(() => {
@@ -111,6 +113,11 @@ export default function FeedPage({ scene, onScene, onGoPublish }) {
     }
   }
 
+  // 打开详情时暂停所有卡片播放器，避免弹层与卡片同时出声。
+  const openDetail = useCallback((clip) => {
+    setPlayingId(null)
+    setActiveId(clip.clip_id)
+  }, [])
   const closeDetail = useCallback(() => setActiveId(null), [])
   const handleCommentAdded = useCallback(
     (clipId, count) => {
@@ -161,7 +168,9 @@ export default function FeedPage({ scene, onScene, onGoPublish }) {
               busy={false}
               onLike={toggleLike}
               onSave={toggleSave}
-              onOpen={(clip) => setActiveId(clip.clip_id)}
+              onOpen={openDetail}
+              suspended={activeId !== null || (playingId !== null && playingId !== item.clip_id)}
+              onPlay={setPlayingId}
             />
           ))}
         </section>

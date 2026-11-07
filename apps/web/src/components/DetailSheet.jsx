@@ -4,6 +4,7 @@ import Icon from './Icon.jsx'
 import Avatar from './Avatar.jsx'
 import ClipCover from './ClipCover.jsx'
 import Spinner from './Spinner.jsx'
+import VideoPlayer from './VideoPlayer.jsx'
 import useApi from '../hooks/useApi.js'
 import { api } from '../lib/api.js'
 import { formatCount, formatTime } from '../lib/format.js'
@@ -11,7 +12,6 @@ import { formatCount, formatTime } from '../lib/format.js'
 export default function DetailSheet({ item, onClose, onLike, onSave, onCommentAdded }) {
   const dialogRef = useRef(null)
   const closeRef = useRef(null)
-  const [playing, setPlaying] = useState(false)
   const [mediaError, setMediaError] = useState('')
   const [draft, setDraft] = useState('')
   const [submitting, setSubmitting] = useState(false)
@@ -21,7 +21,6 @@ export default function DetailSheet({ item, onClose, onLike, onSave, onCommentAd
   const comments = useApi(() => api.comments(item.clip_id, { limit: 20 }), [item.clip_id])
 
   useEffect(() => {
-    setPlaying(false)
     setMediaError('')
     setAdded([])
     setDraft('')
@@ -108,30 +107,15 @@ export default function DetailSheet({ item, onClose, onLike, onSave, onCommentAd
         <div className="pf-sheet-body">
           <div className="pf-sheet-media">
             <ClipCover clipId={item.clip_id} title={title} coverUrl={item.cover_url}>
-              {playing && item.video_url ? (
-                <video
-                  className="pf-sheet-video"
+              {item.video_url ? (
+                <VideoPlayer
+                  clipId={item.clip_id}
                   src={item.video_url}
-                  poster={item.cover_url || undefined}
-                  controls
-                  autoPlay
-                  onError={() => {
-                    setPlaying(false)
-                    setMediaError('素材暂时无法播放，已回退到封面。')
-                  }}
+                  poster={item.cover_url}
+                  title={title}
+                  variant="sheet"
+                  onError={() => setMediaError('素材暂时无法播放，已回退到封面。')}
                 />
-              ) : null}
-              {!playing && item.video_url ? (
-                <button
-                  type="button"
-                  className="pf-sheet-play"
-                  onClick={() => setPlaying(true)}
-                  aria-label="播放内容"
-                >
-                  <span>
-                    <Icon name="play" size={24} />
-                  </span>
-                </button>
               ) : null}
             </ClipCover>
             {mediaError ? (

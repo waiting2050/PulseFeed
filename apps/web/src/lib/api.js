@@ -151,6 +151,9 @@ export const api = {
 
   playbackConfig: () => request('/playback-config'),
 
+  // 复用既有 QoS 契约：event_id 由客户端生成，后端按其幂等，同一事件重复提交不会重复落库。
+  reportQoS: (report) => request('/playback-qos-reports', { method: 'POST', body: report }),
+
   savePlaybackConfig: (config) => request('/playback-config', { method: 'PUT', body: config }),
 
   preloadClips: () => request('/preload-clips'),
