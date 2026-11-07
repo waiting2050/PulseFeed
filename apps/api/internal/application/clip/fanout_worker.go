@@ -11,6 +11,7 @@ import (
 
 	appfeed "pulsefeed/internal/application/feed"
 	domfeed "pulsefeed/internal/domain/feed"
+	"pulsefeed/internal/domain/messaging"
 )
 
 // fanoutBatchSize 是单次 inbox 写入的粉丝批大小。
@@ -32,18 +33,19 @@ func (w *FanoutWorker) Name() string {
 	return "clip_fanout"
 }
 
-// Handle 解析事件并执行扇出：非法载荷与已删除 clip 直接确认；
-// 缓存写失败返回错误交由 MQ 重新入队（ZADD 幂等，重复投递安全），避免部分扇出造成永久丢失。
+// Handle 解析事件并执行扇出：非法载荷与已删除 clip 标记为不可重试（转入死信）；
+// 缓存写失败返回可重试错误交由 MQ 重新入队（ZADD 幂等，重复投递安全），避免部分扇出造成永久丢失。
 func (w *FanoutWorker) Handle(ctx context.Context, body []byte) error {
 	var event ClipPublished
 	if err := json.Unmarshal(body, &event); err != nil {
-		log.Printf("warning: 丢弃非法 clip.published 载荷: %v", err)
-		return nil
+		log.Printf("warning: clip.published 载荷非法，转入死信队列: %v", err)
+		return messaging.Permanent(fmt.Errorf("解析 clip.published 载荷失败: %w", err))
 	}
 	if event.ClipID <= 0 || event.CreatorID <= 0 {
-		log.Printf("warning: 丢弃字段非法的 clip.published 载荷 (clip_id=%d creator_id=%d)",
+		log.Printf("warning: clip.published 字段非法，转入死信队列 (clip_id=%d creator_id=%d)",
 			event.ClipID, event.CreatorID)
-		return nil
+		return messaging.Permanent(fmt.Errorf("clip.published 字段非法 (clip_id=%d creator_id=%d)",
+			event.ClipID, event.CreatorID))
 	}
 	if w.cache == nil || !w.cache.Enabled() {
 		// 缓存未启用时 following feed 走 DB 回源，扇出无意义。
@@ -57,9 +59,9 @@ func (w *FanoutWorker) Handle(ctx context.Context, body []byte) error {
 	}
 	entry, ok := entries[event.ClipID]
 	if !ok {
-		// clip 已删除：扇出无意义且重试不会成功，确认消息。
-		log.Printf("warning: clip.published 对应 clip 不可见，丢弃 (clip_id=%d)", event.ClipID)
-		return nil
+		// clip 已删除：扇出无意义且重试不会成功，标记不可重试并转入死信队列。
+		log.Printf("warning: clip.published 对应 clip 不可见，转入死信队列 (clip_id=%d)", event.ClipID)
+		return messaging.Permanent(fmt.Errorf("clip.published 对应 clip 不可见 (clip_id=%d)", event.ClipID))
 	}
 	stats, err := w.repo.BatchGetStats(ctx, []int64{event.ClipID})
 	if err != nil {

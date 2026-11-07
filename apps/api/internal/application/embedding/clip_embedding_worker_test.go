@@ -11,6 +11,7 @@ import (
 
 	appembedding "pulsefeed/internal/application/embedding"
 	domembedding "pulsefeed/internal/domain/embedding"
+	"pulsefeed/internal/domain/messaging"
 )
 
 // embeddingFakeRepository 是 embedding 仓储的内存替身，记录调用次数并只保留每个 clip 的最后一版向量。
@@ -68,8 +69,8 @@ func (f *embeddingFakeRepository) BatchGet(_ context.Context, clipIDs []int64) (
 	return found, nil
 }
 
-// TestClipEmbeddingWorkerDiscardsInvalidPayload 验证非法 JSON 与非法 clip_id 直接确认且不触碰仓储。
-func TestClipEmbeddingWorkerDiscardsInvalidPayload(t *testing.T) {
+// TestClipEmbeddingWorkerDeadLettersInvalidPayload 验证非法 JSON 与非法 clip_id 标记为不可重试（转入死信）且不触碰仓储。
+func TestClipEmbeddingWorkerDeadLettersInvalidPayload(t *testing.T) {
 	repo := newEmbeddingFakeRepository()
 	worker := appembedding.NewWorker(appembedding.New(repo))
 
@@ -80,8 +81,8 @@ func TestClipEmbeddingWorkerDiscardsInvalidPayload(t *testing.T) {
 		[]byte(`{"clip_id":-3,"creator_id":7}`),
 	}
 	for _, body := range payloads {
-		if err := worker.Handle(context.Background(), body); err != nil {
-			t.Fatalf("非法载荷 %s 应直接确认, 实际返回 %v", body, err)
+		if err := worker.Handle(context.Background(), body); !messaging.IsPermanent(err) {
+			t.Fatalf("非法载荷 %s 应标记不可重试（转入死信）, 实际返回 %v", body, err)
 		}
 	}
 	if repo.titleCalls != 0 || repo.upsertCalls != 0 {
@@ -142,8 +143,8 @@ func TestClipEmbeddingWorkerGeneratesDimension256Vector(t *testing.T) {
 	}
 }
 
-// TestClipEmbeddingWorkerConfirmsInvisibleClip 验证 clip 不存在/非发布态时视为终态直接确认。
-func TestClipEmbeddingWorkerConfirmsInvisibleClip(t *testing.T) {
+// TestClipEmbeddingWorkerDeadLettersInvisibleClip 验证 clip 不存在/非发布态时标记不可重试（转入死信）。
+func TestClipEmbeddingWorkerDeadLettersInvisibleClip(t *testing.T) {
 	repo := newEmbeddingFakeRepository()
 	body, err := json.Marshal(appembedding.ClipEmbeddingRequest{ClipID: 99, CreatorID: 7})
 	if err != nil {
@@ -151,8 +152,8 @@ func TestClipEmbeddingWorkerConfirmsInvisibleClip(t *testing.T) {
 	}
 
 	worker := appembedding.NewWorker(appembedding.New(repo))
-	if err := worker.Handle(context.Background(), body); err != nil {
-		t.Fatalf("clip 不可见应直接确认, 实际返回 %v", err)
+	if err := worker.Handle(context.Background(), body); !messaging.IsPermanent(err) {
+		t.Fatalf("clip 不可见应标记不可重试（转入死信）, 实际返回 %v", err)
 	}
 	if repo.upsertCalls != 0 {
 		t.Fatalf("clip 不可见不应写入向量, upsert_calls=%d", repo.upsertCalls)

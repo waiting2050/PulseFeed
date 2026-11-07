@@ -4,7 +4,10 @@ package appembedding
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
+
+	"pulsefeed/internal/domain/messaging"
 )
 
 // ClipEmbeddingRequest 是 clip.embedding 事件载荷，与 clip.published 共享 clip_id 字段。
@@ -29,17 +32,17 @@ func (w *Worker) Name() string {
 	return "clip_embedding"
 }
 
-// Handle 解析事件并生成向量：非法载荷直接确认，领域终态（clip 不可见）由服务层跳过，
+// Handle 解析事件并生成向量：非法载荷与领域终态（clip 不可见）标记为不可重试（转入死信），
 // 其余错误返回给 MQ 重新入队。
 func (w *Worker) Handle(ctx context.Context, body []byte) error {
 	var event ClipEmbeddingRequest
 	if err := json.Unmarshal(body, &event); err != nil {
-		log.Printf("warning: 丢弃非法 clip.embedding 载荷: %v", err)
-		return nil
+		log.Printf("warning: clip.embedding 载荷非法，转入死信队列: %v", err)
+		return messaging.Permanent(fmt.Errorf("解析 clip.embedding 载荷失败: %w", err))
 	}
 	if event.ClipID <= 0 {
-		log.Printf("warning: 丢弃字段非法的 clip.embedding 载荷 (clip_id=%d)", event.ClipID)
-		return nil
+		log.Printf("warning: clip.embedding 字段非法，转入死信队列 (clip_id=%d)", event.ClipID)
+		return messaging.Permanent(fmt.Errorf("clip.embedding 字段非法 (clip_id=%d)", event.ClipID))
 	}
 	return w.service.Generate(ctx, event.ClipID)
 }

@@ -6,10 +6,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"time"
 
 	domimpression "pulsefeed/internal/domain/impression"
+	"pulsefeed/internal/domain/messaging"
 )
 
 // PlayEventWorker 是 play_recorded 队列的消费者，保证曝光聚合最终一致。
@@ -29,17 +31,18 @@ func (w *PlayEventWorker) Name() string {
 
 // Handle 解析事件并执行曝光补偿：
 // 已聚合（synced=true）的事件直接确认；未聚合的执行 upsert 并标记同步；
-// 非法载荷与领域终态错误直接确认，避免毒消息无限回队。
+// 非法载荷与领域终态错误标记为不可重试（转入死信），避免毒消息无限回队。
 func (w *PlayEventWorker) Handle(ctx context.Context, body []byte) error {
 	var event PlayRecorded
 	if err := json.Unmarshal(body, &event); err != nil {
-		log.Printf("warning: 丢弃非法 play.recorded 载荷: %v", err)
-		return nil
+		log.Printf("warning: play.recorded 载荷非法，转入死信队列: %v", err)
+		return messaging.Permanent(fmt.Errorf("解析 play.recorded 载荷失败: %w", err))
 	}
 	if event.EventID == "" || event.ViewerID <= 0 || event.ClipID <= 0 {
-		log.Printf("warning: 丢弃字段非法的 play.recorded 载荷 (event_id=%s viewer_id=%d clip_id=%d)",
+		log.Printf("warning: play.recorded 字段非法，转入死信队列 (event_id=%s viewer_id=%d clip_id=%d)",
 			event.EventID, event.ViewerID, event.ClipID)
-		return nil
+		return messaging.Permanent(fmt.Errorf("play.recorded 字段非法 (event_id=%s viewer_id=%d clip_id=%d)",
+			event.EventID, event.ViewerID, event.ClipID))
 	}
 
 	// API 同步链路在落库事务内已完成曝光聚合并标记 synced=true，正常路径直接确认。
@@ -66,9 +69,9 @@ func (w *PlayEventWorker) Handle(ctx context.Context, body []byte) error {
 	}
 	if err := w.repo.UpsertImpression(ctx, playEvent); err != nil {
 		if errors.Is(err, domimpression.ErrClipNotFound) {
-			// clip 已删除：重试无意义，确认消息。
-			log.Printf("warning: play.recorded 因 clip 不可见被丢弃 (event_id=%s): %v", event.EventID, err)
-			return nil
+			// clip 已删除：重试无意义，标记不可重试并转入死信队列。
+			log.Printf("warning: play.recorded 因 clip 不可见转入死信队列 (event_id=%s): %v", event.EventID, err)
+			return messaging.Permanent(fmt.Errorf("play.recorded 对应 clip 不可见 (event_id=%s): %w", event.EventID, err))
 		}
 		return err
 	}

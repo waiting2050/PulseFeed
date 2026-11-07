@@ -4,9 +4,11 @@ package appembedding
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 
 	domembedding "pulsefeed/internal/domain/embedding"
+	"pulsefeed/internal/domain/messaging"
 )
 
 // Service 提供向量生成用例，只依赖 embedding 领域端口。
@@ -19,14 +21,14 @@ func New(repo domembedding.Repository) *Service {
 	return &Service{repo: repo}
 }
 
-// Generate 为指定 clip 生成并写入文本向量：clip 已删除或非发布态时视为终态直接跳过，
-// 保证消息可确认而不无限重试；其余错误返回给 Worker 重新入队。
+// Generate 为指定 clip 生成并写入文本向量：clip 已删除或非发布态时标记为不可重试（转入死信），
+// 避免无限重试；其余错误返回给 Worker 重新入队。
 func (s *Service) Generate(ctx context.Context, clipID int64) error {
 	title, err := s.repo.GetClipTitle(ctx, clipID)
 	if err != nil {
 		if errors.Is(err, domembedding.ErrClipNotFound) {
-			log.Printf("warning: clip 不可见，跳过向量生成 (clip_id=%d)", clipID)
-			return nil
+			log.Printf("warning: clip 不可见，向量生成转入死信队列 (clip_id=%d)", clipID)
+			return messaging.Permanent(fmt.Errorf("clip 不可见，跳过向量生成 (clip_id=%d): %w", clipID, err))
 		}
 		return err
 	}

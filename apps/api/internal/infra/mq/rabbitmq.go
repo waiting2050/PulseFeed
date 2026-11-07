@@ -4,7 +4,9 @@ package inframq
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"hash/fnv"
 	"log"
 	"sync"
 	"time"
@@ -12,6 +14,7 @@ import (
 	appclip "pulsefeed/internal/application/clip"
 	appimpression "pulsefeed/internal/application/impression"
 	appaction "pulsefeed/internal/application/interaction"
+	"pulsefeed/internal/domain/messaging"
 	"pulsefeed/internal/infra/config"
 
 	amqp "github.com/rabbitmq/amqp091-go"
@@ -26,7 +29,14 @@ const (
 	consumePrefetch = 16
 	// embeddingRouting 是向量生成队列的路由键；配置项仅给出队列名，路由键按命名形态补全。
 	embeddingRouting = "clip.embedding"
+	// MaxDeliveryAttempts 是单条消息可重试次数上限；达到上限仍失败则转入死信队列。
+	MaxDeliveryAttempts = 3
 )
+
+// DeadLetterNames 返回死信交换机、死信队列与死信路由键，命名由业务交换机与队列推导。
+func DeadLetterNames(exchange, queue, routing string) (dlx, deadQueue, deadRouting string) {
+	return exchange + ".dlx", queue + ".dead", "dead." + routing
+}
 
 // Client 是 RabbitMQ 客户端，持有连接与一条串行化使用的发布通道。
 type Client struct {
@@ -99,8 +109,31 @@ func (c *Client) declareTopology() error {
 		{c.cfg.ActionChangedQueue, c.cfg.InteractionExchange, c.cfg.ActionChangedRouting},
 		{c.cfg.PlayEventRecordedQueue, c.cfg.ImpressionExchange, c.cfg.PlayEventRecordedRouting},
 	}
+
+	// 死信交换机需先于队列声明存在，否则队列参数 x-dead-letter-exchange 无法生效。
+	declaredDLX := make(map[string]struct{}, len(bindings))
 	for _, b := range bindings {
-		if err := declareQueue(ch, b.queue, b.exchange, b.routing); err != nil {
+		dlx, _, _ := DeadLetterNames(b.exchange, b.queue, b.routing)
+		if _, ok := declaredDLX[dlx]; ok {
+			continue
+		}
+		if err := ch.ExchangeDeclare(dlx, "topic", true, false, false, false, nil); err != nil {
+			return fmt.Errorf("声明死信交换机 %q 失败: %w", dlx, err)
+		}
+		declaredDLX[dlx] = struct{}{}
+	}
+
+	for _, b := range bindings {
+		dlx, deadQueue, deadRouting := DeadLetterNames(b.exchange, b.queue, b.routing)
+		args := amqp.Table{
+			"x-dead-letter-exchange":    dlx,
+			"x-dead-letter-routing-key": deadRouting,
+		}
+		if err := declareQueue(ch, b.queue, b.exchange, b.routing, args); err != nil {
+			return err
+		}
+		// 死信队列自身不再配置死信参数，避免循环死信。
+		if err := declareQueue(ch, deadQueue, dlx, deadRouting, nil); err != nil {
 			return err
 		}
 	}
@@ -114,9 +147,15 @@ func (c *Client) declareTopology() error {
 	return nil
 }
 
-// declareQueue 声明持久化队列并绑定到指定交换机与路由键。
-func declareQueue(ch *amqp.Channel, queue, exchange, routing string) error {
-	if _, err := ch.QueueDeclare(queue, true, false, false, false, nil); err != nil {
+// declareQueue 声明持久化队列（可带死信参数）并绑定到指定交换机与路由键。
+func declareQueue(ch *amqp.Channel, queue, exchange, routing string, args amqp.Table) error {
+	if _, err := ch.QueueDeclare(queue, true, false, false, false, args); err != nil {
+		// 同名队列参数不一致时 broker 返回 406；新增死信参数后旧队列需显式删除才能重建。
+		var amqpErr *amqp.Error
+		if errors.As(err, &amqpErr) && amqpErr.Code == amqp.PreconditionFailed {
+			return fmt.Errorf("队列 %q 已存在且参数不一致（新增死信参数），请删除旧队列后重启（rabbitmqctl delete_queue %s）: %w",
+				queue, queue, err)
+		}
 		return fmt.Errorf("声明队列 %q 失败: %w", queue, err)
 	}
 	if err := ch.QueueBind(queue, routing, exchange, false, nil); err != nil {
@@ -209,6 +248,9 @@ func (c *Client) Consume(ctx context.Context, queue string, handler func(context
 	}()
 	defer close(done)
 
+	// attempts 记录本消费循环内每条消息的失败次数；重投消息 body 不变，按内容哈希累计。
+	attempts := make(map[uint64]int)
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -222,16 +264,43 @@ func (c *Client) Consume(ctx context.Context, queue string, handler func(context
 				return fmt.Errorf("队列 %q 消费通道意外关闭", queue)
 			}
 			if err := handler(ctx, delivery.Body); err != nil {
-				// 处理失败重新入队，由下游按领域错误判定是否可终止，避免消息静默丢失。
-				log.Printf("warning: 消费队列 %q 消息失败 (delivery_tag=%d): %v", queue, delivery.DeliveryTag, err)
+				key := messageKey(delivery.Body)
+				attempts[key]++
+				permanent := messaging.IsPermanent(err)
+				exhausted := attempts[key] >= MaxDeliveryAttempts
+				if permanent || exhausted {
+					reason := "不可重试"
+					if !permanent {
+						reason = fmt.Sprintf("超过重试上限 %d 次", MaxDeliveryAttempts)
+					}
+					// 不重新入队：broker 按队列的 x-dead-letter-exchange 转入死信队列。
+					log.Printf("warning: 消费队列 %q 消息失败，转入死信队列（%s, delivery_tag=%d）: %v",
+						queue, reason, delivery.DeliveryTag, err)
+					if nackErr := delivery.Nack(false, false); nackErr != nil {
+						log.Printf("warning: 消息转入死信失败 (delivery_tag=%d): %v", delivery.DeliveryTag, nackErr)
+					}
+					delete(attempts, key)
+					continue
+				}
+				// 可重试错误重新入队，超过 MaxDeliveryAttempts 后由上面的分支转入死信。
+				log.Printf("warning: 消费队列 %q 消息失败，重试 %d/%d 次 (delivery_tag=%d): %v",
+					queue, attempts[key], MaxDeliveryAttempts, delivery.DeliveryTag, err)
 				if nackErr := delivery.Nack(false, true); nackErr != nil {
 					log.Printf("warning: 消息重新入队失败 (delivery_tag=%d): %v", delivery.DeliveryTag, nackErr)
 				}
 				continue
 			}
+			delete(attempts, messageKey(delivery.Body))
 			if err := delivery.Ack(false); err != nil {
 				log.Printf("warning: 消息确认失败 (delivery_tag=%d): %v", delivery.DeliveryTag, err)
 			}
 		}
 	}
+}
+
+// messageKey 用消息内容哈希标识一次投递，重投后内容不变因而可累计失败次数。
+func messageKey(body []byte) uint64 {
+	h := fnv.New64a()
+	_, _ = h.Write(body)
+	return h.Sum64()
 }

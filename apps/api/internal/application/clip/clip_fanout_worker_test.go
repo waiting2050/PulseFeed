@@ -11,6 +11,7 @@ import (
 	appclip "pulsefeed/internal/application/clip"
 	appfeed "pulsefeed/internal/application/feed"
 	domfeed "pulsefeed/internal/domain/feed"
+	"pulsefeed/internal/domain/messaging"
 )
 
 // fanoutWFakeRepo 是扇出用例的内存 feed 仓储，记录调用并支持错误注入。
@@ -213,8 +214,8 @@ func fanoutWNewFixture() (*fanoutWFakeRepo, *fanoutWFakeCache, []byte, time.Time
 	return repo, cache, body, publishedAt
 }
 
-// TestFanoutWorkerDiscardsInvalidPayload 验证非法 JSON 与非法字段直接确认，不做任何缓存写。
-func TestFanoutWorkerDiscardsInvalidPayload(t *testing.T) {
+// TestFanoutWorkerDeadLettersInvalidPayload 验证非法 JSON 与非法字段标记为不可重试（转入死信），不做任何缓存写。
+func TestFanoutWorkerDeadLettersInvalidPayload(t *testing.T) {
 	bodies := [][]byte{
 		[]byte("not-json"),
 		[]byte(`{"clip_id":0,"creator_id":7}`),
@@ -225,8 +226,8 @@ func TestFanoutWorkerDiscardsInvalidPayload(t *testing.T) {
 		repo, cache, _, _ := fanoutWNewFixture()
 		worker := appclip.NewFanoutWorker(repo, cache)
 
-		if err := worker.Handle(context.Background(), body); err != nil {
-			t.Fatalf("非法载荷 %s 应直接确认，实际 %v", body, err)
+		if err := worker.Handle(context.Background(), body); !messaging.IsPermanent(err) {
+			t.Fatalf("非法载荷 %s 应标记不可重试（转入死信），实际 %v", body, err)
 		}
 		if len(cache.inboxWrites) != 0 || len(cache.outboxWrites) != 0 || cache.cardSetCalls != 0 {
 			t.Fatalf("非法载荷 %s 不应触发缓存写", body)
@@ -256,14 +257,14 @@ func TestFanoutWorkerSkipsWhenCacheDisabled(t *testing.T) {
 	}
 }
 
-// TestFanoutWorkerDiscardsInvisibleClip 验证 clip 已删除/不可见时直接确认，不写缓存也不再读粉丝。
-func TestFanoutWorkerDiscardsInvisibleClip(t *testing.T) {
+// TestFanoutWorkerDeadLettersInvisibleClip 验证 clip 已删除/不可见时标记不可重试（转入死信），不写缓存也不再读粉丝。
+func TestFanoutWorkerDeadLettersInvisibleClip(t *testing.T) {
 	repo, cache, _, _ := fanoutWNewFixture()
 	body, _ := json.Marshal(appclip.ClipPublished{ClipID: 999, CreatorID: 7, PublishedAt: time.Now()})
 
 	worker := appclip.NewFanoutWorker(repo, cache)
-	if err := worker.Handle(context.Background(), body); err != nil {
-		t.Fatalf("不可见 clip 应直接确认: %v", err)
+	if err := worker.Handle(context.Background(), body); !messaging.IsPermanent(err) {
+		t.Fatalf("不可见 clip 应标记不可重试（转入死信），实际 %v", err)
 	}
 	if len(cache.inboxWrites) != 0 || len(cache.outboxWrites) != 0 || cache.cardSetCalls != 0 {
 		t.Fatalf("不可见 clip 不应触发缓存写")

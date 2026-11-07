@@ -13,6 +13,7 @@ import (
 
 	appimpression "pulsefeed/internal/application/impression"
 	domimpression "pulsefeed/internal/domain/impression"
+	"pulsefeed/internal/domain/messaging"
 )
 
 // impressionFakeRepository 是曝光仓储的内存替身：按 event_id 去重，并按 (viewer, clip, day) 聚合计数。
@@ -276,8 +277,8 @@ func TestRecordPlayEventIgnoresPublisherFailure(t *testing.T) {
 	}
 }
 
-// TestPlayEventWorkerDiscardsInvalidPayload 验证非法载荷直接确认，不查询同步状态也不补偿。
-func TestPlayEventWorkerDiscardsInvalidPayload(t *testing.T) {
+// TestPlayEventWorkerDeadLettersInvalidPayload 验证非法载荷标记为不可重试（转入死信），不查询同步状态也不补偿。
+func TestPlayEventWorkerDeadLettersInvalidPayload(t *testing.T) {
 	repo := newImpressionFakeRepository(10)
 	worker := appimpression.NewPlayEventWorker(repo)
 
@@ -288,8 +289,8 @@ func TestPlayEventWorkerDiscardsInvalidPayload(t *testing.T) {
 		[]byte(`{"event_id":"evt-1","viewer_id":7,"clip_id":0}`),
 	}
 	for _, body := range payloads {
-		if err := worker.Handle(context.Background(), body); err != nil {
-			t.Fatalf("非法载荷 %s 应直接确认, 实际返回 %v", body, err)
+		if err := worker.Handle(context.Background(), body); !messaging.IsPermanent(err) {
+			t.Fatalf("非法载荷 %s 应标记不可重试（转入死信）, 实际返回 %v", body, err)
 		}
 	}
 	if repo.syncedCalls != 0 || repo.upsertCalls != 0 || repo.markCalls != 0 {
@@ -377,8 +378,8 @@ func TestPlayEventWorkerCompensatesUnsyncedEvent(t *testing.T) {
 	}
 }
 
-// TestPlayEventWorkerDiscardsMissingClip 验证补偿时 clip 不可见直接确认，避免毒消息无限回队。
-func TestPlayEventWorkerDiscardsMissingClip(t *testing.T) {
+// TestPlayEventWorkerDeadLettersMissingClip 验证补偿时 clip 不可见标记为不可重试（转入死信），避免毒消息无限回队。
+func TestPlayEventWorkerDeadLettersMissingClip(t *testing.T) {
 	repo := newImpressionFakeRepository(10)
 	body, err := json.Marshal(appimpression.PlayRecorded{
 		EventID:        "evt-3",
@@ -392,8 +393,8 @@ func TestPlayEventWorkerDiscardsMissingClip(t *testing.T) {
 	}
 
 	worker := appimpression.NewPlayEventWorker(repo)
-	if err := worker.Handle(context.Background(), body); err != nil {
-		t.Fatalf("clip 不可见应直接确认, 实际返回 %v", err)
+	if err := worker.Handle(context.Background(), body); !messaging.IsPermanent(err) {
+		t.Fatalf("clip 不可见应标记不可重试（转入死信）, 实际返回 %v", err)
 	}
 	if repo.markCalls != 0 {
 		t.Fatalf("clip 不可见不应标记已同步, mark=%d", repo.markCalls)
