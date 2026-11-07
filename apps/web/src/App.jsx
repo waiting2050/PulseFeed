@@ -9,6 +9,7 @@ import FeedPage from './pages/FeedPage.jsx'
 import PublishPage from './pages/PublishPage.jsx'
 import MessagesPage from './pages/MessagesPage.jsx'
 import PlaybackPage from './pages/PlaybackPage.jsx'
+import ProfilePage from './pages/ProfilePage.jsx'
 import { api, getToken, hydrateToken, invalidatePlaybackConfig, loadPlaybackConfig, setToken } from './lib/api.js'
 
 // readNext 只接受站内绝对路径，避免登录回跳被外部地址利用。
@@ -160,18 +161,45 @@ export default function App() {
 
   return (
     <div className="pf-app">
-      <TopBar tab={tabForPath(location.pathname)} onTab={handleTab} unread={unread} me={me} onLogout={handleLogout} />
+      <TopBar
+        tab={tabForPath(location.pathname)}
+        onTab={handleTab}
+        unread={unread}
+        me={me}
+        onLogout={handleLogout}
+        onProfile={() => navigate('/me')}
+      />
 
       <main className="pf-main">
         <Routes>
           <Route index element={<Navigate to="/feed" replace />} />
           <Route path="/login" element={<Navigate to="/feed" replace />} />
-          <Route path="/feed" element={<FeedPage onGoPublish={() => navigate('/publish')} />} />
+          <Route
+            path="/feed"
+            element={
+              <FeedPage
+                me={me}
+                onGoPublish={() => navigate('/publish')}
+                onOpenUser={(userId) => navigate(`/users/${userId}`)}
+              />
+            }
+          />
           <Route path="/publish" element={<PublishPage onPublished={() => navigate('/feed')} />} />
           <Route path="/messages" element={<MessagesPage unread={unread} onUnreadChange={handleUnreadChange} />} />
           <Route path="/playback" element={<PlaybackPage />} />
+          <Route path="/me" element={<ProfilePage me={me} onMeChange={setMe} />} />
+          <Route path="/users/:userId" element={<ProfilePage me={me} onMeChange={setMe} />} />
           {/* 单条内容深链：详情弹层由 FeedPage 按 URL 渲染，列表仍留在背后作为关闭后的落点。 */}
-          <Route path="/clip/:clipId" element={<FeedPage onGoPublish={() => navigate('/publish')} />} />
+          <Route
+            path="/clip/:clipId"
+            element={
+              <FeedPage
+                me={me}
+                onGoPublish={() => navigate('/publish')}
+                onOpenUser={(userId) => navigate(`/users/${userId}`)}
+              />
+            }
+          />
           <Route path="*" element={<NotFound onBack={() => navigate('/feed')} />} />
         </Routes>
       </main>

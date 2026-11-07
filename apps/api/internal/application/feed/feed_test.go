@@ -17,9 +17,13 @@ import (
 type feedFakeRepo struct {
 	entries      []*domfeed.FeedEntry
 	viewerStates map[int64]map[int64]*domfeed.ViewerState
+	profiles     map[int64]*domfeed.CreatorProfile
+	followed     map[int64]bool
 	listCalls    int
 	lastLimit    int
 	viewerCalls  int
+	profileCalls int
+	followCalls  int
 	listErr      error
 	viewerErr    error
 }
@@ -45,6 +49,8 @@ func newFeedFakeRepo(count int) *feedFakeRepo {
 	return &feedFakeRepo{
 		entries:      entries,
 		viewerStates: make(map[int64]map[int64]*domfeed.ViewerState),
+		profiles:     make(map[int64]*domfeed.CreatorProfile),
+		followed:     make(map[int64]bool),
 	}
 }
 
@@ -105,6 +111,29 @@ func (f *feedFakeRepo) BatchGetEntries(_ context.Context, _ []int64) (map[int64]
 
 func (f *feedFakeRepo) BatchGetStats(_ context.Context, _ []int64) (map[int64]*domfeed.EntryStats, error) {
 	return map[int64]*domfeed.EntryStats{}, nil
+}
+
+func (f *feedFakeRepo) BatchGetCreatorProfiles(_ context.Context, creatorIDs []int64) (map[int64]*domfeed.CreatorProfile, error) {
+	f.profileCalls++
+	result := make(map[int64]*domfeed.CreatorProfile, len(creatorIDs))
+	for _, id := range creatorIDs {
+		if profile, ok := f.profiles[id]; ok {
+			clone := *profile
+			result[id] = &clone
+		}
+	}
+	return result, nil
+}
+
+func (f *feedFakeRepo) BatchGetFollowedCreatorIDs(_ context.Context, _ int64, creatorIDs []int64) (map[int64]bool, error) {
+	f.followCalls++
+	result := make(map[int64]bool, len(creatorIDs))
+	for _, id := range creatorIDs {
+		if f.followed[id] {
+			result[id] = true
+		}
+	}
+	return result, nil
 }
 
 func (f *feedFakeRepo) BatchGetViewerStates(_ context.Context, viewerID int64, clipIDs []int64) (map[int64]*domfeed.ViewerState, error) {
@@ -338,6 +367,50 @@ func TestFeedAnonymousSkipsViewerState(t *testing.T) {
 	}
 	if repo.viewerCalls != 0 {
 		t.Fatalf("匿名读者不应查询状态, 实际 %d 次", repo.viewerCalls)
+	}
+}
+
+// TestFeedEnrichesCreatorProfile 验证每条 Feed 都补齐作者昵称/头像，并按读者回显是否已关注作者。
+func TestFeedEnrichesCreatorProfile(t *testing.T) {
+	ctx := context.Background()
+	repo := newFeedFakeRepo(3)
+	repo.profiles[1] = &domfeed.CreatorProfile{Nickname: "创作者一", AvatarURL: "/uploads/avatar/1.png"}
+	repo.followed[1] = true
+	svc := appfeed.New(repo)
+
+	result, err := svc.GetFeed(ctx, &appfeed.FeedRequest{Scene: "latest", ViewerID: 7, Limit: 3})
+	if err != nil {
+		t.Fatalf("读取失败: %v", err)
+	}
+	for _, item := range result.Items {
+		if item.Creator.UserID != 1 {
+			t.Fatalf("作者 ID = %d, 期望 1", item.Creator.UserID)
+		}
+		if item.Creator.Nickname != "创作者一" || item.Creator.AvatarURL != "/uploads/avatar/1.png" {
+			t.Fatalf("作者资料未补齐: %+v", item.Creator)
+		}
+		if !item.Creator.Following {
+			t.Fatalf("读者已关注作者，应回显 Following=true: %+v", item.Creator)
+		}
+	}
+	if repo.profileCalls != 1 || repo.followCalls != 1 {
+		t.Fatalf("作者资料与关注态应各批量查询一次: profile=%d follow=%d", repo.profileCalls, repo.followCalls)
+	}
+
+	anonymous, err := svc.GetFeed(ctx, &appfeed.FeedRequest{Scene: "latest", Limit: 3})
+	if err != nil {
+		t.Fatalf("匿名读取失败: %v", err)
+	}
+	for _, item := range anonymous.Items {
+		if item.Creator.Nickname != "创作者一" {
+			t.Fatalf("匿名读者也应获得作者资料: %+v", item.Creator)
+		}
+		if item.Creator.Following {
+			t.Fatalf("匿名读者关注态应恒为 false: %+v", item.Creator)
+		}
+	}
+	if repo.followCalls != 1 {
+		t.Fatalf("匿名读者不应查询关注态, 实际 %d 次", repo.followCalls)
 	}
 }
 

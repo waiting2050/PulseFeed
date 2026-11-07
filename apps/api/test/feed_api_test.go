@@ -90,6 +90,20 @@ func (f *fakeFeedRepository) ListHotPage(_ context.Context, _ *domfeed.Cursor, _
 	return nil, nil
 }
 
+// BatchGetCreatorProfiles 为所有请求的作者返回统一昵称，覆盖 Feed DTO 的作者字段。
+func (f *fakeFeedRepository) BatchGetCreatorProfiles(_ context.Context, creatorIDs []int64) (map[int64]*domfeed.CreatorProfile, error) {
+	profiles := make(map[int64]*domfeed.CreatorProfile, len(creatorIDs))
+	for _, id := range creatorIDs {
+		profiles[id] = &domfeed.CreatorProfile{Nickname: fmt.Sprintf("creator-%d", id), AvatarURL: fmt.Sprintf("/uploads/avatar/%d.png", id)}
+	}
+	return profiles, nil
+}
+
+// BatchGetFollowedCreatorIDs 返回空集，fake 简化实现（测试不涉及关注态）。
+func (f *fakeFeedRepository) BatchGetFollowedCreatorIDs(_ context.Context, _ int64, _ []int64) (map[int64]bool, error) {
+	return nil, nil
+}
+
 // ListFollowedCreators 返回空集，fake 简化实现（测试不涉及大 V 判定）。
 func (f *fakeFeedRepository) ListFollowedCreators(_ context.Context, _ int64) ([]*domfeed.FollowedCreator, error) {
 	return nil, nil

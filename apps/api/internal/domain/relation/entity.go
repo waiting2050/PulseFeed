@@ -66,6 +66,12 @@ type ListEntry struct {
 	FollowedAt time.Time
 }
 
+// UserStats 是用户的关注数与粉丝数；统计行缺失时视为 0。
+type UserStats struct {
+	FollowingCount int64
+	FollowerCount  int64
+}
+
 // ListCursor 是关注/粉丝列表按 (updated_at, peer_user_id) 严格递减翻页的游标。
 type ListCursor struct {
 	FollowedAt time.Time `json:"f"`

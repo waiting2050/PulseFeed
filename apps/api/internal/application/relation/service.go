@@ -119,6 +119,30 @@ func (s *Service) ListFollowers(ctx context.Context, userID int64, cursor string
 	return buildListResult(entries, size), nil
 }
 
+// StatsResult 是用户关系概览：关注数、粉丝数，以及当前读者是否已关注该用户。
+type StatsResult struct {
+	FollowingCount int64
+	FollowerCount  int64
+	Following      bool
+}
+
+// Stats 返回目标用户的关注/粉丝计数，并按读者身份补充是否已关注；未登录读者 Following 恒为 false。
+func (s *Service) Stats(ctx context.Context, viewerID, targetUserID int64) (*StatsResult, error) {
+	stats, err := s.repo.GetUserStats(ctx, targetUserID)
+	if err != nil {
+		return nil, err
+	}
+	result := &StatsResult{FollowingCount: stats.FollowingCount, FollowerCount: stats.FollowerCount}
+	if viewerID > 0 && viewerID != targetUserID {
+		following, err := s.repo.IsFollowing(ctx, viewerID, targetUserID)
+		if err != nil {
+			return nil, err
+		}
+		result.Following = following
+	}
+	return result, nil
+}
+
 // parseListPage 解析列表游标并校验页大小：0 取默认值，负值或超上限返回 ErrInvalidLimit。
 func parseListPage(cursor string, limit int) (*domrelation.ListCursor, int, error) {
 	if limit < 0 || limit > domrelation.MaxLimit {

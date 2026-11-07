@@ -182,6 +182,10 @@ func Register(engine *gin.Engine, cfg *config.Config, db *sql.DB) error {
 	api.POST("/sessions", accountHandler.Login)
 	api.GET("/users/:userId", accountHandler.GetByID)
 	api.GET("/users/:userId/clips", clipHandler.ListByCreator)
+	// 公开主页的关系概览与关注/粉丝列表：允许匿名读取，带 token 时回显当前读者是否已关注。
+	api.GET("/users/:userId/relation", optionalAuth, relationHandler.GetStats)
+	api.GET("/users/:userId/following", relationHandler.ListFollowingOf)
+	api.GET("/users/:userId/followers", relationHandler.ListFollowersOf)
 	api.GET("/clips/:clipId", clipHandler.GetByID)
 	// Feed 读取允许未登录，携带合法 token 时回显读者互动状态（S9 已生效）。
 	api.GET("/feed", optionalAuth, feedHandler.GetFeed)

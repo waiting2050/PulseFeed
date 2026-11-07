@@ -82,6 +82,12 @@ func toFeedEntryResponse(entry *domfeed.FeedEntry) feedEntryResponse {
 	return feedEntryResponse{
 		ClipID:       entry.ClipID,
 		CreatorID:    entry.CreatorID,
+		Creator: feedCreatorResponse{
+			UserID:    entry.Creator.UserID,
+			Nickname:  entry.Creator.Nickname,
+			AvatarURL: entry.Creator.AvatarURL,
+			Following: entry.Creator.Following,
+		},
 		Title:        entry.Title,
 		VideoURL:     entry.VideoURL,
 		CoverURL:     entry.CoverURL,

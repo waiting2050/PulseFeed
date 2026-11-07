@@ -14,4 +14,8 @@ type Repository interface {
 	ListFollowing(ctx context.Context, userID int64, cursor *ListCursor, limit int) ([]*ListEntry, error)
 	// ListFollowers 按 (updated_at, user_id) 严格递减返回 userID 的粉丝列表，分页语义同上。
 	ListFollowers(ctx context.Context, userID int64, cursor *ListCursor, limit int) ([]*ListEntry, error)
+	// GetUserStats 读取用户的关注数与粉丝数；统计行不存在时返回 0 值，不视为错误。
+	GetUserStats(ctx context.Context, userID int64) (*UserStats, error)
+	// IsFollowing 判断 userID 是否关注 targetUserID；自关注与非法 ID 一律返回 false。
+	IsFollowing(ctx context.Context, userID, targetUserID int64) (bool, error)
 }

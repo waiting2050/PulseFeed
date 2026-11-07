@@ -62,10 +62,11 @@ function normalizeClip(data, clipId) {
     save_count: Number(data && data.save_count) || 0,
     comment_count: Number(data && data.comment_count) || 0,
     play_count: Number(data && data.play_count) || 0,
+    creator: null,
   }
 }
 
-export default function FeedPage({ onGoPublish }) {
+export default function FeedPage({ onGoPublish, me, onOpenUser }) {
   const navigate = useNavigate()
   const location = useLocation()
   const clipMatch = useMatch('/clip/:clipId')
@@ -138,6 +139,41 @@ export default function FeedPage({ onGoPublish }) {
     setItems((prev) => prev.map((item) => (item.clip_id === id ? { ...item, ...patch } : item)))
     setDeepItem((prev) => (prev && prev.clip_id === id ? { ...prev, ...patch } : prev))
   }, [])
+
+  // patchCreator 同步更新同一作者的所有卡片与详情，关注态在当前列表内立即一致。
+  const patchCreator = useCallback((creatorId, following) => {
+    const apply = (item) =>
+      item && item.creator && item.creator.user_id === creatorId
+        ? { ...item, creator: { ...item.creator, following } }
+        : item
+    setItems((prev) => prev.map(apply))
+    setDeepItem((prev) => apply(prev))
+  }, [])
+
+  async function toggleFollow(item) {
+    const creator = item.creator
+    if (!creator || !creator.user_id) return
+    if (creator.user_id === Number(me && me.user_id)) return
+    const next = !creator.following
+    patchCreator(creator.user_id, next)
+    setActionError('')
+    try {
+      const data = await api.follow(creator.user_id, next)
+      patchCreator(creator.user_id, data.following)
+      // 关注流的可见性由关注关系驱动：关系变化后重新拉取首页，避免缓存里的旧集合。
+      if (scene === 'following') firstPage.retry()
+    } catch (err) {
+      patchCreator(creator.user_id, creator.following)
+      setActionError(err.message)
+    }
+  }
+
+  const openUser = useCallback(
+    (userId) => {
+      if (onOpenUser) onOpenUser(userId)
+    },
+    [onOpenUser],
+  )
 
   async function toggleLike(item) {
     const liked = !item.liked
@@ -284,6 +320,9 @@ export default function FeedPage({ onGoPublish }) {
               onOpen={openDetail}
               suspended={clipId !== null || (playingId !== null && playingId !== item.clip_id)}
               onPlay={setPlayingId}
+              viewerId={Number(me && me.user_id) || 0}
+              onCreator={openUser}
+              onFollow={toggleFollow}
             />
           ))}
         </section>
@@ -312,6 +351,9 @@ export default function FeedPage({ onGoPublish }) {
           onLike={toggleLike}
           onSave={toggleSave}
           onCommentAdded={handleCommentAdded}
+          viewerId={Number(me && me.user_id) || 0}
+          onCreator={openUser}
+          onFollow={toggleFollow}
         />
       ) : null}
     </div>

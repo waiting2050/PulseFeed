@@ -22,6 +22,7 @@ type relationFakeRepo struct {
 	setCalls           int
 	listFollowingCalls int
 	listFollowersCalls int
+	isFollowingCalls   int
 	lastListLimit      int
 	lastIdempotencyKey string
 	setErr             error
@@ -144,6 +145,19 @@ func (f *relationFakeRepo) ListFollowing(_ context.Context, userID int64, cursor
 		})
 	}
 	return relationFakePage(entries, cursor, limit), nil
+}
+
+func (f *relationFakeRepo) GetUserStats(_ context.Context, userID int64) (*domrelation.UserStats, error) {
+	return &domrelation.UserStats{
+		FollowingCount: f.followingCounts[userID],
+		FollowerCount:  f.followerCounts[userID],
+	}, nil
+}
+
+func (f *relationFakeRepo) IsFollowing(_ context.Context, userID, targetUserID int64) (bool, error) {
+	f.isFollowingCalls++
+	relation := f.follows[[2]int64{userID, targetUserID}]
+	return relation != nil && relation.Status == domrelation.StatusFollowing, nil
 }
 
 func (f *relationFakeRepo) ListFollowers(_ context.Context, userID int64, cursor *domrelation.ListCursor, limit int) ([]*domrelation.ListEntry, error) {
@@ -553,6 +567,68 @@ func TestRelationListValidatesPage(t *testing.T) {
 		}
 		if repo.lastListLimit != domrelation.DefaultLimit+1 {
 			t.Fatalf("仓储 limit = %d, 期望 %d", repo.lastListLimit, domrelation.DefaultLimit+1)
+		}
+	})
+}
+
+// TestRelationStatsReflectsCountsAndViewerState 验证关系概览返回计数，并仅在非本人已登录读者时回显关注态。
+func TestRelationStatsReflectsCountsAndViewerState(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+	repo := newRelationFakeRepo()
+	relationFakeSeed(repo, 2, 1, base)
+	relationFakeSeed(repo, 3, 1, base.Add(time.Minute))
+	relationFakeSeed(repo, 1, 4, base.Add(2*time.Minute))
+	svc := apprelation.New(repo)
+
+	t.Run("已关注读者", func(t *testing.T) {
+		result, err := svc.Stats(ctx, 2, 1)
+		if err != nil {
+			t.Fatalf("已关注读者不应失败: %v", err)
+		}
+		if result.FollowingCount != 1 || result.FollowerCount != 2 {
+			t.Fatalf("目标计数不正确: %+v", result)
+		}
+		if !result.Following {
+			t.Fatalf("已关注读者应回显 Following=true: %+v", result)
+		}
+	})
+
+	t.Run("未关注读者", func(t *testing.T) {
+		result, err := svc.Stats(ctx, 3, 2)
+		if err != nil {
+			t.Fatalf("未关注读者不应失败: %v", err)
+		}
+		if result.Following {
+			t.Fatalf("未关注读者应回显 Following=false: %+v", result)
+		}
+	})
+
+	t.Run("匿名读者", func(t *testing.T) {
+		callsBefore := repo.isFollowingCalls
+		result, err := svc.Stats(ctx, 0, 1)
+		if err != nil {
+			t.Fatalf("匿名读者不应失败: %v", err)
+		}
+		if result.FollowerCount != 2 || result.Following {
+			t.Fatalf("匿名读者计数或关注态不正确: %+v", result)
+		}
+		if repo.isFollowingCalls != callsBefore {
+			t.Fatalf("匿名读者不应查询关注态")
+		}
+	})
+
+	t.Run("本人查看", func(t *testing.T) {
+		callsBefore := repo.isFollowingCalls
+		result, err := svc.Stats(ctx, 1, 1)
+		if err != nil {
+			t.Fatalf("本人查看不应失败: %v", err)
+		}
+		if result.FollowingCount != 1 || result.FollowerCount != 2 || result.Following {
+			t.Fatalf("本人查看结果不正确: %+v", result)
+		}
+		if repo.isFollowingCalls != callsBefore {
+			t.Fatalf("本人查看不应查询关注态")
 		}
 	})
 }

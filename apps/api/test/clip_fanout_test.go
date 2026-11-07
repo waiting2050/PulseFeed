@@ -76,6 +76,14 @@ func (f *fanoutFakeRepository) BatchGetStats(_ context.Context, ids []int64) (ma
 	return result, nil
 }
 
+func (f *fanoutFakeRepository) BatchGetCreatorProfiles(_ context.Context, _ []int64) (map[int64]*domfeed.CreatorProfile, error) {
+	return map[int64]*domfeed.CreatorProfile{}, nil
+}
+
+func (f *fanoutFakeRepository) BatchGetFollowedCreatorIDs(_ context.Context, _ int64, _ []int64) (map[int64]bool, error) {
+	return map[int64]bool{}, nil
+}
+
 func (f *fanoutFakeRepository) BatchGetViewerStates(_ context.Context, _ int64, _ []int64) (map[int64]*domfeed.ViewerState, error) {
 	return map[int64]*domfeed.ViewerState{}, nil
 }

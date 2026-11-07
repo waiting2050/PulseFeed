@@ -74,23 +74,67 @@ func (h *Handler) setFollow(c *gin.Context, follow bool) {
 	})
 }
 
+// GetStats 处理 GET /api/users/:userId/relation：返回公开的计数与当前读者关注状态。
+func (h *Handler) GetStats(c *gin.Context) {
+	targetUserID, ok := parseParamID(c, "userId")
+	if !ok {
+		return
+	}
+	viewerID, _ := middleware.UserIDFromContext(c)
+	result, err := h.service.Stats(c.Request.Context(), viewerID, targetUserID)
+	if err != nil {
+		mapError(c, err)
+		return
+	}
+	okEnvelope(c, http.StatusOK, relationStatsResponse{
+		UserID:         targetUserID,
+		FollowingCount: result.FollowingCount,
+		FollowerCount:  result.FollowerCount,
+		Following:      result.Following,
+		IsSelf:         viewerID == targetUserID,
+	})
+}
+
 // ListFollowing 处理 GET /api/users/me/following。
 func (h *Handler) ListFollowing(c *gin.Context) {
-	h.list(c, true)
-}
-
-// ListFollowers 处理 GET /api/users/me/followers。
-func (h *Handler) ListFollowers(c *gin.Context) {
-	h.list(c, false)
-}
-
-// list 是关注/粉丝列表端点的公共逻辑。
-func (h *Handler) list(c *gin.Context, following bool) {
 	userID, ok := middleware.UserIDFromContext(c)
 	if !ok {
 		fail(c, http.StatusUnauthorized, "缺少登录身份")
 		return
 	}
+	h.list(c, userID, true)
+}
+
+// ListFollowers 处理 GET /api/users/me/followers。
+func (h *Handler) ListFollowers(c *gin.Context) {
+	userID, ok := middleware.UserIDFromContext(c)
+	if !ok {
+		fail(c, http.StatusUnauthorized, "缺少登录身份")
+		return
+	}
+	h.list(c, userID, false)
+}
+
+// ListFollowingOf 处理 GET /api/users/:userId/following：公开查看任意用户的关注列表。
+func (h *Handler) ListFollowingOf(c *gin.Context) {
+	userID, ok := parseParamID(c, "userId")
+	if !ok {
+		return
+	}
+	h.list(c, userID, true)
+}
+
+// ListFollowersOf 处理 GET /api/users/:userId/followers：公开查看任意用户的粉丝列表。
+func (h *Handler) ListFollowersOf(c *gin.Context) {
+	userID, ok := parseParamID(c, "userId")
+	if !ok {
+		return
+	}
+	h.list(c, userID, false)
+}
+
+// list 是关注/粉丝列表端点的公共逻辑。
+func (h *Handler) list(c *gin.Context, userID int64, following bool) {
 	limit := 0
 	if raw := c.Query("limit"); raw != "" {
 		parsed, err := strconv.Atoi(raw)

@@ -31,4 +31,14 @@ type Repository interface {
 	BatchGetStats(ctx context.Context, clipIDs []int64) (map[int64]*EntryStats, error)
 	// BatchGetViewerStates 批量读取读者对条目的互动状态（S9 互动链路补齐）。
 	BatchGetViewerStates(ctx context.Context, viewerID int64, clipIDs []int64) (map[int64]*ViewerState, error)
+	// BatchGetCreatorProfiles 批量读取作者昵称与头像，供卡片作者信息补齐。
+	BatchGetCreatorProfiles(ctx context.Context, creatorIDs []int64) (map[int64]*CreatorProfile, error)
+	// BatchGetFollowedCreatorIDs 批量判断读者是否已关注指定作者，未登录读者返回空集合。
+	BatchGetFollowedCreatorIDs(ctx context.Context, viewerID int64, creatorIDs []int64) (map[int64]bool, error)
+}
+
+// CreatorProfile 是作者公开资料中的展示字段。
+type CreatorProfile struct {
+	Nickname  string
+	AvatarURL string
 }

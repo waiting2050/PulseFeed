@@ -68,7 +68,16 @@ type ViewerState struct {
 	Saved bool
 }
 
-// FeedEntry 是 Feed 流中的一条条目：clip 视图 + 互动计数 + 读者互动状态。
+// CreatorSummary 是卡片上的作者摘要：昵称、头像与当前读者是否已关注该作者。
+// Following 由组装阶段按读者实时补齐，未登录或读自己时恒为 false。
+type CreatorSummary struct {
+	UserID    int64
+	Nickname  string
+	AvatarURL string
+	Following bool
+}
+
+// FeedEntry 是 Feed 流中的一条条目：clip 视图 + 互动计数 + 读者互动状态 + 作者摘要。
 // DurationMS 为媒体时长（毫秒），0 表示未探测到，前端不展示时长角标。
 type FeedEntry struct {
 	ClipID      int64
@@ -80,6 +89,7 @@ type FeedEntry struct {
 	PublishedAt time.Time
 	Stats       EntryStats
 	Viewer      ViewerState
+	Creator     CreatorSummary
 	// Score 是 hot 场景的排序分数（Redis 分钟桶累计或 DB 回源计算值）；
 	// 其余场景恒为 0，不参与展示，仅供生成 hot 游标锚点。
 	Score float64

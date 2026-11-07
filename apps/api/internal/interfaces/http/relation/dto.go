@@ -13,6 +13,15 @@ type followResponse struct {
 	FollowerCount  int64 `json:"follower_count"`
 }
 
+// relationStatsResponse 是用户关系概览响应：计数与当前读者关注状态。
+type relationStatsResponse struct {
+	UserID         int64 `json:"user_id"`
+	FollowingCount int64 `json:"following_count"`
+	FollowerCount  int64 `json:"follower_count"`
+	Following      bool  `json:"following"`
+	IsSelf         bool  `json:"is_self"`
+}
+
 // relationEntryResponse 是关注/粉丝列表的条目。
 type relationEntryResponse struct {
 	UserID     int64     `json:"user_id"`

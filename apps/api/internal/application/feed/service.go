@@ -249,17 +249,51 @@ func pageDigest(scene domfeed.Scene, viewerID int64, cursor string, limit int) s
 	return hex.EncodeToString(sum[:])[:16]
 }
 
-// assembleFeedEntries 填充条目的读者互动状态：每次请求实时读库，未登录读者直接跳过。
+// assembleFeedEntries 填充条目的作者摘要与读者互动状态：每次请求实时读库；
+// 作者昵称/头像对未登录读者也补齐，关注标记仅在有读者身份时读取。
 func (s *Service) assembleFeedEntries(ctx context.Context, viewerID int64, entries []*domfeed.FeedEntry) error {
 	// 页缓存与 singleflight 会在并发请求间共享同一批条目指针，
-	// 组装前逐个拷贝并清空读者状态，避免把某个读者的 liked/saved 写进共享数据。
+	// 组装前逐个拷贝并清空读者相关状态，避免把某个读者的 liked/saved/following 写进共享数据。
 	for i, entry := range entries {
 		clone := *entry
 		clone.Viewer = domfeed.ViewerState{}
+		clone.Creator = domfeed.CreatorSummary{UserID: entry.CreatorID}
 		entries[i] = &clone
 	}
 
-	if viewerID == 0 || len(entries) == 0 {
+	if len(entries) == 0 {
+		return nil
+	}
+
+	creatorIDs := make([]int64, 0, len(entries))
+	seenCreators := make(map[int64]struct{}, len(entries))
+	for _, entry := range entries {
+		if _, ok := seenCreators[entry.CreatorID]; ok {
+			continue
+		}
+		seenCreators[entry.CreatorID] = struct{}{}
+		creatorIDs = append(creatorIDs, entry.CreatorID)
+	}
+	profiles, err := s.repo.BatchGetCreatorProfiles(ctx, creatorIDs)
+	if err != nil {
+		return err
+	}
+	followed := map[int64]bool{}
+	if viewerID != 0 {
+		followed, err = s.repo.BatchGetFollowedCreatorIDs(ctx, viewerID, creatorIDs)
+		if err != nil {
+			return err
+		}
+	}
+	for _, entry := range entries {
+		if profile, ok := profiles[entry.CreatorID]; ok {
+			entry.Creator.Nickname = profile.Nickname
+			entry.Creator.AvatarURL = profile.AvatarURL
+		}
+		entry.Creator.Following = followed[entry.CreatorID]
+	}
+
+	if viewerID == 0 {
 		return nil
 	}
 	ids := make([]int64, 0, len(entries))

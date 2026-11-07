@@ -13,8 +13,24 @@ import { formatCount, formatDuration, formatTime } from '../lib/format.js'
 // 卡片卸载重挂后同一 request_id 仍不会重复发送。
 const reportedEvents = new Set()
 
-export default function ClipCard({ item, scene, busy, onLike, onSave, onOpen, suspended = false, onPlay }) {
+export default function ClipCard({
+  item,
+  scene,
+  busy,
+  onLike,
+  onSave,
+  onOpen,
+  suspended = false,
+  onPlay,
+  viewerId = 0,
+  onCreator,
+  onFollow,
+}) {
   const title = item.title || '未命名内容'
+  const creator = item.creator || null
+  const creatorId = (creator && creator.user_id) || item.creator_id
+  const creatorName = (creator && creator.nickname) || `创作者 ${item.creator_id}`
+  const canFollow = Boolean(creator && creatorId && creatorId !== viewerId && onFollow)
   const duration = formatDuration(item.duration_ms)
   const [videoFailed, setVideoFailed] = useState(false)
   const hasVideo = Boolean(item.video_url) && !videoFailed
@@ -138,8 +154,30 @@ export default function ClipCard({ item, scene, busy, onLike, onSave, onOpen, su
           </button>
         </h3>
         <div className="pf-creator">
-          <Avatar name={`创作者 ${item.creator_id}`} size="sm" />
-          <span className="pf-creator-name">创作者 {item.creator_id}</span>
+          <Avatar name={creatorName} src={creator && creator.avatar_url} size="sm" />
+          {onCreator ? (
+            <button
+              type="button"
+              className="pf-creator-name pf-creator-link"
+              onClick={() => onCreator(creatorId)}
+              aria-label={`查看作者主页：${creatorName}`}
+            >
+              {creatorName}
+            </button>
+          ) : (
+            <span className="pf-creator-name">{creatorName}</span>
+          )}
+          {canFollow ? (
+            <button
+              type="button"
+              className="pf-follow-btn pf-follow-btn-sm"
+              aria-pressed={Boolean(creator.following)}
+              onClick={() => onFollow(item)}
+              aria-label={`${creator.following ? '取消关注' : '关注'}${creatorName}`}
+            >
+              {creator.following ? '已关注' : '关注'}
+            </button>
+          ) : null}
           <span className="pf-creator-time">{formatTime(item.published_at)}</span>
         </div>
 

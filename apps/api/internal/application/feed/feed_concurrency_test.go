@@ -27,6 +27,18 @@ func (r *concurrentFeedRepo) ListLatestPage(ctx context.Context, cursor *domfeed
 }
 
 // BatchGetViewerStates 在锁内委托内存仓储，避免并发读写 viewerStates。
+func (r *concurrentFeedRepo) BatchGetCreatorProfiles(ctx context.Context, creatorIDs []int64) (map[int64]*domfeed.CreatorProfile, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.feedFakeRepo.BatchGetCreatorProfiles(ctx, creatorIDs)
+}
+
+func (r *concurrentFeedRepo) BatchGetFollowedCreatorIDs(ctx context.Context, viewerID int64, creatorIDs []int64) (map[int64]bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.feedFakeRepo.BatchGetFollowedCreatorIDs(ctx, viewerID, creatorIDs)
+}
+
 func (r *concurrentFeedRepo) BatchGetViewerStates(ctx context.Context, viewerID int64, clipIDs []int64) (map[int64]*domfeed.ViewerState, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

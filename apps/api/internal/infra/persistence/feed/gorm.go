@@ -21,6 +21,13 @@ type viewerActionRow struct {
 	ActionType string `gorm:"column:action_type"`
 }
 
+// creatorProfileRow 是 pf_user_profiles 作者摘要查询的行映射。
+type creatorProfileRow struct {
+	UserID    int64  `gorm:"column:user_id"`
+	Nickname  string `gorm:"column:nickname"`
+	AvatarURL string `gorm:"column:avatar_url"`
+}
+
 // Repository 是 feed 仓储的 GORM 实现，db 由组合根装配时注入。
 type Repository struct {
 	db *gorm.DB
@@ -368,6 +375,52 @@ func (r *Repository) BatchGetViewerStates(ctx context.Context, viewerID int64, c
 		}
 	}
 	return states, nil
+}
+
+// BatchGetCreatorProfiles 批量读取作者昵称与头像；资料缺失的作者不出现在结果中，由调用方兜底。
+func (r *Repository) BatchGetCreatorProfiles(ctx context.Context, creatorIDs []int64) (map[int64]*domfeed.CreatorProfile, error) {
+	profiles := make(map[int64]*domfeed.CreatorProfile, len(creatorIDs))
+	if len(creatorIDs) == 0 {
+		return profiles, nil
+	}
+
+	var rows []creatorProfileRow
+	err := r.db.WithContext(ctx).
+		Table("pf_user_profiles").
+		Select("user_id, nickname, avatar_url").
+		Where("user_id IN ?", creatorIDs).
+		Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	for i := range rows {
+		profiles[rows[i].UserID] = &domfeed.CreatorProfile{
+			Nickname:  rows[i].Nickname,
+			AvatarURL: rows[i].AvatarURL,
+		}
+	}
+	return profiles, nil
+}
+
+// BatchGetFollowedCreatorIDs 批量判断读者是否已关注指定作者，未登录读者返回空集合。
+func (r *Repository) BatchGetFollowedCreatorIDs(ctx context.Context, viewerID int64, creatorIDs []int64) (map[int64]bool, error) {
+	followed := make(map[int64]bool, len(creatorIDs))
+	if viewerID == 0 || len(creatorIDs) == 0 {
+		return followed, nil
+	}
+
+	var ids []int64
+	err := r.db.WithContext(ctx).
+		Table("pf_follows").
+		Where("user_id = ? AND status = ? AND target_user_id IN ?", viewerID, domrelation.StatusFollowing, creatorIDs).
+		Pluck("target_user_id", &ids).Error
+	if err != nil {
+		return nil, err
+	}
+	for _, id := range ids {
+		followed[id] = true
+	}
+	return followed, nil
 }
 
 // toEntry 将联表行转换为领域条目，读者状态由应用层组装阶段填充。

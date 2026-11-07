@@ -98,6 +98,14 @@ func (f *fanoutWFakeRepo) BatchGetStats(_ context.Context, clipIDs []int64) (map
 	return result, nil
 }
 
+func (f *fanoutWFakeRepo) BatchGetCreatorProfiles(_ context.Context, _ []int64) (map[int64]*domfeed.CreatorProfile, error) {
+	return map[int64]*domfeed.CreatorProfile{}, nil
+}
+
+func (f *fanoutWFakeRepo) BatchGetFollowedCreatorIDs(_ context.Context, _ int64, _ []int64) (map[int64]bool, error) {
+	return map[int64]bool{}, nil
+}
+
 func (f *fanoutWFakeRepo) BatchGetViewerStates(_ context.Context, _ int64, _ []int64) (map[int64]*domfeed.ViewerState, error) {
 	return map[int64]*domfeed.ViewerState{}, nil
 }

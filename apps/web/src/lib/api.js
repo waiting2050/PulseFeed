@@ -116,6 +116,28 @@ export const api = {
 
   me: () => request('/users/me'),
 
+  // 公开主页：资料、作品与关系概览；列表接口均复用游标分页契约。
+  getUser: (userId) => request(`/users/${userId}`),
+
+  updateMe: (patch) => request('/users/me', { method: 'PATCH', body: patch }),
+
+  userClips: (userId, { limit = 10, cursor = '' } = {}) =>
+    request(`/users/${userId}/clips${buildQuery({ limit, cursor })}`),
+
+  myClips: ({ limit = 10, cursor = '' } = {}) =>
+    request(`/users/me/clips${buildQuery({ limit, cursor })}`),
+
+  relationStats: (userId) => request(`/users/${userId}/relation`),
+
+  follow: (userId, active) =>
+    request(`/users/me/following/${userId}`, { method: active ? 'PUT' : 'DELETE' }),
+
+  userFollowing: (userId, { limit = 20, cursor = '' } = {}) =>
+    request(`/users/${userId}/following${buildQuery({ limit, cursor })}`),
+
+  userFollowers: (userId, { limit = 20, cursor = '' } = {}) =>
+    request(`/users/${userId}/followers${buildQuery({ limit, cursor })}`),
+
   unread: () => request('/message-stats/unread'),
 
   feed: ({ scene, cursor = '', limit = 10 }) => request(`/feed${buildQuery({ scene, cursor, limit })}`),

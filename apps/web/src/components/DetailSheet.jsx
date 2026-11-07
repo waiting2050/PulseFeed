@@ -9,7 +9,11 @@ import useApi from '../hooks/useApi.js'
 import { api } from '../lib/api.js'
 import { formatCount, formatTime } from '../lib/format.js'
 
-export default function DetailSheet({ item, onClose, onLike, onSave, onCommentAdded }) {
+export default function DetailSheet({ item, onClose, onLike, onSave, onCommentAdded, viewerId = 0, onCreator, onFollow }) {
+  const creator = item.creator || null
+  const creatorId = (creator && creator.user_id) || item.creator_id
+  const creatorName = (creator && creator.nickname) || `创作者 ${item.creator_id}`
+  const canFollow = Boolean(creator && creatorId && creatorId !== viewerId && onFollow)
   const dialogRef = useRef(null)
   const closeRef = useRef(null)
   const [mediaError, setMediaError] = useState('')
@@ -130,8 +134,30 @@ export default function DetailSheet({ item, onClose, onLike, onSave, onCommentAd
               {title}
             </h2>
             <div className="pf-creator">
-              <Avatar name={`创作者 ${item.creator_id}`} size="sm" />
-              <span className="pf-creator-name">创作者 {item.creator_id}</span>
+              <Avatar name={creatorName} src={creator && creator.avatar_url} size="sm" />
+              {onCreator ? (
+                <button
+                  type="button"
+                  className="pf-creator-name pf-creator-link"
+                  onClick={() => onCreator(creatorId)}
+                  aria-label={`查看作者主页：${creatorName}`}
+                >
+                  {creatorName}
+                </button>
+              ) : (
+                <span className="pf-creator-name">{creatorName}</span>
+              )}
+              {canFollow ? (
+                <button
+                  type="button"
+                  className="pf-follow-btn pf-follow-btn-sm"
+                  aria-pressed={Boolean(creator.following)}
+                  onClick={() => onFollow(item)}
+                  aria-label={`${creator.following ? '取消关注' : '关注'}${creatorName}`}
+                >
+                  {creator.following ? '已关注' : '关注'}
+                </button>
+              ) : null}
               <span className="pf-creator-time">{formatTime(item.published_at)}</span>
             </div>
 
