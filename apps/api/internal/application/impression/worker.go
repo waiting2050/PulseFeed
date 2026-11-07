@@ -54,16 +54,23 @@ func (w *PlayEventWorker) Handle(ctx context.Context, body []byte) error {
 		return nil
 	}
 
-	// 补偿路径：把播放事件贡献累加进当日曝光聚合，并标记已同步。
-	playEvent := &domimpression.PlayEvent{
-		EventID:        event.EventID,
-		ViewerID:       event.ViewerID,
-		ClipID:         event.ClipID,
-		PlayDurationMs: event.PlayDurationMs,
-		Completed:      event.Completed,
-		Impression:     event.Impression,
-		CreatedAt:      event.OccurredAt,
+	// 补偿路径：按事件类型把贡献累加进当日聚合，并标记已同步；载荷字段非法时转入死信。
+	playEvent, err := domimpression.NewPlayEvent(domimpression.PlayEventInput{
+		EventID:    event.EventID,
+		ViewerID:   event.ViewerID,
+		ClipID:     event.ClipID,
+		EventType:  event.EventType,
+		Scene:      event.Scene,
+		RequestID:  event.RequestID,
+		WatchMs:    event.WatchMs,
+		Completed:  event.Completed,
+		Impression: event.Impression,
+	})
+	if err != nil {
+		log.Printf("warning: play.recorded 事件字段非法，转入死信队列 (event_id=%s): %v", event.EventID, err)
+		return messaging.Permanent(fmt.Errorf("play.recorded 事件字段非法 (event_id=%s): %w", event.EventID, err))
 	}
+	playEvent.CreatedAt = event.OccurredAt
 	if playEvent.CreatedAt.IsZero() {
 		playEvent.CreatedAt = time.Now()
 	}

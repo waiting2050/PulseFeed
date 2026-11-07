@@ -34,11 +34,16 @@ export function setToken(token) {
   }
 }
 
-function newIdempotencyKey() {
+// newClientId 生成客户端事件/批次标识；优先使用 crypto.randomUUID，缺失时回退时间戳随机串。
+export function newClientId(prefix = 'pf') {
   if (globalThis.crypto && typeof globalThis.crypto.randomUUID === 'function') {
-    return globalThis.crypto.randomUUID()
+    return `${prefix}-${globalThis.crypto.randomUUID()}`
   }
-  return `pf-${Date.now()}-${Math.random().toString(16).slice(2)}`
+  return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`
+}
+
+function newIdempotencyKey() {
+  return newClientId('pf')
 }
 
 async function readEnvelope(response) {
@@ -156,6 +161,21 @@ export const api = {
 
   // 复用既有 QoS 契约：event_id 由客户端生成，后端按其幂等，同一事件重复提交不会重复落库。
   reportQoS: (report) => request('/playback-qos-reports', { method: 'POST', body: report }),
+
+  // 展示/播放事件上报：event_type 区分 exposed/play/complete/skip，request_id 关联同一批 Feed 请求。
+  reportPlayEvent: ({ clipId, eventId, eventType, scene, requestId, watchMs = 0, completed = false }) =>
+    request('/clip-play-events', {
+      method: 'POST',
+      body: {
+        clip_id: clipId,
+        event_id: eventId,
+        event_type: eventType,
+        scene,
+        request_id: requestId,
+        watch_ms: Math.max(0, Math.round(watchMs)),
+        completed,
+      },
+    }),
 
   savePlaybackConfig: (config) => request('/playback-config', { method: 'PUT', body: config }),
 

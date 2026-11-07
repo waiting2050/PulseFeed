@@ -35,9 +35,9 @@ func New(repo domimpression.Repository, opts ...Option) *Service {
 	return s
 }
 
-// RecordPlayEvent 上报一条播放事件：幂等落库并聚合当日曝光，随后异步投递事件供 Worker 补偿。
-func (s *Service) RecordPlayEvent(ctx context.Context, viewerID, clipID int64, eventID string, playDurationMs int64, completed, impression bool) error {
-	event, err := domimpression.NewPlayEvent(eventID, viewerID, clipID, playDurationMs, completed, impression)
+// RecordPlayEvent 上报一条展示/播放事件：幂等落库并按事件类型更新当日聚合，随后异步投递事件供 Worker 补偿。
+func (s *Service) RecordPlayEvent(ctx context.Context, in domimpression.PlayEventInput) error {
+	event, err := domimpression.NewPlayEvent(in)
 	if err != nil {
 		return err
 	}
@@ -50,13 +50,16 @@ func (s *Service) RecordPlayEvent(ctx context.Context, viewerID, clipID int64, e
 	// 投递事件供 Worker 做曝光补偿；失败仅记日志，不影响接口返回。
 	if s.publisher != nil {
 		payload := PlayRecorded{
-			EventID:        event.EventID,
-			ViewerID:       event.ViewerID,
-			ClipID:         event.ClipID,
-			PlayDurationMs: event.PlayDurationMs,
-			Completed:      event.Completed,
-			Impression:     event.Impression,
-			OccurredAt:     event.CreatedAt,
+			EventID:    event.EventID,
+			ViewerID:   event.ViewerID,
+			ClipID:     event.ClipID,
+			EventType:  string(event.EventType),
+			Scene:      event.Scene,
+			RequestID:  event.RequestID,
+			WatchMs:    event.WatchMs,
+			Completed:  event.Completed,
+			Impression: event.Impression,
+			OccurredAt: event.CreatedAt,
 		}
 		if err := s.publisher.PublishPlayRecorded(ctx, payload); err != nil {
 			log.Printf("投递 play.recorded 事件失败 (event_id=%s): %v", event.EventID, err)

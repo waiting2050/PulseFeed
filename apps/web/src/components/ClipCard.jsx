@@ -1,20 +1,88 @@
 // ClipCard.jsx 渲染 Feed 卡片：有 video_url 时展示内联播放器，否则保持封面 + 首字兜底。
-// 播放器负责播放/暂停、静音、进度与全屏；标题与「详情」按钮进入详情弹层。
-import React, { useState } from 'react'
+// 卡片进入视口上报 exposed、开始播放上报 play、播完上报 complete、未播放即划走上报 skip；
+// 展示与划走按 (request_id, clip_id) 去重，且只在登录态上报。
+import React, { useEffect, useRef, useState } from 'react'
 import Icon from './Icon.jsx'
 import Avatar from './Avatar.jsx'
 import ClipCover from './ClipCover.jsx'
 import VideoPlayer from './VideoPlayer.jsx'
+import { api, getToken } from '../lib/api.js'
 import { formatCount, formatDuration, formatTime } from '../lib/format.js'
 
-export default function ClipCard({ item, busy, onLike, onSave, onOpen, suspended = false, onPlay }) {
+// reportedEvents 记录已上报的展示/划走事件，避免同一批请求内重复上报；
+// 卡片卸载重挂后同一 request_id 仍不会重复发送。
+const reportedEvents = new Set()
+
+export default function ClipCard({ item, scene, busy, onLike, onSave, onOpen, suspended = false, onPlay }) {
   const title = item.title || '未命名内容'
   const duration = formatDuration(item.duration_ms)
   const [videoFailed, setVideoFailed] = useState(false)
   const hasVideo = Boolean(item.video_url) && !videoFailed
+  const cardRef = useRef(null)
+  const exposedRef = useRef(false)
+  const playedRef = useRef(false)
+  const requestId = item.request_id || ''
+
+  // reportEvent 统一发送展示/播放事件；未登录、缺少批次或场景时直接跳过。
+  function reportEvent(eventType, eventId, watchMs = 0, completed = false) {
+    if (!requestId || !scene || !getToken()) return
+    api
+      .reportPlayEvent({
+        clipId: item.clip_id,
+        eventId,
+        eventType,
+        scene,
+        requestId,
+        watchMs,
+        completed,
+      })
+      .catch(() => {})
+  }
+
+  // 卡片至少半屏可见时上报一次 exposed，同一 request 内不重复。
+  useEffect(() => {
+    const node = cardRef.current
+    if (!node || !requestId || !scene || !getToken()) return undefined
+    if (typeof IntersectionObserver !== 'function') return undefined
+    const exposureKey = `${requestId}:${item.clip_id}:exposed`
+    const skipKey = `${requestId}:${item.clip_id}:skip`
+    const observer = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (entry.isIntersecting && entry.intersectionRatio >= 0.5) {
+            if (exposedRef.current || reportedEvents.has(exposureKey)) continue
+            exposedRef.current = true
+            reportedEvents.add(exposureKey)
+            reportEvent('exposed', exposureKey)
+            continue
+          }
+          // 展示过但从未开始播放就被划走：记一次 skip，不计入播放。
+          if (!entry.isIntersecting && exposedRef.current && !playedRef.current && !reportedEvents.has(skipKey)) {
+            reportedEvents.add(skipKey)
+            reportEvent('skip', skipKey)
+          }
+        }
+      },
+      { threshold: [0, 0.5] },
+    )
+    observer.observe(node)
+    return () => observer.disconnect()
+  }, [requestId, scene, item.clip_id])
+
+  // 开播上报 play；同一播放会话只在首次开播时触发，由播放器保证。
+  function handlePlayReport(sessionEventId) {
+    playedRef.current = true
+    reportEvent('play', sessionEventId)
+  }
+
+  // 播完上报 complete，watch_ms 取本会话累计播放时长。
+  function handlePlayComplete(sessionEventId, playedMs) {
+    playedRef.current = true
+    reportEvent('complete', `${sessionEventId}:complete`, playedMs, true)
+  }
 
   return (
-    <article className="pf-card">
+    <article ref={cardRef} className="pf-card">
       <div className="pf-card-media">
         <ClipCover clipId={item.clip_id} title={title} coverUrl={item.cover_url}>
           {hasVideo ? (
@@ -26,6 +94,8 @@ export default function ClipCard({ item, busy, onLike, onSave, onOpen, suspended
               variant="card"
               suspended={suspended}
               onPlayStart={() => onPlay?.(item.clip_id)}
+              onPlayReport={handlePlayReport}
+              onPlayComplete={handlePlayComplete}
               onError={() => setVideoFailed(true)}
             />
           ) : null}

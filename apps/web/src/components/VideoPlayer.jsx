@@ -40,6 +40,8 @@ function initialSession() {
     // null 表示尚未抽样；false 表示本会话未命中，不再随机、也不再上报。
     sampled: null,
     hasPlayed: false,
+    // playReported 保证同一会话只上报一次 play 事件，暂停后恢复不再重复上报。
+    playReported: false,
   }
 }
 
@@ -52,6 +54,8 @@ export default function VideoPlayer({
   autoPlay = false,
   suspended = false,
   onPlayStart,
+  onPlayReport,
+  onPlayComplete,
   onError,
 }) {
   const containerRef = useRef(null)
@@ -202,6 +206,11 @@ export default function VideoPlayer({
     const session = ensureSession()
     session.resumeAt = performance.now()
     onPlayStart?.()
+    // 同一会话只在首次开播时上报 play，暂停后恢复不重复计数。
+    if (!session.playReported) {
+      session.playReported = true
+      onPlayReport?.(session.eventId)
+    }
   }
 
   function handlePlaying() {
@@ -224,15 +233,18 @@ export default function VideoPlayer({
 
   function handleEnded() {
     const session = sessionRef.current
+    let playedMs = 0
     if (session) {
       if (session.resumeAt > 0) {
         session.playedMs += performance.now() - session.resumeAt
         session.resumeAt = 0
       }
       session.completed = true
+      playedMs = session.playedMs
     }
     setPlaying(false)
     reportQoS()
+    if (session) onPlayComplete?.(session.eventId, playedMs)
     // 完播已结算，后续再播按新会话采集。
     sessionRef.current = null
   }

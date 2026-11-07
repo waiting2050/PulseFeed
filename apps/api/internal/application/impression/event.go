@@ -6,15 +6,18 @@ import (
 	"time"
 )
 
-// PlayRecorded 是播放事件上报成功后投递的事件载荷，由 PlayEventWorker 消费做曝光补偿。
+// PlayRecorded 是播放事件上报成功后投递的事件载荷，由 PlayEventWorker 消费做聚合补偿。
 type PlayRecorded struct {
-	EventID        string    `json:"event_id"`
-	ViewerID       int64     `json:"viewer_id"`
-	ClipID         int64     `json:"clip_id"`
-	PlayDurationMs int64     `json:"play_duration_ms"`
-	Completed      bool      `json:"completed"`
-	Impression     bool      `json:"impression"`
-	OccurredAt     time.Time `json:"occurred_at"`
+	EventID    string    `json:"event_id"`
+	ViewerID   int64     `json:"viewer_id"`
+	ClipID     int64     `json:"clip_id"`
+	EventType  string    `json:"event_type"`
+	Scene      string    `json:"scene"`
+	RequestID  string    `json:"request_id"`
+	WatchMs    int64     `json:"watch_ms"`
+	Completed  bool      `json:"completed"`
+	Impression bool      `json:"impression"`
+	OccurredAt time.Time `json:"occurred_at"`
 }
 
 // PlayEventPublisher 是 play.recorded 事件发布端口，由 infra/mq 实现并经组合根注入；

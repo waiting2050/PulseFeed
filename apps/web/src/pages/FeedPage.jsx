@@ -11,7 +11,7 @@ import DetailSheet from '../components/DetailSheet.jsx'
 import Spinner from '../components/Spinner.jsx'
 import Toast from '../components/Toast.jsx'
 import useApi from '../hooks/useApi.js'
-import { api } from '../lib/api.js'
+import { api, newClientId } from '../lib/api.js'
 
 const SCENES = [
   { key: 'latest', label: '最新' },
@@ -85,6 +85,8 @@ export default function FeedPage({ onGoPublish }) {
   const [deepError, setDeepError] = useState('')
   const deepFetchRef = useRef('')
   const [playingId, setPlayingId] = useState(null)
+  // 每次 Feed 请求生成一个 request_id，同批返回的卡片共用，供展示/播放事件按批关联。
+  const requestIdRef = useRef(newClientId('feed'))
 
   const firstPage = useApi(() => api.feed({ scene, limit: 10 }), [scene])
 
@@ -93,11 +95,12 @@ export default function FeedPage({ onGoPublish }) {
     setCursor('')
     setHasMore(false)
     setPlayingId(null)
+    requestIdRef.current = newClientId('feed')
   }, [scene])
 
   useEffect(() => {
     if (!firstPage.data) return
-    setItems(firstPage.data.items || [])
+    setItems((firstPage.data.items || []).map((item) => ({ ...item, request_id: requestIdRef.current })))
     setCursor(firstPage.data.next_cursor || '')
     setHasMore(Boolean(firstPage.data.has_more))
   }, [firstPage.data])
@@ -172,6 +175,7 @@ export default function FeedPage({ onGoPublish }) {
     if (!hasMore || loadingMore) return
     setLoadingMore(true)
     setActionError('')
+    const requestId = newClientId('feed')
     try {
       const next = await api.feed({ scene, cursor, limit: 10 })
       setItems((prev) => {
@@ -180,7 +184,7 @@ export default function FeedPage({ onGoPublish }) {
         for (const item of next.items || []) {
           if (!seen.has(item.clip_id)) {
             seen.add(item.clip_id)
-            merged.push(item)
+            merged.push({ ...item, request_id: requestId })
           }
         }
         return merged
@@ -273,6 +277,7 @@ export default function FeedPage({ onGoPublish }) {
             <ClipCard
               key={item.clip_id}
               item={item}
+              scene={scene}
               busy={false}
               onLike={toggleLike}
               onSave={toggleSave}
