@@ -23,7 +23,8 @@ PulseFeed 是一个按领域分层实现的 Feed 系统示例项目：后端提�
 pulsefeed/
 ├── README.md
 ├── docs/
-│   ├── architecture.md            # 分层边界与四条数据流
+│   ├── architecture.md            # 分层边界与关键数据流
+│   ├── frontend-redesign.md       # 前端视觉与交互重构记录
 │   └── routes-snapshot.md         # HTTP 路由与端口快照
 ├── scripts/start.sh               # 本地三进程启动与信号清理
 └── apps/
@@ -37,7 +38,7 @@ pulsefeed/
     │   │   ├── application/       # 用例编排与 Worker
     │   │   ├── infra/             # MySQL/Redis/RabbitMQ/JWT/指标实现
     │   │   └── interfaces/http/   # handler、dto、路由、中间件
-    │   └── test/                  # 基于内存 fake 的接口测试
+    │   └── test/                  # 基于内存 fake 的接口测试；test/integration 为 build tag 集成测试
     ├── web/                       # React + Vite 前端
     ├── monitoring/                # Prometheus 配置与 Grafana provisioning
     ├── docker-compose.yml
@@ -72,7 +73,7 @@ npm run dev            # http://127.0.0.1:5173
 
 前端开发态将 `/api`、`/uploads` 代理到 `http://127.0.0.1:8090`，目标地址可用环境变量 `PULSEFEED_API` 覆盖。
 
-健康检查与指标：`GET :8090/health`、`GET :8090/metrics`、Worker `GET :19092/metrics`。
+健康检查与指标：`GET :8090/health`、`GET :8090/metrics`；Worker 按上面的 `-metrics-addr` 启动时为 `GET :19092/metrics`（缺省 `:9092`）。
 
 ## 容器化与监控
 
@@ -82,6 +83,8 @@ docker compose up -d --build
 docker compose --profile monitoring up -d prometheus grafana
 docker compose --profile monitoring down   # 只停止并移除容器，保留数据卷
 ```
+
+宿主端口全部可配置：下表为「默认宿主端口 + 覆盖变量 + 容器端口」，模板见 `apps/.env.example`（复制为 `apps/.env` 后生效，`.env` 不提交）。
 
 | 服务 | 默认宿主端口 | 覆盖变量 | 容器端口 | 说明 |
 |---|---|---|---|---|
@@ -110,17 +113,28 @@ docker compose up -d --build
 
 监控验收口径为 `http://localhost:19090`（Prometheus）与 `http://localhost:3000`（Grafana，默认账号 `admin` / `pulsefeed`）。K8s 清单 `deploy.yaml` 含 6 个 Deployment（mysql/redis/rabbitmq/api/worker/web）。
 
-## 阶段范围
+## 当前进度
 
-- 已完成：S1–S17 后端主链路（账号、发布、Feed 四场景、互动、关注、推荐、热榜、消息、播放配置、可观测性）。
-- 已完成：S18/S19 前端最小闭环与功能补齐（登录/注册、Feed 分页、发布、互动、消息、播放配置）。
-- 已完成：S20 容器化与本地编排；S21 Prometheus/Grafana 监控与 K8s 清单。
-- 已完成：S22 测试补齐（鉴权中间件矩阵、Redis WATCH/16 分片计数、互动幂等）与 GitHub Actions CI（api build/vet/test + web 构建）。
-- 已完成：前端 P0/P1/P2 重构（视觉骨架、页面与交互重做、动效与可访问性）；媒体时长与首帧封面补齐。
+以下清单逐条对照代码与本地运行结果核实；未实现或未验证的能力不勾选。
+
+- [x] 后端主链路：账号、Clip 发布（`Idempotency-Key` 幂等）、Feed 四场景（latest / following / for-you / hot）、互动（点赞 / 收藏 / 评论）、关注、推荐、热榜、消息、播放配置与 Prometheus 指标。
+- [x] 互动异步落库：点赞/收藏先写 Redis，再投递 `pulsefeed.interaction.action_changed`，由 Worker 的 `ActionWorker` 落库；Redis 或 MQ 不可用时回退同步落库。真实 compose 运行中该队列有 1 个消费者（`clip.published`、`clip.embedding`、`impression.play_recorded` 同样各 1 个）。
+- [x] 播放事件幂等：`event_id` 唯一键拦住 `pf_play_events` 重复写入；与 `pf_playback_qos_reports` 同 `event_id` 时不再累加 `play_count`。集成测试覆盖并发去重（见下方「集成测试」）。
+- [x] 前端：React 18 + Vite 5，5 个页面（登录 / Feed / 发布 / 消息 / 播放配置）用顶部 tab 切换，详情用弹层 / Sheet；无独立 URL 深链；Feed 分页用「加载更多」按钮，不是无限滚动。
+- [x] 容器化与监控：Compose 编排、宿主端口可由 `.env` 覆盖；Prometheus/Grafana 位于 `monitoring` profile；K8s 清单已提供但未做集群级实测。
+- [x] 测试与 CI：`go build/vet/test`、前端 `npm run build`、GitHub Actions；真实依赖集成测试通过 `-tags=integration` 手动运行。
+- [x] 媒体探测：上传媒体文件时由 `ffprobe` / `ffmpeg` 读取时长与首帧，工具缺失或失败时降级，不影响发布。
+- [ ] RabbitMQ 重投递与死信：Worker 消费失败时已 `basic.nack(requeue=true)` 重投递，但未配置死信队列，也没有 broker 层重投递/死信行为的集成验证。
+- [ ] 前端自动化：目前只有构建校验，没有组件测试或 E2E，交互回归仍靠手工。
+
+### 字符计数口径
+
+- 后端按字符（Go `utf8.RuneCountInString`，Unicode 码点）计数：标题上限 128、昵称上限 64、评论上限 1000，均先 `TrimSpace` 再判定；与 `pf_clips.title`、`pf_user_profiles.nickname`、`pf_comments.content` 的列宽一致，不额外放宽。
+- 前端发布页按码点展示 `X/120`，沿用既有 120 字提示上限；HTML `maxLength` 取 128（浏览器按 UTF-16 单元计数，不会少于码点数），因此不会出现前端放行、后端拒绝。昵称输入同步限制 64。
 
 ### 媒体时长与首帧封面
 
-- 上传视频时调用 `ffprobe` 读取时长（写入 `pf_clips.duration_ms`，毫秒）、调用 `ffmpeg` 抽取首帧写入 `uploads/cover/` 并作为 `cover_url` 回传；前端卡片按 `mm:ss` 展示时长角标，`duration_ms=0` 时不占位。
+- 上传媒体文件时调用 `ffprobe` 读取时长（写入 `pf_clips.duration_ms`，毫秒）、调用 `ffmpeg` 抽取首帧写入 `uploads/cover/` 并作为 `cover_url` 回传；前端卡片按 `mm:ss` 展示时长角标，`duration_ms=0` 时不占位。
 - 工具缺失或执行失败时只记录 `warning` 并降级为“无时长、无封面”，上传与发布照常成功；前端回退为暗色首字占位封面。
 - 数据库沿用 GORM `AutoMigrate` 增量新增 `duration_ms` 列；API 镜像（`apps/api/Dockerfile`）已内置 `ffmpeg`，本地 Windows 不安装也能运行。
 
@@ -134,14 +148,14 @@ docker compose up -d --build
 | 资料 | `GET/PATCH /api/users/me`、`GET /api/users/:userId`、`GET /api/users/:userId/clips` | 登录 / 公开 |
 | Feed | `GET /api/feed`、`POST /api/feed-search`（`scene=latest,following,for-you,hot`） | 可选登录 |
 | 发布 | `POST /api/clips`（可选 `duration_ms`）、`DELETE /api/clips/:clipId`、`GET /api/clips/:clipId`、`GET /api/users/me/clips` | 登录 / 公开 |
-| 上传 | `POST /api/uploads`（`kind=video,cover,avatar`；视频额外回传 `cover_url`/`duration_ms`） | 登录 |
+| 上传 | `POST /api/uploads`（`kind=video,cover,avatar`；媒体文件额外回传 `cover_url`/`duration_ms`） | 登录 |
 | 互动 | `PUT/DELETE /api/clips/:clipId/like`、`PUT/DELETE /api/clips/:clipId/save`、`POST/GET /api/clips/:clipId/comments`、`DELETE /api/comments/:commentId` | 登录 / 公开 |
 | 播放 | `POST /api/clip-play-events`、`POST /api/playback-qos-reports`、`GET/PUT /api/playback-config`、`GET /api/preload-clips` | 登录 |
 | 关注 | `PUT/DELETE /api/users/me/following/:targetUserId`、`GET /api/users/me/following`、`GET /api/users/me/followers` | 登录 |
 | 消息 | `GET /api/messages`、`GET /api/message-stats/unread`、`PATCH /api/messages` | 登录 |
 | 内部 | `POST /internal/recommendation-candidates`、`GET /internal/impression-decisions`、`GET /internal/impressions`、`POST /internal/messages`、`POST /internal/playback-qos-reports` | `X-Internal-Token` |
 
-前端写请求统一携带 `Idempotency-Key`，后端按 key 幂等。
+前端对发布与评论写请求携带 `Idempotency-Key`：发布要求非空且同 key 返回同一 clip，评论同 key 重放返回同一评论；互动、关注、评论对去空白后超 128 字符的 key 返回 400，点赞/收藏/关注由唯一行天然幂等。
 
 ## 测试与校验
 
@@ -158,7 +172,32 @@ npm run build
 
 禁用字样自查：对仓库执行关键词检索，输出为空即通过；具体关键词不在文档中重复。
 
+### 集成测试（需真实 MySQL / Redis / RabbitMQ）
+
+用 build tag 隔离，默认 `go test ./...` 不编译该目录。测试每次运行会创建独立 schema（`pulsefeed_it_<timestamp>`），跑完自动 `DROP`，不会读写演示数据。
+
+```bash
+cd pulsefeed/apps
+docker compose up -d mysql redis rabbitmq   # 端口被占用时先按上文用 .env 换端口
+
+cd api
+# PowerShell 用 $env:VAR='...' 逐条设置；默认端口对应 compose 默认值
+PULSEFEED_IT_MYSQL_DSN='root:pulsefeed-root@tcp(127.0.0.1:3307)/?charset=utf8mb4&parseTime=True&loc=Local' \
+PULSEFEED_IT_REDIS_ADDR='127.0.0.1:6380' \
+PULSEFEED_IT_RABBITMQ_URL='amqp://pulsefeed:pulsefeed@127.0.0.1:5673/' \
+go test -tags=integration ./test/integration -v -count=1
+```
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `PULSEFEED_IT_MYSQL_DSN` | `root:pulsefeed-root@tcp(127.0.0.1:3307)/...` | 需 root 权限创建/删除独立 schema |
+| `PULSEFEED_IT_REDIS_ADDR` | `127.0.0.1:6380` | 仅连通性检查 |
+| `PULSEFEED_IT_RABBITMQ_URL` | `amqp://pulsefeed:pulsefeed@127.0.0.1:5673/` | 仅连通性检查 |
+
+排障：先 `docker compose ps` 确认三个依赖为 healthy；`CREATE DATABASE` 报权限不足时检查 DSN 是否用了 root；连接超时优先核对 `.env` 实际映射的宿主端口与上述变量是否一致。测试覆盖：`play_count` 跨表同 `event_id` 去重（含两个 goroutine 并发上报）与 latest 场景逐页游标边界（含跨分钟）。
+
 ## 文档
 
 - [架构与数据流](docs/architecture.md)
 - [路由与端口快照](docs/routes-snapshot.md)
+- [前端重构与实施记录](docs/frontend-redesign.md)

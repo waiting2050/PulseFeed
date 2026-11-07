@@ -32,10 +32,10 @@ interfaces/http  →  application  →  domain
 3. 评论走同步落库，按 `Idempotency-Key` 去重；评论数随创建/删除同步更新。
 4. 前端对点赞/收藏做乐观更新，请求失败时回滚。
 
-### 2.3 曝光、播放与 QoS
+### 2.3 展示（impression）、播放与 QoS
 
-1. `POST /api/clip-play-events` 按 `event_id` 幂等写入 `pf_play_events`，并 upsert 曝光记录；重复事件不重复累加 `play_count`。
-2. 事件投递 `impression.play_recorded`；`PlayEventWorker`（D7 修正）消费后完成曝光聚合补偿，避免“只发不收”。
+1. `POST /api/clip-play-events` 按 `event_id` 幂等写入 `pf_play_events`，并 upsert 当日展示聚合；同一 `event_id` 不重复累加 `play_count`，与 `pf_playback_qos_reports` 相同的 `event_id` 也只计一次。
+2. 事件投递 `impression.play_recorded`；`PlayEventWorker`（D7 修正）消费后完成展示聚合补偿，避免“只发不收”。
 3. `POST /api/playback-qos-reports` 按 `event_id` 幂等写入 QoS 表；仅首次插入参与采样与延迟/卡顿/完播聚合。
 4. 播放配置按用户持久化 `preload_count`、`qos_sample_rate`；预加载接口返回最新 N 个可见 clip。
 
@@ -54,15 +54,18 @@ interfaces/http  →  application  →  domain
 
 ### 2.5 上传与媒体探测
 
-1. `POST /api/uploads` 落盘后，视频先经 `ffprobe` 校验内容；随后 `infra/media.Prober` 读取时长并调用 `ffmpeg` 抽取首帧。
-2. 首帧写入 `uploads/cover/`，响应回传 `cover_url` 与 `duration_ms`；发布时前端把两者一并提交，`duration_ms` 增量写入 `pf_clips`。
-3. `ffprobe`/`ffmpeg` 缺失或执行失败时只记录 `warning` 并返回 201（无 `cover_url`、`duration_ms`），前端回退占位封面且不展示时长角标。
+1. `POST /api/uploads` 先按 `kind` 校验扩展名白名单并落盘；仅 `kind=video` 额外用 `ffprobe` 校验内容可读性（5s 超时）。`cover` / `avatar` 只做扩展名校验。
+2. 校验通过后由 `infra/media.Prober` 读取时长（`ffprobe`，5s 超时，四舍五入为毫秒）并调用 `ffmpeg` 抽取首帧（10s 超时，`-frames:v 1` 输出 JPEG）。
+3. 首帧写入 `uploads/cover/<媒体文件名>.jpg`，响应回传 `cover_url` 与 `duration_ms`；发布时前端把两者一并提交，`duration_ms` 写入 `pf_clips`，负值按 0 处理。
+4. 降级策略：`ffprobe`/`ffmpeg` 缺失、执行失败或超时只记录 `warning`，响应仍为 201，仅省略 `cover_url`/`duration_ms`；`ffprobe` 明确判定内容非法则不降级，删除已落盘文件并返回 400。
+5. 前端在缺少 `cover_url` 时回退为暗色首字占位封面，`duration_ms=0` 时不渲染时长角标。
 
 ## 3. 一致性与幂等
 
 - 写接口按 `Idempotency-Key` 去重；MQ 事件按 `event_id` 去重。
 - 互动计数只在状态变化时更新，重复点赞/收藏不累加。
 - 播放计数与 QoS 聚合均以首次插入为准；QoS 采样率只影响上报与否，不影响已落库数据。
+- 字符计数统一按 Unicode 码点（Go `utf8.RuneCountInString`）：标题 128、昵称 64、评论 1000，去首尾空白后判定，与数据库列宽一致；前端 `maxLength` 与提示口径见 README「字符计数口径」。
 - GORM `AutoMigrate` 对重复列/索引错误做 3 次退避重试；Worker 等待 API 迁移完成后再启动，避免并发建表。
 
 ## 4. 可观测性
@@ -74,7 +77,7 @@ interfaces/http  →  application  →  domain
 
 ## 5. 部署形态
 
-- 本地：`docker compose` 启动 MySQL/Redis/RabbitMQ/API/Worker/Web，`monitoring` profile 额外启动 Prometheus/Grafana。
+- 本地：`docker compose` 启动 MySQL/Redis/RabbitMQ/API/Worker/Web，`monitoring` profile 额外启动 Prometheus/Grafana；宿主端口由 `apps/.env` 覆盖（模板 `apps/.env.example`），容器内端口与服务名固定。
 - 集群：`apps/deploy.yaml` 提供 Namespace、Secret、PVC、6 个 Deployment 与对应 Service，探针使用 `/health`、`/metrics`、`/`。K8s 清单尚未做集群级校验。
 
 ## 6. 决策记录（明确不做）
@@ -92,7 +95,7 @@ interfaces/http  →  application  →  domain
 ### 6.2 复合游标沿用 `OR` 展开，不改行比较
 
 - **结论**：latest/following 的游标条件保持 `published_at < ? OR (published_at = ? AND id < ?)`，不改成 `(published_at, id) < (?, ?)`。
-- **依据**：在本机 MySQL 8.0 上用 20 万行测试数据实测，`OR` 形式被优化为 `idx_clip_timeline` 的范围扫描（`type=range`，深游标 0.3ms）；行比较形式退化为索引全扫 + `Filter`（扫 14.7 万行，535ms）。
+- **依据**：在本机 MySQL 8.0 实例上用 20 万行测试数据实测（compose 镜像为 8.4，升级时需复跑 EXPLAIN），`OR` 形式被优化为 `idx_clip_timeline` 的范围扫描（`type=range`，深游标 0.3ms）；行比较形式退化为索引全扫 + `Filter`（扫 14.7 万行，535ms）。
 - **取舍**：`OR` 写法略啰嗦，但能真正走索引；只有换到明确支持行比较下推的存储时再重新评估。
 
 ### 6.3 已知测试缺口（本轮不补）
@@ -100,3 +103,4 @@ interfaces/http  →  application  →  domain
 - **RabbitMQ 重投递**：`ActionWorker` 的幂等已有单测覆盖（同一事件消费两次、以及“先成功后失败”分支），但 broker 层的 basic.nack/requeue 与死信未做集成验证，需要真实 MQ 或 testcontainers。
 - **前端自动化**：`apps/web` 目前只有 CI 构建（`npm ci` + `vite build`），没有组件测试或 E2E；交互回归仍靠手工。
 - **真实 MySQL 迁移**：索引建法只在本地 8.0 实例验证过，没有 testcontainers 回归，MySQL 版本升级时需要重新跑 EXPLAIN。
+- **已补覆盖**：`apps/api/test/integration`（`//go:build integration`）已覆盖 `play_count` 跨表同 `event_id` 去重（含并发）与 latest 游标分页边界；每次运行使用独立 schema，跑完清理。
