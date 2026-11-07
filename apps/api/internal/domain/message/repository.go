@@ -15,4 +15,7 @@ type Repository interface {
 	CountUnread(ctx context.Context, receiverID int64) (int64, error)
 	// MarkAllRead 把 receiverID 的所有未读消息一次性标记已读。
 	MarkAllRead(ctx context.Context, receiverID int64) error
+	// MarkReadByIDs 仅把 receiverID 名下、给定 ID 列表中的未读消息标记已读，返回本次实际更新行数；
+	// 不属于该接收者的 ID 会被忽略，重复标记幂等。
+	MarkReadByIDs(ctx context.Context, receiverID int64, ids []int64) (int64, error)
 }

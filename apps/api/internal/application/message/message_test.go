@@ -126,6 +126,27 @@ func (f *messageFakeRepository) MarkAllRead(_ context.Context, receiverID int64)
 	return nil
 }
 
+// MarkReadByIDs 仅更新接收者名下、未读且命中 ID 列表的消息，返回实际更新行数。
+func (f *messageFakeRepository) MarkReadByIDs(_ context.Context, receiverID int64, ids []int64) (int64, error) {
+	if f.markErr != nil {
+		return 0, f.markErr
+	}
+	wanted := make(map[int64]bool, len(ids))
+	for _, id := range ids {
+		wanted[id] = true
+	}
+	readAt := f.baseTime.Add(48 * time.Hour)
+	var marked int64
+	for _, msg := range f.messages {
+		if msg.ReceiverID != receiverID || !wanted[msg.ID] || !msg.ReadAt.IsZero() {
+			continue
+		}
+		msg.ReadAt = readAt
+		marked++
+	}
+	return marked, nil
+}
+
 // TestCreateFromActorEventDedupByEventID 验证同一 event_id 第二次创建 inserted=false 且不新增行。
 func TestCreateFromActorEventDedupByEventID(t *testing.T) {
 	repo := newMessageFakeRepository()
@@ -218,8 +239,11 @@ func TestNotifyFollowedIsIdempotent(t *testing.T) {
 	if msg.ReceiverID != 7 || msg.ActorID != 8 || msg.TargetID != 7 {
 		t.Fatalf("消息归属 receiver=%d actor=%d target=%d, 期望 7/8/7", msg.ReceiverID, msg.ActorID, msg.TargetID)
 	}
-	if msg.Kind != dommessage.KindFollowed {
-		t.Fatalf("消息种类 = %q, 期望 %q", msg.Kind, dommessage.KindFollowed)
+	if msg.Kind != dommessage.KindFollow {
+		t.Fatalf("消息种类 = %q, 期望 %q", msg.Kind, dommessage.KindFollow)
+	}
+	if msg.Title == "" || msg.Content == "" {
+		t.Fatalf("关注通知标题/正文不能为空: title=%q content=%q", msg.Title, msg.Content)
 	}
 	if msg.EventID == "" {
 		t.Fatalf("关注通知缺少确定性 event_id")
@@ -438,6 +462,156 @@ func TestCountUnreadAndMarkAllRead(t *testing.T) {
 	}
 	if err := service.MarkAllRead(ctx, 0); !errors.Is(err, dommessage.ErrInvalidReceiver) {
 		t.Fatalf("MarkAllRead receiver_id=0 错误 = %v, 期望 %v", err, dommessage.ErrInvalidReceiver)
+	}
+}
+
+// TestNotifyFourKindsAndSelfSuppressed 验证点赞/评论/关注/系统四类消息的字段、幂等与自操作抑制。
+func TestNotifyFourKindsAndSelfSuppressed(t *testing.T) {
+	repo := newMessageFakeRepository()
+	service := appmessage.New(repo)
+	ctx := context.Background()
+
+	if err := service.NotifyLiked(ctx, 8, 44, 7); err != nil {
+		t.Fatalf("点赞通知失败: %v", err)
+	}
+	if err := service.NotifyLiked(ctx, 8, 44, 7); err != nil {
+		t.Fatalf("重复点赞通知失败: %v", err)
+	}
+	if err := service.NotifyCommented(ctx, 8, 44, 99, 7, "这条评论写得不错"); err != nil {
+		t.Fatalf("评论通知失败: %v", err)
+	}
+	if err := service.NotifyCommented(ctx, 8, 44, 99, 7, "重复评论"); err != nil {
+		t.Fatalf("重复评论通知失败: %v", err)
+	}
+	if err := service.NotifyFollowed(ctx, 8, 7); err != nil {
+		t.Fatalf("关注通知失败: %v", err)
+	}
+	if _, err := service.Publish(ctx, 7, 0, 0, dommessage.KindSystem, "维护通知", "今晚 23:00 进行维护", "sys-1"); err != nil {
+		t.Fatalf("系统通知失败: %v", err)
+	}
+	// 旧版 kind 落库值应归一化为 FOLLOW 并可读。
+	if _, err := service.Publish(ctx, 7, 9, 7, dommessage.KindFollowed, "", "", "legacy-follow"); err != nil {
+		t.Fatalf("旧版关注通知失败: %v", err)
+	}
+
+	// 自己操作自己：不产生任何消息。
+	if err := service.NotifyLiked(ctx, 7, 44, 7); err != nil {
+		t.Fatalf("自点赞不应报错: %v", err)
+	}
+	if err := service.NotifyCommented(ctx, 7, 44, 100, 7, "自评论"); err != nil {
+		t.Fatalf("自评论不应报错: %v", err)
+	}
+	if err := service.NotifyFollowed(ctx, 7, 7); err != nil {
+		t.Fatalf("自关注不应报错: %v", err)
+	}
+
+	if len(repo.messages) != 5 {
+		t.Fatalf("消息行数 = %d, 期望 5（点赞、评论、关注、系统、旧版关注各一）", len(repo.messages))
+	}
+	wantKinds := []dommessage.Kind{
+		dommessage.KindLike, dommessage.KindComment, dommessage.KindFollow,
+		dommessage.KindSystem, dommessage.KindFollow,
+	}
+	for i, want := range wantKinds {
+		if repo.messages[i].Kind != want {
+			t.Fatalf("第 %d 条消息种类 = %q, 期望 %q", i+1, repo.messages[i].Kind, want)
+		}
+		if repo.messages[i].Title == "" {
+			t.Fatalf("第 %d 条消息标题为空", i+1)
+		}
+	}
+	if repo.messages[0].Content != "赞了你的作品" {
+		t.Fatalf("点赞正文 = %q", repo.messages[0].Content)
+	}
+	if repo.messages[1].Content != "这条评论写得不错" {
+		t.Fatalf("评论正文 = %q, 期望只保留首次评论内容", repo.messages[1].Content)
+	}
+	if repo.messages[3].Content != "今晚 23:00 进行维护" || repo.messages[3].ActorID != 0 {
+		t.Fatalf("系统消息字段不正确: actor=%d content=%q", repo.messages[3].ActorID, repo.messages[3].Content)
+	}
+	if repo.messages[4].Title != dommessage.DefaultTitle(dommessage.KindFollow) {
+		t.Fatalf("旧版关注标题 = %q, 期望默认标题", repo.messages[4].Title)
+	}
+
+	unread, err := service.CountUnread(ctx, 7)
+	if err != nil {
+		t.Fatalf("统计未读失败: %v", err)
+	}
+	if unread != 5 {
+		t.Fatalf("接收者未读数 = %d, 期望 5", unread)
+	}
+}
+
+// TestMarkReadByIDsAndUnreadConsistency 验证按条已读只影响本人命中行，未读数一致且重复标记幂等。
+func TestMarkReadByIDsAndUnreadConsistency(t *testing.T) {
+	repo := newMessageFakeRepository()
+	service := appmessage.New(repo)
+	ctx := context.Background()
+
+	for i := 0; i < 3; i++ {
+		if _, err := service.CreateFromActorEvent(ctx, 7, int64(100+i), 7, dommessage.KindLike, fmt.Sprintf("evt-7-%d", i)); err != nil {
+			t.Fatalf("创建接收者 7 消息失败: %v", err)
+		}
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := service.CreateFromActorEvent(ctx, 8, int64(200+i), 8, dommessage.KindLike, fmt.Sprintf("evt-8-%d", i)); err != nil {
+			t.Fatalf("创建接收者 8 消息失败: %v", i)
+		}
+	}
+
+	ids := []int64{repo.messages[0].ID, repo.messages[2].ID}
+	marked, err := service.MarkReadByIDs(ctx, 7, ids)
+	if err != nil {
+		t.Fatalf("按条标记失败: %v", err)
+	}
+	if marked != 2 {
+		t.Fatalf("实际标记 = %d, 期望 2", marked)
+	}
+	unread, err := service.CountUnread(ctx, 7)
+	if err != nil {
+		t.Fatalf("统计接收者 7 未读失败: %v", err)
+	}
+	if unread != 1 {
+		t.Fatalf("接收者 7 未读 = %d, 期望 1", unread)
+	}
+	unread, err = service.CountUnread(ctx, 8)
+	if err != nil {
+		t.Fatalf("统计接收者 8 未读失败: %v", err)
+	}
+	if unread != 2 {
+		t.Fatalf("按条标记不应影响接收者 8, 实际未读 %d", unread)
+	}
+
+	// 重复标记已读 + 混入他人 ID：均幂等且不越权。
+	marked, err = service.MarkReadByIDs(ctx, 7, []int64{repo.messages[0].ID, repo.messages[3].ID})
+	if err != nil {
+		t.Fatalf("重复标记失败: %v", err)
+	}
+	if marked != 0 {
+		t.Fatalf("重复标记实际更新 = %d, 期望 0", marked)
+	}
+
+	if _, err := service.MarkReadByIDs(ctx, 0, ids); !errors.Is(err, dommessage.ErrInvalidReceiver) {
+		t.Fatalf("receiver=0 错误 = %v, 期望 %v", err, dommessage.ErrInvalidReceiver)
+	}
+	if _, err := service.MarkReadByIDs(ctx, 7, nil); !errors.Is(err, dommessage.ErrInvalidMessageIDs) {
+		t.Fatalf("空 ID 列表错误 = %v, 期望 %v", err, dommessage.ErrInvalidMessageIDs)
+	}
+	if _, err := service.MarkReadByIDs(ctx, 7, []int64{0, -1}); !errors.Is(err, dommessage.ErrInvalidMessageIDs) {
+		t.Fatalf("非法 ID 错误 = %v, 期望 %v", err, dommessage.ErrInvalidMessageIDs)
+	}
+}
+
+// TestPublishTitleValidation 验证超长标题在落库前被拒绝。
+func TestPublishTitleValidation(t *testing.T) {
+	repo := newMessageFakeRepository()
+	service := appmessage.New(repo)
+	longTitle := ""
+	for i := 0; i < 256; i++ {
+		longTitle += "标"
+	}
+	if _, err := service.Publish(context.Background(), 7, 8, 7, dommessage.KindLike, longTitle, "正文", "evt-long"); !errors.Is(err, dommessage.ErrInvalidTitle) {
+		t.Fatalf("超长标题错误 = %v, 期望 %v", err, dommessage.ErrInvalidTitle)
 	}
 }
 

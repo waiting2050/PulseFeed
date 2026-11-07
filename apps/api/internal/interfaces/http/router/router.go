@@ -153,8 +153,18 @@ func Register(engine *gin.Engine, cfg *config.Config, db *sql.DB) error {
 	// 否则回退 S9 的同步落库路径；评论始终同步处理。
 	// 计数真正变化时同步累加 Redis 热度分钟桶（S15 hot 场景数据源），缓存禁用时实现自身跳过。
 	actionRepo := infraaction.New(gormDB)
-	actionOpts := make([]appaction.Option, 0, 2)
+	actionOpts := make([]appaction.Option, 0, 3)
 	actionOpts = append(actionOpts, appaction.WithHotScoreRecorder(feedCache))
+	// 点赞/评论通知：message 服务作为投递端口，创作者通过 clip 仓储的最小解析器获得。
+	actionOpts = append(actionOpts, appaction.WithMessageNotifier(messageService, appaction.ClipOwnerFunc(
+		func(ctx context.Context, clipID int64) (int64, error) {
+			clip, err := clipRepo.GetByID(ctx, clipID)
+			if err != nil {
+				return 0, err
+			}
+			return clip.CreatorID, nil
+		},
+	)))
 	if feedCache.Enabled() && mqClient != nil {
 		actionOpts = append(actionOpts, appaction.WithAsyncActionPipeline(feedCache, mqClient))
 		log.Printf("互动异步链路已启用 (queue=%s)", cfg.RabbitMQ.ActionChangedQueue)
@@ -215,10 +225,10 @@ func Register(engine *gin.Engine, cfg *config.Config, db *sql.DB) error {
 	authed.DELETE("/users/me/following/:targetUserId", relationHandler.Unfollow)
 	authed.GET("/users/me/following", relationHandler.ListFollowing)
 	authed.GET("/users/me/followers", relationHandler.ListFollowers)
-	// 站内消息端点：列表、未读数与全部标记已读，均要求登录（S16 接入）。
+	// 站内消息端点：列表、未读数与按条/全部标记已读，均要求登录（S16 接入）。
 	authed.GET("/messages", messageHandler.ListMessages)
 	authed.GET("/message-stats/unread", messageHandler.GetUnreadCount)
-	authed.PATCH("/messages", messageHandler.MarkAllRead)
+	authed.PATCH("/messages", messageHandler.MarkRead)
 	// 播放配置与 QoS 上报端点：登录用户读取/更新配置、取预加载列表、幂等上报 QoS（S16 接入）。
 	authed.GET("/playback-config", playbackHandler.GetConfig)
 	authed.PUT("/playback-config", playbackHandler.UpdateConfig)

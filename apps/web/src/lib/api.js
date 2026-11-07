@@ -177,6 +177,9 @@ export const api = {
   messages: ({ limit = 20, cursor = '' } = {}) =>
     request(`/messages${buildQuery({ limit, cursor })}`),
 
+  // 按条已读：ids 非空时只标记当前用户名下的这些消息；不传 ids 即全部已读。
+  markRead: (ids) => request('/messages', { method: 'PATCH', body: { ids } }),
+
   markAllRead: () => request('/messages', { method: 'PATCH' }),
 
   playbackConfig: () => request('/playback-config'),

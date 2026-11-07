@@ -33,6 +33,8 @@ func (r *Repository) Create(ctx context.Context, msg *dommessage.Message) (bool,
 		ActorID:    msg.ActorID,
 		Kind:       string(msg.Kind),
 		TargetID:   msg.TargetID,
+		Title:      msg.Title,
+		Content:    msg.Content,
 		EventID:    msg.EventID,
 	}
 	res := r.db.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).Create(m)
@@ -63,12 +65,19 @@ func (r *Repository) ListPage(ctx context.Context, receiverID int64, cursor *dom
 	}
 	out := make([]*dommessage.Message, 0, len(rows))
 	for i := range rows {
+		kind := dommessage.NormalizeKind(dommessage.Kind(rows[i].Kind))
+		title := rows[i].Title
+		if title == "" {
+			title = dommessage.DefaultTitle(kind)
+		}
 		out = append(out, &dommessage.Message{
 			ID:         rows[i].ID,
 			ReceiverID: rows[i].ReceiverID,
 			ActorID:    rows[i].ActorID,
-			Kind:       dommessage.Kind(rows[i].Kind),
+			Kind:       kind,
 			TargetID:   rows[i].TargetID,
+			Title:      title,
+			Content:    rows[i].Content,
 			EventID:    rows[i].EventID,
 			CreatedAt:  rows[i].CreatedAt,
 		})
@@ -99,4 +108,18 @@ func (r *Repository) MarkAllRead(ctx context.Context, receiverID int64) error {
 	return r.db.WithContext(ctx).Model(&MessageModel{}).
 		Where("receiver_user_id = ? AND read_at IS NULL", receiverID).
 		Update("read_at", gorm.Expr("NOW()")).Error
+}
+
+// MarkReadByIDs 只更新 receiverID 名下、未读且 ID 在列表内的行，返回实际影响行数。
+func (r *Repository) MarkReadByIDs(ctx context.Context, receiverID int64, ids []int64) (int64, error) {
+	if receiverID <= 0 {
+		return 0, dommessage.ErrInvalidReceiver
+	}
+	if len(ids) == 0 {
+		return 0, dommessage.ErrInvalidMessageIDs
+	}
+	res := r.db.WithContext(ctx).Model(&MessageModel{}).
+		Where("receiver_user_id = ? AND read_at IS NULL AND id IN ?", receiverID, ids).
+		Update("read_at", gorm.Expr("NOW()"))
+	return res.RowsAffected, res.Error
 }

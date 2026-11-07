@@ -633,15 +633,89 @@ button:disabled {
   display: flex;
   align-items: center;
   gap: var(--space-3);
+  width: 100%;
   padding: var(--space-4);
   border: 1px solid var(--line);
   border-radius: var(--r-md);
   background: var(--surface-1);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color var(--dur-fast), background var(--dur-fast);
+}
+
+.pf-message.is-unread:hover {
+  border-color: var(--cyan);
+}
+
+.pf-message:disabled {
+  cursor: default;
 }
 
 .pf-message.is-unread {
   border-color: var(--line-strong);
   background: var(--surface-2);
+}
+
+.pf-message-icon {
+  width: 36px;
+  height: 36px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--surface-3);
+  color: var(--text-2);
+}
+
+.pf-message-icon.is-like {
+  background: var(--brand-soft);
+  color: var(--brand);
+}
+
+.pf-message-icon.is-comment {
+  background: var(--cyan-soft);
+  color: var(--cyan);
+}
+
+.pf-message-icon.is-follow {
+  background: var(--surface-3);
+  color: var(--text-1);
+}
+
+.pf-message-icon.is-system {
+  background: rgba(96, 165, 250, 0.12);
+  color: var(--info);
+}
+
+.pf-message-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.pf-message-type {
+  padding: 1px 6px;
+  border-radius: var(--r-xs);
+  background: var(--surface-3);
+  color: var(--text-2);
+  font-size: var(--fs-micro);
+  line-height: var(--lh-micro);
+}
+
+.pf-message.is-unread .pf-message-type {
+  background: var(--cyan-soft);
+  color: var(--cyan);
+}
+
+.pf-message-title {
+  font-size: var(--fs-title);
+  line-height: var(--lh-title);
+  font-weight: 600;
+  color: var(--text-1);
 }
 
 .pf-message-main {
@@ -680,6 +754,7 @@ button:disabled {
 
 .pf-message-skeleton {
   border-style: dashed;
+  cursor: default;
 }
 
 .pf-sk-avatar {

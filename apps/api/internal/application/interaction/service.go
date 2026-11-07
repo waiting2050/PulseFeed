@@ -45,6 +45,33 @@ type HotScoreRecorder interface {
 	RecordHotScore(ctx context.Context, clipID int64, delta float64)
 }
 
+// MessageNotifier 是点赞/评论通知的投递端口，由 message 应用服务实现。
+type MessageNotifier interface {
+	NotifyLiked(ctx context.Context, actorID, clipID, creatorID int64) error
+	NotifyCommented(ctx context.Context, actorID, clipID, commentID, creatorID int64, content string) error
+}
+
+// ClipOwnerResolver 用于解析作品创作者；互动服务只依赖这一最小接口，避免耦合 clip 仓储全貌。
+type ClipOwnerResolver interface {
+	OwnerID(ctx context.Context, clipID int64) (int64, error)
+}
+
+// ClipOwnerFunc 把函数适配为 ClipOwnerResolver，便于组合根桥接 clip 仓储。
+type ClipOwnerFunc func(ctx context.Context, clipID int64) (int64, error)
+
+// OwnerID 实现 ClipOwnerResolver。
+func (f ClipOwnerFunc) OwnerID(ctx context.Context, clipID int64) (int64, error) {
+	return f(ctx, clipID)
+}
+
+// WithMessageNotifier 注入消息通知器与创作者解析器；未注入时互动仍正常工作，只是不产生通知。
+func WithMessageNotifier(notifier MessageNotifier, owners ClipOwnerResolver) Option {
+	return func(s *Service) {
+		s.notifier = notifier
+		s.owners = owners
+	}
+}
+
 // Option 用于装配可选依赖。
 type Option func(*Service)
 
@@ -68,6 +95,8 @@ type Service struct {
 	stateCache ActionStateCache
 	publisher  ActionEventPublisher
 	hotScores  HotScoreRecorder
+	notifier   MessageNotifier
+	owners     ClipOwnerResolver
 }
 
 // New 创建互动应用服务。
@@ -117,7 +146,29 @@ func (s *Service) setAction(ctx context.Context, userID, clipID int64, actionTyp
 		return nil, err
 	}
 	s.recordHotScore(ctx, clipID, actionType, result)
+	// 点赞真正生效时向创作者投递通知；取消点赞不撤回历史消息，重复点赞由消息幂等键去重。
+	if result.Changed && result.Active && actionType == dominteraction.ActionLike {
+		s.notifyLike(ctx, userID, clipID)
+	}
 	return result, nil
+}
+
+// notifyLike 解析作品创作者并投递点赞通知；通知失败只记录日志，不影响互动主链路。
+func (s *Service) notifyLike(ctx context.Context, userID, clipID int64) {
+	if s.notifier == nil || s.owners == nil {
+		return
+	}
+	creatorID, err := s.owners.OwnerID(ctx, clipID)
+	if err != nil {
+		log.Printf("warning: 点赞通知解析创作者失败 (clip_id=%d): %v", clipID, err)
+		return
+	}
+	if creatorID <= 0 || creatorID == userID {
+		return
+	}
+	if err := s.notifier.NotifyLiked(ctx, userID, clipID, creatorID); err != nil {
+		log.Printf("warning: 点赞通知投递失败 (clip_id=%d): %v", clipID, err)
+	}
 }
 
 // recordHotScore 在行为计数真正变化时把对应权重累加进热度分钟桶（S15 hot 场景数据源）。
@@ -176,7 +227,31 @@ func (s *Service) CreateComment(ctx context.Context, userID, clipID int64, conte
 	if err != nil {
 		return nil, 0, err
 	}
-	return s.repo.CreateComment(ctx, comment, idempotencyKey)
+	created, total, err := s.repo.CreateComment(ctx, comment, idempotencyKey)
+	if err != nil {
+		return nil, 0, err
+	}
+	// 评论通知以评论 ID 为幂等键，重复提交同一评论不会重复打扰创作者；删除评论不撤回历史通知。
+	s.notifyComment(ctx, userID, clipID, created)
+	return created, total, nil
+}
+
+// notifyComment 解析作品创作者并投递评论通知；通知失败只记录日志，不影响评论主链路。
+func (s *Service) notifyComment(ctx context.Context, userID, clipID int64, comment *dominteraction.Comment) {
+	if s.notifier == nil || s.owners == nil || comment == nil {
+		return
+	}
+	creatorID, err := s.owners.OwnerID(ctx, clipID)
+	if err != nil {
+		log.Printf("warning: 评论通知解析创作者失败 (clip_id=%d): %v", clipID, err)
+		return
+	}
+	if creatorID <= 0 || creatorID == userID {
+		return
+	}
+	if err := s.notifier.NotifyCommented(ctx, userID, clipID, comment.ID, creatorID, comment.Content); err != nil {
+		log.Printf("warning: 评论通知投递失败 (clip_id=%d comment_id=%d): %v", clipID, comment.ID, err)
+	}
 }
 
 // DeleteComment 删除评论：作者或 clip 创作者可操作，重复删除幂等。

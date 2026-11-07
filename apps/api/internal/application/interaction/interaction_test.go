@@ -323,6 +323,141 @@ func TestInteractionCommentIdempotency(t *testing.T) {
 	}
 }
 
+// interactionNotifierCall 记录一次通知投递，便于断言触发点与载荷。
+type interactionNotifierCall struct {
+	kind      string
+	actorID   int64
+	clipID    int64
+	commentID int64
+	creatorID int64
+	content   string
+}
+
+// interactionFakeNotifier 是 MessageNotifier 的内存替身，按调用顺序记录通知。
+type interactionFakeNotifier struct {
+	calls []interactionNotifierCall
+	err   error
+}
+
+// NotifyLiked 记录点赞通知。
+func (n *interactionFakeNotifier) NotifyLiked(_ context.Context, actorID, clipID, creatorID int64) error {
+	n.calls = append(n.calls, interactionNotifierCall{kind: "LIKE", actorID: actorID, clipID: clipID, creatorID: creatorID})
+	return n.err
+}
+
+// NotifyCommented 记录评论通知。
+func (n *interactionFakeNotifier) NotifyCommented(_ context.Context, actorID, clipID, commentID, creatorID int64, content string) error {
+	n.calls = append(n.calls, interactionNotifierCall{kind: "COMMENT", actorID: actorID, clipID: clipID, commentID: commentID, creatorID: creatorID, content: content})
+	return n.err
+}
+
+// ownerResolver 用 fake 仓储的发布关系解析创作者。
+func ownerResolver(repo *interactionFake) appaction.ClipOwnerResolver {
+	return appaction.ClipOwnerFunc(func(_ context.Context, clipID int64) (int64, error) {
+		owner, ok := repo.published[clipID]
+		if !ok {
+			return 0, dominteraction.ErrClipNotFound
+		}
+		return owner, nil
+	})
+}
+
+// TestInteractionNotifiesLikeAndComment 验证点赞仅在状态真正生效时通知，
+// 重复点赞与取消点赞不重复通知；评论通知携带评论 ID 与正文，供消息层按 ID 幂等去重。
+func TestInteractionNotifiesLikeAndComment(t *testing.T) {
+	repo := newInteractionFake(21)
+	notifier := &interactionFakeNotifier{}
+	service := appaction.New(repo, appaction.WithMessageNotifier(notifier, ownerResolver(repo)))
+	ctx := context.Background()
+
+	if _, err := service.Like(ctx, 7, 21, "like-1"); err != nil {
+		t.Fatalf("首次点赞失败: %v", err)
+	}
+	if len(notifier.calls) != 1 {
+		t.Fatalf("首次点赞应产生 1 条通知，实际 %d", len(notifier.calls))
+	}
+	call := notifier.calls[0]
+	if call.kind != "LIKE" || call.actorID != 7 || call.clipID != 21 || call.creatorID != 1 {
+		t.Fatalf("点赞通知载荷 = %+v, 期望 LIKE/7/21/1", call)
+	}
+
+	if _, err := service.Like(ctx, 7, 21, "like-2"); err != nil {
+		t.Fatalf("重复点赞失败: %v", err)
+	}
+	if _, err := service.Unlike(ctx, 7, 21, "like-3"); err != nil {
+		t.Fatalf("取消点赞失败: %v", err)
+	}
+	if len(notifier.calls) != 1 {
+		t.Fatalf("重复点赞/取消点赞不应新增通知，实际 %d", len(notifier.calls))
+	}
+
+	first, _, err := service.CreateComment(ctx, 7, 21, "  好片子  ", "comment-1")
+	if err != nil {
+		t.Fatalf("创建评论失败: %v", err)
+	}
+	if len(notifier.calls) != 2 {
+		t.Fatalf("评论应产生 1 条通知，累计 %d", len(notifier.calls))
+	}
+	commentCall := notifier.calls[1]
+	if commentCall.kind != "COMMENT" || commentCall.commentID != first.ID ||
+		commentCall.creatorID != 1 || commentCall.content != "好片子" {
+		t.Fatalf("评论通知载荷 = %+v, 期望 COMMENT/评论ID=%d/creator=1/正文=好片子", commentCall, first.ID)
+	}
+
+	second, _, err := service.CreateComment(ctx, 7, 21, "另一条", "comment-1")
+	if err != nil {
+		t.Fatalf("重复创建评论失败: %v", err)
+	}
+	if second.ID != first.ID {
+		t.Fatalf("同幂等键应复用评论 ID=%d，实际 %d", first.ID, second.ID)
+	}
+	if len(notifier.calls) != 3 || notifier.calls[2].commentID != first.ID {
+		t.Fatalf("重复评论应携带同一评论 ID，实际 calls=%+v", notifier.calls)
+	}
+}
+
+// TestInteractionSelfActionsDoNotNotify 验证自己给自己的作品点赞/评论不产生通知。
+func TestInteractionSelfActionsDoNotNotify(t *testing.T) {
+	repo := newInteractionFake(22)
+	notifier := &interactionFakeNotifier{}
+	service := appaction.New(repo, appaction.WithMessageNotifier(notifier, ownerResolver(repo)))
+	ctx := context.Background()
+
+	if _, err := service.Like(ctx, 1, 22, "self-like"); err != nil {
+		t.Fatalf("自点赞失败: %v", err)
+	}
+	if _, _, err := service.CreateComment(ctx, 1, 22, "自评", "self-comment"); err != nil {
+		t.Fatalf("自评论失败: %v", err)
+	}
+	if len(notifier.calls) != 0 {
+		t.Fatalf("自己操作自己内容不应产生通知，实际 %d 条", len(notifier.calls))
+	}
+}
+
+// TestInteractionNotifierFailureDoesNotBreakAction 验证通知失败只影响通知，
+// 点赞/评论主链路仍成功返回。
+func TestInteractionNotifierFailureDoesNotBreakAction(t *testing.T) {
+	repo := newInteractionFake(23)
+	notifier := &interactionFakeNotifier{err: errors.New("notify down")}
+	service := appaction.New(repo, appaction.WithMessageNotifier(notifier, ownerResolver(repo)))
+	ctx := context.Background()
+
+	result, err := service.Like(ctx, 7, 23, "like-1")
+	if err != nil {
+		t.Fatalf("通知失败不应影响点赞，实际错误: %v", err)
+	}
+	if result == nil || result.LikeCount != 1 {
+		t.Fatalf("点赞结果 = %+v, 期望计数 1", result)
+	}
+	created, count, err := service.CreateComment(ctx, 7, 23, "评论", "comment-1")
+	if err != nil {
+		t.Fatalf("通知失败不应影响评论，实际错误: %v", err)
+	}
+	if created == nil || count != 1 {
+		t.Fatalf("评论结果 = %+v count=%d, 期望 1 条", created, count)
+	}
+}
+
 // TestInteractionRejectsInvalidArguments 验证非法 clip、空评论与越界分页被拒绝。
 func TestInteractionRejectsInvalidArguments(t *testing.T) {
 	repo := newInteractionFake(14)
