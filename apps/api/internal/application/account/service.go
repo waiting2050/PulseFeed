@@ -112,6 +112,11 @@ func (s *Service) Login(ctx context.Context, account, password string) (*Session
 	if err := bcrypt.CompareHashAndPassword([]byte(acc.PasswordHash), []byte(password)); err != nil {
 		return nil, domainaccount.ErrInvalidCredentials
 	}
+	// 凭证通过后再校验状态：被禁用或非正常状态的账号不签发令牌，
+	// 且不向未通过凭证校验的调用方暴露账号状态。
+	if acc.Status != domainaccount.StatusNormal {
+		return nil, domainaccount.ErrAccountDisabled
+	}
 
 	token, err := s.issuer.Issue(acc.ID, acc.Role)
 	if err != nil {

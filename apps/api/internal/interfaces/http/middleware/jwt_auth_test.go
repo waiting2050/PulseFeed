@@ -1,6 +1,6 @@
 // jwt_auth_test.go 覆盖三种鉴权中间件的放行/拦截矩阵与 401 错误信封格式：
-// 必选 JWT 缺失或非法必须拦、可选 JWT 无令牌放行但带坏令牌必须拦、
-// 内部 token 必须常量比较校验；拦截响应统一为 code=401 的 JSON 信封。
+// 必选 JWT 缺失或非法必须拦；可选 JWT 的任何鉴权失败（缺失/格式错误/签名错误/过期）
+// 都降级为匿名放行且不写 user_id；内部 token 必须常量比较校验；拦截响应统一为 code=401 的 JSON 信封。
 package middleware
 
 import (
@@ -75,6 +75,23 @@ func assertUnauthorizedEnvelope(t *testing.T, rec *httptest.ResponseRecorder) {
 	}
 }
 
+// assertAnonymousOK 断言请求以 200 匿名放行，且未写入 user_id。
+func assertAnonymousOK(t *testing.T, rec *httptest.ResponseRecorder) {
+	t.Helper()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("期望 200 匿名放行，实际 %d，body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		HasUser bool `json:"has_user"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("解析响应失败: %v", err)
+	}
+	if body.HasUser {
+		t.Fatalf("降级匿名时不应写入 user_id")
+	}
+}
+
 // TestRequiredJWTAuth 覆盖必选 JWT：缺失、无 Bearer 前缀、签名错误、过期全部拦截，合法令牌写入 user_id。
 func TestRequiredJWTAuth(t *testing.T) {
 	issuer := newTestIssuer(t)
@@ -124,25 +141,38 @@ func TestRequiredJWTAuth(t *testing.T) {
 	})
 }
 
-// TestOptionalJWTAuth 覆盖可选 JWT：无令牌放行且不写用户，带坏令牌仍必须拦截。
+// TestOptionalJWTAuth 覆盖可选 JWT：无令牌、格式错误、签名错误、过期、非法字符串
+// 全部降级为匿名放行（200 且不写 user_id），仅合法令牌写入用户。
 func TestOptionalJWTAuth(t *testing.T) {
 	issuer := newTestIssuer(t)
+	validToken := issueTestToken(t, issuer, 7)
 
-	t.Run("无令牌放行", func(t *testing.T) {
-		rec := serveWithMiddleware(NewOptionalJWTAuth(issuer), "")
-		if rec.Code != http.StatusOK {
-			t.Fatalf("期望 200，实际 %d", rec.Code)
-		}
-		var body struct {
-			HasUser bool `json:"has_user"`
-		}
-		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
-			t.Fatalf("解析响应失败: %v", err)
-		}
-		if body.HasUser {
-			t.Fatalf("匿名请求不应写入 user_id")
-		}
-	})
+	otherIssuer, err := infrajwt.New("another-secret", time.Hour)
+	if err != nil {
+		t.Fatalf("创建另一签发器失败: %v", err)
+	}
+	foreignToken := issueTestToken(t, otherIssuer, 7)
+
+	expiredIssuer, err := infrajwt.New("test-secret", time.Millisecond)
+	if err != nil {
+		t.Fatalf("创建短 TTL 签发器失败: %v", err)
+	}
+	expiredToken := issueTestToken(t, expiredIssuer, 7)
+	time.Sleep(5 * time.Millisecond)
+
+	anonymousCases := map[string]string{
+		"无令牌":          "",
+		"缺少 Bearer 前缀": validToken,
+		"令牌为空":         "Bearer ",
+		"签名不匹配":        "Bearer " + foreignToken,
+		"令牌已过期":        "Bearer " + expiredToken,
+		"非 JWT 字符串":    "Bearer not-a-jwt",
+	}
+	for name, header := range anonymousCases {
+		t.Run(name, func(t *testing.T) {
+			assertAnonymousOK(t, serveWithMiddleware(NewOptionalJWTAuth(issuer), header))
+		})
+	}
 
 	t.Run("合法令牌写入用户", func(t *testing.T) {
 		token := issueTestToken(t, issuer, 7)
@@ -160,10 +190,6 @@ func TestOptionalJWTAuth(t *testing.T) {
 		if !body.HasUser || body.UserID != 7 {
 			t.Fatalf("期望 user_id=7，实际 has_user=%v user_id=%d", body.HasUser, body.UserID)
 		}
-	})
-
-	t.Run("坏令牌拦截", func(t *testing.T) {
-		assertUnauthorizedEnvelope(t, serveWithMiddleware(NewOptionalJWTAuth(issuer), "Bearer not-a-jwt"))
 	})
 }
 

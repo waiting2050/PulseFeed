@@ -143,6 +143,8 @@ func mapError(c *gin.Context, err error) {
 		fail(c, http.StatusBadRequest, err.Error())
 	case errors.Is(err, domainaccount.ErrInvalidCredentials):
 		fail(c, http.StatusUnauthorized, err.Error())
+	case errors.Is(err, domainaccount.ErrAccountDisabled):
+		fail(c, http.StatusForbidden, err.Error())
 	case errors.Is(err, domainaccount.ErrAccountNotFound):
 		fail(c, http.StatusNotFound, err.Error())
 	case errors.Is(err, domainaccount.ErrAccountExists):

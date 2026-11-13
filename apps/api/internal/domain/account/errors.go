@@ -16,4 +16,6 @@ var (
 	ErrAccountNotFound = errors.New("account not found")
 	// ErrEmptyProfileUpdate 表示资料更新请求不包含任何字段。
 	ErrEmptyProfileUpdate = errors.New("profile update is empty")
+	// ErrAccountDisabled 表示账号状态非正常（如被禁用），不允许登录。
+	ErrAccountDisabled = errors.New("账号已被禁用或状态异常")
 )

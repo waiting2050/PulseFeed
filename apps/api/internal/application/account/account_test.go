@@ -264,6 +264,29 @@ func TestAccountLoginRejectsWrongPassword(t *testing.T) {
 	}
 }
 
+// TestAccountLoginRejectsDisabledAccount 验证被禁用/非正常状态账号即使凭证正确也不签发令牌。
+func TestAccountLoginRejectsDisabledAccount(t *testing.T) {
+	ctx := context.Background()
+	svc, repo, issuer := newAccountService()
+
+	if _, err := svc.Register(ctx, "alice", "secret-123", ""); err != nil {
+		t.Fatalf("注册不应失败: %v", err)
+	}
+	// 模拟运营侧将账号状态改为禁用（非 StatusNormal）。
+	repo.accounts["alice"].Status = 2
+
+	session, err := svc.Login(ctx, "alice", "secret-123")
+	if !errors.Is(err, domainaccount.ErrAccountDisabled) {
+		t.Fatalf("禁用账号期望 ErrAccountDisabled，实际 %v", err)
+	}
+	if session != nil {
+		t.Fatalf("禁用账号不应返回会话: %+v", session)
+	}
+	if issuer.issuedUser != 0 {
+		t.Fatalf("禁用账号不应签发令牌, 实际签发用户 %d", issuer.issuedUser)
+	}
+}
+
 // TestAccountLoginHidesUnknownAccount 验证账号不存在被映射为凭证错误而非暴露存在性。
 func TestAccountLoginHidesUnknownAccount(t *testing.T) {
 	ctx := context.Background()

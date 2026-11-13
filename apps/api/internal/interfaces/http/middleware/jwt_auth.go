@@ -3,6 +3,7 @@ package middleware
 
 import (
 	"crypto/subtle"
+	"log"
 	"net/http"
 	"strings"
 
@@ -27,17 +28,27 @@ func NewJWTAuth(issuer *infrajwt.Issuer) gin.HandlerFunc {
 	}
 }
 
-// NewOptionalJWTAuth 在未携带令牌时直接放行；携带令牌时必须合法，成功后写入用户 ID。
+// NewOptionalJWTAuth 用于「登录可选」的读接口：任何鉴权失败都降级为匿名访问而不是中断请求。
+// 未携带 token、token 格式非法、token 解析失败三种情况行为一致（不写入用户 ID 直接放行），
+// 仅通过日志区分原因，便于排查客户端凭据问题。
 func NewOptionalJWTAuth(issuer *infrajwt.Issuer) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		header := c.GetHeader("Authorization")
 		if header == "" {
+			log.Printf("optional auth: 未携带 Authorization，按匿名访问继续 (path=%s)", c.Request.URL.Path)
 			c.Next()
 			return
 		}
-		userID, _, err := issuer.Parse(bearerToken(header))
+		token := bearerToken(header)
+		if token == "" {
+			log.Printf("optional auth: Authorization 头不是 Bearer 格式或令牌为空，按匿名访问继续 (path=%s)", c.Request.URL.Path)
+			c.Next()
+			return
+		}
+		userID, _, err := issuer.Parse(token)
 		if err != nil {
-			abortUnauthorized(c)
+			log.Printf("optional auth: 令牌解析失败，按匿名访问继续 (path=%s): %v", c.Request.URL.Path, err)
+			c.Next()
 			return
 		}
 		c.Set(ContextUserIDKey, userID)
