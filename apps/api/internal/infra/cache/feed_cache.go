@@ -334,8 +334,9 @@ func (c *FeedCache) sumActionCounts(ctx context.Context, clipID int64) (int64, i
 
 // RecordHotScore 按 clip ID 与当前分钟把热度增量累加到分钟桶 ZSET（ZINCRBY）：
 // 桶键形如 pf:v1:feed:hot:202601021504（分钟内若干次小增量合并为桶内累计值）。
+// delta 允许为负（取消点赞/收藏），零值不写桶。
 func (c *FeedCache) RecordHotScore(ctx context.Context, clipID int64, delta float64) {
-	if !c.Enabled() || clipID <= 0 || delta <= 0 {
+	if !c.Enabled() || clipID <= 0 || delta == 0 {
 		return
 	}
 	key := hotBucketKey(c.clock())
@@ -381,6 +382,10 @@ func (c *FeedCache) ListHotWindow(ctx context.Context) ([]domfeed.HotItem, error
 
 	items := make([]domfeed.HotItem, 0, len(acc))
 	for member, score := range acc {
+		// 取消点赞/收藏会写入负分；累计后非正分的条目不再占用热榜位置。
+		if score <= 0 {
+			continue
+		}
 		clipID, err := strconv.ParseInt(member, 10, 64)
 		if err != nil {
 			continue

@@ -480,3 +480,91 @@ func TestInteractionRejectsInvalidArguments(t *testing.T) {
 		t.Fatalf("超上限 limit 期望 ErrInvalidLimit，实际 %v", err)
 	}
 }
+
+// interactionHotScoreCall 记录一次热度写入，用于断言方向与权重。
+type interactionHotScoreCall struct {
+	clipID int64
+	delta  float64
+}
+
+// interactionFakeHotRecorder 是 HotScoreRecorder 的内存替身，按调用顺序记录增量。
+type interactionFakeHotRecorder struct {
+	calls []interactionHotScoreCall
+}
+
+// RecordHotScore 记录一次热度增量。
+func (r *interactionFakeHotRecorder) RecordHotScore(_ context.Context, clipID int64, delta float64) {
+	r.calls = append(r.calls, interactionHotScoreCall{clipID: clipID, delta: delta})
+}
+
+// TestInteractionHotScoreFollowsActionDirection 验证热度按行为方向累加：
+// 点赞 +3、取消点赞 -3、收藏 +4、取消收藏 -4，重复调用不写入。
+func TestInteractionHotScoreFollowsActionDirection(t *testing.T) {
+	repo := newInteractionFake(24)
+	recorder := &interactionFakeHotRecorder{}
+	service := appaction.New(repo, appaction.WithHotScoreRecorder(recorder))
+	ctx := context.Background()
+
+	steps := []struct {
+		name   string
+		call   func() error
+		expect float64
+		record bool
+	}{
+		{name: "首次点赞", expect: 3, record: true, call: func() error {
+			_, err := service.Like(ctx, 7, 24, "")
+			return err
+		}},
+		{name: "重复点赞", call: func() error {
+			_, err := service.Like(ctx, 7, 24, "")
+			return err
+		}},
+		{name: "取消点赞", expect: -3, record: true, call: func() error {
+			_, err := service.Unlike(ctx, 7, 24, "")
+			return err
+		}},
+		{name: "重复取消点赞", call: func() error {
+			_, err := service.Unlike(ctx, 7, 24, "")
+			return err
+		}},
+		{name: "首次收藏", expect: 4, record: true, call: func() error {
+			_, err := service.Save(ctx, 7, 24, "")
+			return err
+		}},
+		{name: "重复收藏", call: func() error {
+			_, err := service.Save(ctx, 7, 24, "")
+			return err
+		}},
+		{name: "取消收藏", expect: -4, record: true, call: func() error {
+			_, err := service.Unsave(ctx, 7, 24, "")
+			return err
+		}},
+		{name: "重复取消收藏", call: func() error {
+			_, err := service.Unsave(ctx, 7, 24, "")
+			return err
+		}},
+	}
+
+	for _, step := range steps {
+		if err := step.call(); err != nil {
+			t.Fatalf("%s失败: %v", step.name, err)
+		}
+		if !step.record {
+			continue
+		}
+		last := recorder.calls[len(recorder.calls)-1]
+		if last.clipID != 24 || last.delta != step.expect {
+			t.Fatalf("%s 热度写入 = %+v, 期望 clip=24 delta=%v", step.name, last, step.expect)
+		}
+	}
+
+	if len(recorder.calls) != 4 {
+		t.Fatalf("仅状态翻转应写入热度，实际 %d 次: %+v", len(recorder.calls), recorder.calls)
+	}
+	want := []float64{3, -3, 4, -4}
+	for i, delta := range want {
+		if recorder.calls[i].delta != delta {
+			t.Fatalf("第 %d 次热度增量 = %v, 期望 %v", i+1, recorder.calls[i].delta, delta)
+		}
+	}
+}

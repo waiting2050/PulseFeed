@@ -96,8 +96,9 @@ func TestHotBucketsAccumulateWithinMinuteAndRollOverAcrossMinutes(t *testing.T) 
 	}
 }
 
-// TestHotBucketsIgnoreInvalidInput 验证非正 clip 与非正增量不写桶，避免脏数据进入热榜。
-func TestHotBucketsIgnoreInvalidInput(t *testing.T) {
+// TestHotBucketsAcceptNegativeDeltaAndFilterNonPositive 验证取消操作会写入负分，
+// 但累计非正的条目不会进入热榜窗口；非法 clip 与零增量仍不写桶。
+func TestHotBucketsAcceptNegativeDeltaAndFilterNonPositive(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 1, 2, 15, 4, 0, 0, time.UTC)
 	cache, server := newHotTestCache(t, func() time.Time { return now })
@@ -105,9 +106,25 @@ func TestHotBucketsIgnoreInvalidInput(t *testing.T) {
 	cache.RecordHotScore(ctx, 0, 5)
 	cache.RecordHotScore(ctx, -1, 5)
 	cache.RecordHotScore(ctx, 101, 0)
-	cache.RecordHotScore(ctx, 101, -2)
 
 	if server.Exists(hotBucketKey(now)) {
-		t.Fatalf("非法输入不应创建热度分钟桶")
+		t.Fatalf("非法 clip 与零增量不应创建热度分钟桶")
+	}
+
+	// 点赞后取消：桶内累计为 0，热榜窗口应剔除。
+	cache.RecordHotScore(ctx, 101, 3)
+	cache.RecordHotScore(ctx, 101, -3)
+	// 仅取消、从未点赞的条目：桶内为负分，同样不占位。
+	cache.RecordHotScore(ctx, 202, -2)
+
+	if score, err := server.ZScore(hotBucketKey(now), "101"); err != nil || score != 0 {
+		t.Fatalf("clip 101 桶内分数 = %v (err=%v), 期望 0（+3-3）", score, err)
+	}
+	items, err := cache.ListHotWindow(ctx)
+	if err != nil {
+		t.Fatalf("读取热度窗口失败: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("非正分条目不应进入热榜窗口，实际 %+v", items)
 	}
 }

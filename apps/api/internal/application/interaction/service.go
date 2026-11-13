@@ -171,7 +171,8 @@ func (s *Service) notifyLike(ctx context.Context, userID, clipID int64) {
 	}
 }
 
-// recordHotScore 在行为计数真正变化时把对应权重累加进热度分钟桶（S15 hot 场景数据源）。
+// recordHotScore 在行为计数真正变化时把对应权重按方向累加进热度分钟桶（S15 hot 场景数据源）：
+// 点赞/收藏加正权重，取消点赞/取消收藏加负权重，未发生变化不写入。
 func (s *Service) recordHotScore(ctx context.Context, clipID int64, actionType dominteraction.ActionType, result *dominteraction.ActionResult) {
 	if s.hotScores == nil || result == nil || !result.Changed {
 		return
@@ -179,6 +180,9 @@ func (s *Service) recordHotScore(ctx context.Context, clipID int64, actionType d
 	weight := float64(domfeed.HotWeightLike)
 	if actionType == dominteraction.ActionSave {
 		weight = float64(domfeed.HotWeightSave)
+	}
+	if !result.Active {
+		weight = -weight
 	}
 	s.hotScores.RecordHotScore(ctx, clipID, weight)
 }
