@@ -23,15 +23,24 @@ func Load(path string) (*Config, error) {
 	}
 
 	// 密钥优先取环境变量，便于容器与 CI 注入而不把真实密钥写进仓库。
-	if secret := os.Getenv("PULSEFEED_JWT_SECRET"); secret != "" {
-		cfg.JWT.Secret = secret
-	}
+	applyEnvOverrides(cfg)
 
 	if err := cfg.validate(); err != nil {
 		return nil, fmt.Errorf("校验配置文件 %q 失败: %w", path, err)
 	}
 
 	return cfg, nil
+}
+
+// applyEnvOverrides 用环境变量覆盖 YAML 中的敏感配置，优先级统一为“环境变量 > YAML”。
+// 环境变量为空表示未注入，此时保留 YAML 值（与 PULSEFEED_JWT_SECRET 的既有行为一致）。
+func applyEnvOverrides(cfg *Config) {
+	if secret := os.Getenv("PULSEFEED_JWT_SECRET"); secret != "" {
+		cfg.JWT.Secret = secret
+	}
+	if token := os.Getenv("PULSEFEED_INTERNAL_TOKEN"); token != "" {
+		cfg.Internal.Token = token
+	}
 }
 
 // minJWTSecretBytes 是 HS256 密钥的最小长度，低于该长度直接拒绝启动。
@@ -50,6 +59,30 @@ func validateJWTSecret(secret string) error {
 		if lower == placeholder || strings.Contains(lower, "placeholder") {
 			return fmt.Errorf("jwt.secret 仍是占位值，请通过 PULSEFEED_JWT_SECRET 注入真实密钥")
 		}
+	}
+	return nil
+}
+
+// minInternalTokenBytes 是内部接口令牌的最小长度，低于该长度直接拒绝启动。
+const minInternalTokenBytes = 32
+
+// placeholderInternalTokens 是仓库里出现过的内部令牌示例值，命中即视为未配置。
+var placeholderInternalTokens = []string{"placeholder-internal-token", "pulsefeed-internal-token", "change-me"}
+
+// validateInternalToken 校验内部接口令牌的非空、长度与占位值；
+// 缺失或仍是占位值时给出明确的注入提示，避免 `/internal` 端点带着示例令牌上线。
+func validateInternalToken(token string) error {
+	if token == "" {
+		return fmt.Errorf("internal.token 不能为空，请通过 PULSEFEED_INTERNAL_TOKEN 注入真实令牌")
+	}
+	lower := strings.ToLower(token)
+	for _, placeholder := range placeholderInternalTokens {
+		if lower == placeholder || strings.Contains(lower, "placeholder") {
+			return fmt.Errorf("internal.token 仍是占位值，请通过 PULSEFEED_INTERNAL_TOKEN 注入真实令牌")
+		}
+	}
+	if len(token) < minInternalTokenBytes {
+		return fmt.Errorf("internal.token 至少 %d 字节，当前 %d 字节", minInternalTokenBytes, len(token))
 	}
 	return nil
 }
@@ -82,7 +115,7 @@ func (c *Config) validate() error {
 	requireDuration("jwt.refresh_grace", c.JWT.RefreshGrace)
 	requireDuration("jwt.leeway", c.JWT.Leeway)
 
-	requireString("internal.token", c.Internal.Token)
+	// internal.token 不并入缺失列表：需要给出“如何注入”的明确提示，见 validateInternalToken。
 
 	requireString("database.host", c.Database.Host)
 	requirePositive("database.port", c.Database.Port)
@@ -110,6 +143,10 @@ func (c *Config) validate() error {
 	}
 
 	if err := validateJWTSecret(c.JWT.Secret); err != nil {
+		return err
+	}
+
+	if err := validateInternalToken(c.Internal.Token); err != nil {
 		return err
 	}
 
