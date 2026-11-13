@@ -13,6 +13,7 @@ import (
 	appembedding "pulsefeed/internal/application/embedding"
 	appimpression "pulsefeed/internal/application/impression"
 	appaction "pulsefeed/internal/application/interaction"
+	appoutbox "pulsefeed/internal/application/outbox"
 	infracache "pulsefeed/internal/infra/cache"
 	"pulsefeed/internal/infra/config"
 	infradatabase "pulsefeed/internal/infra/database"
@@ -23,6 +24,7 @@ import (
 	infraimpression "pulsefeed/internal/infra/persistence/impression"
 	infraaction "pulsefeed/internal/infra/persistence/interaction"
 	"pulsefeed/internal/infra/persistence/migration"
+	infraoutbox "pulsefeed/internal/infra/persistence/outbox"
 
 	gormmysql "gorm.io/driver/mysql"
 	"gorm.io/gorm"
@@ -79,6 +81,19 @@ func main() {
 	feedCache := infracache.NewFeedCache(redisClient)
 	fanoutWorker := appclip.NewFanoutWorker(infrafeed.New(gormDB), feedCache)
 
+	// 事务性 outbox relay：把与 clip 同事务落库的事件经 publisher confirm 投递到 broker，
+	// 投递失败按退避重试；重复投递由下游的 event_id 幂等写保证不产生重复业务效果。
+	outboxRelay := appoutbox.NewRelay(infraoutbox.New(gormDB), mqClient, map[string]appoutbox.Route{
+		appclip.TopicClipPublished: {
+			Exchange:   cfg.RabbitMQ.ClipExchange,
+			RoutingKey: cfg.RabbitMQ.ClipPublishedRouting,
+		},
+		appclip.TopicClipEmbedding: {
+			Exchange:   cfg.RabbitMQ.ClipExchange,
+			RoutingKey: inframq.EmbeddingRouting,
+		},
+	})
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -90,12 +105,16 @@ func main() {
 		}
 	}()
 
-	// 四个消费者各自持有独立 AMQP 通道并发消费；任一异常退出即终止进程。
+	// 四个消费者各自持有独立 AMQP 通道并发消费，outbox relay 独立轮询；任一消费者异常退出即终止进程。
 	log.Printf("worker 已启动: %s (queue=%s)", actionWorker.Name(), cfg.RabbitMQ.ActionChangedQueue)
 	log.Printf("worker 已启动: %s (queue=%s)", fanoutWorker.Name(), cfg.RabbitMQ.ClipPublishedQueue)
 	log.Printf("worker 已启动: %s (queue=%s)", embeddingWorker.Name(), cfg.RabbitMQ.ClipEmbeddingQueue)
 	log.Printf("worker 已启动: %s (queue=%s)", playEventWorker.Name(), cfg.RabbitMQ.PlayEventRecordedQueue)
-	errCh := make(chan error, 4)
+	log.Printf("worker 已启动: outbox_relay")
+	errCh := make(chan error, 5)
+	go func() {
+		errCh <- outboxRelay.Run(ctx)
+	}()
 	go func() {
 		errCh <- mqClient.Consume(ctx, cfg.RabbitMQ.ActionChangedQueue,
 			observeWorker(workerMetrics, actionWorker.Name(), actionWorker.Handle))

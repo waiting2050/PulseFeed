@@ -34,6 +34,7 @@ import (
 	infraclip "pulsefeed/internal/infra/persistence/clip"
 	infraimpression "pulsefeed/internal/infra/persistence/impression"
 	infraaction "pulsefeed/internal/infra/persistence/interaction"
+	infraoutbox "pulsefeed/internal/infra/persistence/outbox"
 	infraplayback "pulsefeed/internal/infra/persistence/playback"
 )
 
@@ -86,6 +87,7 @@ func TestMain(m *testing.M) {
 		&infraimpression.ImpressionModel{},
 		&infraaction.ActionModel{},
 		&infraplayback.QoSReportModel{},
+		&infraoutbox.EventModel{},
 	}
 	if err := db.AutoMigrate(models...); err != nil {
 		fmt.Fprintf(os.Stderr, "独立 schema 建表失败: %v\n", err)

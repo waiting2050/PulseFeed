@@ -3,7 +3,11 @@ package appclip
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 
 	domclip "pulsefeed/internal/domain/clip"
@@ -42,11 +46,20 @@ func WithFeedCacheInvalidator(inv FeedCacheInvalidator) Option {
 	}
 }
 
+// WithOutbox 启用事务性 outbox：发布成功时把事件与 clip 写在同一事务内，
+// 由 relay 负责后续投递；未启用时退回“写库成功后直接投递”的旧路径。
+func WithOutbox() Option {
+	return func(s *Service) {
+		s.outbox = true
+	}
+}
+
 // Service 提供 clip 相关用例。
 type Service struct {
 	repo        domclip.Repository
 	publisher   Publisher
 	invalidator FeedCacheInvalidator
+	outbox      bool
 }
 
 // New 创建 clip 应用服务。
@@ -59,8 +72,8 @@ func New(repo domclip.Repository, opts ...Option) *Service {
 }
 
 // CreatePublished 幂等发布 clip：先按 (creatorID, 幂等键) 查重，命中直接返回既有记录；
-// 未命中走事务写入，唯一索引冲突（并发重试）时回读既有记录；成功后投递 clip.published。
-// durationMS 来自上传探测，缺失时为 0，不参与发布校验；description 可选，空串合法。
+// 未命中写库：启用 outbox 时把 clip 与待投递事件放在同一事务，否则写库成功后直接投递。
+// 唯一索引冲突（并发重试）时回读既有记录；durationMS 来自上传探测，缺失时为 0。
 func (s *Service) CreatePublished(ctx context.Context, creatorID int64, title, description, videoURL, coverURL string, durationMS int64, idempotencyKey string) (*domclip.Clip, error) {
 	existing, err := s.repo.GetByIdempotencyKey(ctx, creatorID, idempotencyKey)
 	if err == nil {
@@ -74,6 +87,19 @@ func (s *Service) CreatePublished(ctx context.Context, creatorID int64, title, d
 	if err != nil {
 		return nil, err
 	}
+
+	if s.outbox {
+		// 先落库再投递：事件与 clip 同事务提交，进程崩溃或 broker 不可达都不会丢事件。
+		if err := s.repo.CreateWithEvents(ctx, clip, s.buildOutboxEvents); err != nil {
+			if errors.Is(err, domclip.ErrClipExists) {
+				// 并发下同键请求已被其他事务写入，回读保证返回同一 clip_id。
+				return s.repo.GetByIdempotencyKey(ctx, creatorID, idempotencyKey)
+			}
+			return nil, err
+		}
+		return clip, nil
+	}
+
 	if err := s.repo.Create(ctx, clip); err != nil {
 		if errors.Is(err, domclip.ErrClipExists) {
 			// 并发下同键请求已被其他事务写入，回读保证返回同一 clip_id。
@@ -85,7 +111,7 @@ func (s *Service) CreatePublished(ctx context.Context, creatorID int64, title, d
 	if s.publisher != nil {
 		event := ClipPublished{ClipID: clip.ID, CreatorID: clip.CreatorID, PublishedAt: clip.PublishedAt}
 		if err := s.publisher.PublishClipPublished(ctx, event); err != nil {
-			// 事件投递失败不回滚发布结果，MQ 链路在 S10 接入后由 Worker 保证最终一致。
+			// 事件投递失败不回滚发布结果；生产链路已默认启用 outbox，此路径仅用于未启用时的降级。
 			log.Printf("投递 clip.published 事件失败 (clip_id=%d): %v", clip.ID, err)
 		}
 		if err := s.publisher.PublishClipEmbedding(ctx, event); err != nil {
@@ -94,6 +120,38 @@ func (s *Service) CreatePublished(ctx context.Context, creatorID int64, title, d
 		}
 	}
 	return clip, nil
+}
+
+// buildOutboxEvents 构造发布扇出与向量生成两条待投递事件；在 clip 自增 ID 生成后调用，
+// 两条事件各自持有独立 event_id，重复投递时下游按事件 ID 识别（配合 ZADD/SET/upsert 幂等写）。
+func (s *Service) buildOutboxEvents(c *domclip.Clip) ([]domclip.OutboxEvent, error) {
+	events := make([]domclip.OutboxEvent, 0, 2)
+	for _, topic := range []string{TopicClipPublished, TopicClipEmbedding} {
+		eventID, err := newEventID()
+		if err != nil {
+			return nil, err
+		}
+		payload, err := json.Marshal(ClipPublished{
+			EventID:     eventID,
+			ClipID:      c.ID,
+			CreatorID:   c.CreatorID,
+			PublishedAt: c.PublishedAt,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("序列化 %s 事件失败: %w", topic, err)
+		}
+		events = append(events, domclip.OutboxEvent{EventID: eventID, Topic: topic, Payload: payload})
+	}
+	return events, nil
+}
+
+// newEventID 生成 128 位随机事件 ID（32 位十六进制），用于 outbox 去重与链路追踪。
+func newEventID() (string, error) {
+	var buf [16]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return "", fmt.Errorf("生成事件 ID 失败: %w", err)
+	}
+	return hex.EncodeToString(buf[:]), nil
 }
 
 // Get 读取 clip 详情；不存在或已删除统一返回 ErrClipNotFound。

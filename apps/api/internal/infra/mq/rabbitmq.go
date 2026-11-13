@@ -27,8 +27,8 @@ const (
 	publishTimeout = 5 * time.Second
 	// consumePrefetch 限制单个消费者未确认消息的上限，防止一次性拉取过多消息。
 	consumePrefetch = 16
-	// embeddingRouting 是向量生成队列的路由键；配置项仅给出队列名，路由键按命名形态补全。
-	embeddingRouting = "clip.embedding"
+	// EmbeddingRouting 是向量生成队列的路由键；配置项仅给出队列名，路由键按命名形态补全。
+	EmbeddingRouting = "clip.embedding"
 	// MaxDeliveryAttempts 是单条消息可重试次数上限；达到上限仍失败则转入死信队列。
 	MaxDeliveryAttempts = 3
 )
@@ -105,7 +105,7 @@ func (c *Client) declareTopology() error {
 		routing  string
 	}{
 		{c.cfg.ClipPublishedQueue, c.cfg.ClipExchange, c.cfg.ClipPublishedRouting},
-		{c.cfg.ClipEmbeddingQueue, c.cfg.ClipExchange, embeddingRouting},
+		{c.cfg.ClipEmbeddingQueue, c.cfg.ClipExchange, EmbeddingRouting},
 		{c.cfg.ActionChangedQueue, c.cfg.InteractionExchange, c.cfg.ActionChangedRouting},
 		{c.cfg.PlayEventRecordedQueue, c.cfg.ImpressionExchange, c.cfg.PlayEventRecordedRouting},
 	}
@@ -143,6 +143,12 @@ func (c *Client) declareTopology() error {
 	if err != nil {
 		return fmt.Errorf("创建 RabbitMQ 发布通道失败: %w", err)
 	}
+	// 开启 publisher confirm：broker 返回 ack/nack 后才算投递成功，
+	// 避免“写入连接缓冲区即当成功”导致的静默丢消息。
+	if err := publishCh.Confirm(false); err != nil {
+		_ = publishCh.Close()
+		return fmt.Errorf("开启 publisher confirm 失败: %w", err)
+	}
 	c.publishCh = publishCh
 	return nil
 }
@@ -171,7 +177,7 @@ func (c *Client) PublishClipPublished(ctx context.Context, event appclip.ClipPub
 
 // PublishClipEmbedding 投递 clip.embedding 事件，由 ClipEmbeddingWorker 生成文本向量。
 func (c *Client) PublishClipEmbedding(ctx context.Context, event appclip.ClipPublished) error {
-	return c.publish(ctx, c.cfg.ClipExchange, embeddingRouting, event)
+	return c.publish(ctx, c.cfg.ClipExchange, EmbeddingRouting, event)
 }
 
 // PublishActionChanged 投递 interaction.action_changed 事件，由 ActionWorker 落库。
@@ -193,8 +199,22 @@ func (c *Client) publish(ctx context.Context, exchange, routing string, payload 
 	if err != nil {
 		return fmt.Errorf("序列化事件失败: %w", err)
 	}
+	return c.publishBytes(ctx, exchange, routing, "", body)
+}
 
-	// 单次发布超时：broker 异常时不无限等待，便于上层回退同步链路。
+// PublishRaw 投递已序列化的载荷，供 outbox relay 重放持久化事件。
+// messageID 写入 AMQP MessageId，重复投递时下游可据此识别同一事件。
+func (c *Client) PublishRaw(ctx context.Context, exchange, routing, messageID string, payload []byte) error {
+	if c == nil {
+		return fmt.Errorf("RabbitMQ 未初始化")
+	}
+	return c.publishBytes(ctx, exchange, routing, messageID, payload)
+}
+
+// publishBytes 在发布通道上投递消息并等待 broker 的 publisher confirm：
+// 只有收到 ack 才返回 nil；nack、等待超时或通道异常都会返回错误，由调用方决定重试或标记失败。
+func (c *Client) publishBytes(ctx context.Context, exchange, routing, messageID string, body []byte) error {
+	// 单次发布超时：broker 异常时不无限等待，便于上层回退同步链路或保留 outbox 事件待重试。
 	publishCtx, cancel := context.WithTimeout(ctx, publishTimeout)
 	defer cancel()
 
@@ -203,14 +223,28 @@ func (c *Client) publish(ctx context.Context, exchange, routing string, payload 
 	if c.publishCh == nil || c.publishCh.IsClosed() {
 		return fmt.Errorf("RabbitMQ 发布通道已关闭")
 	}
-	err = c.publishCh.PublishWithContext(publishCtx, exchange, routing, false, false, amqp.Publishing{
+
+	confirmation, err := c.publishCh.PublishWithDeferredConfirmWithContext(publishCtx, exchange, routing, false, false, amqp.Publishing{
 		ContentType:  "application/json",
 		DeliveryMode: amqp.Persistent,
+		MessageId:    messageID,
 		Timestamp:    time.Now(),
 		Body:         body,
 	})
 	if err != nil {
 		return fmt.Errorf("投递事件到 %s(%s) 失败: %w", exchange, routing, err)
+	}
+	if confirmation == nil {
+		// 发布通道已开启 confirm，返回 nil 说明通道状态异常，不能当作投递成功。
+		return fmt.Errorf("发布通道未返回确认句柄，无法确认 %s(%s) 的投递结果", exchange, routing)
+	}
+
+	acked, err := confirmation.WaitContext(publishCtx)
+	if err != nil {
+		return fmt.Errorf("等待 %s(%s) 发布确认超时: %w", exchange, routing, err)
+	}
+	if !acked {
+		return fmt.Errorf("broker 拒绝接收 %s(%s) 的消息（nack）", exchange, routing)
 	}
 	return nil
 }

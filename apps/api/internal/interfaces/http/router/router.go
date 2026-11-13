@@ -105,11 +105,11 @@ func Register(engine *gin.Engine, cfg *config.Config, db *sql.DB) error {
 	} else {
 		log.Printf("redis.addr 为空，缓存已禁用，Feed 走 DB")
 	}
-	// clip 链路：仓储 → 应用服务 → 处理器；MQ 可用时投递 clip.published 供 S12 扇出消费；
-	// 删除成功后经 FeedCache 失效卡片/计数缓存并递增页缓存版本。
+	// clip 链路：仓储 → 应用服务 → 处理器；MQ 可用时启用事务性 outbox，
+	// 事件与 clip 同事务落库后由 Worker 的 relay 投递；删除成功后经 FeedCache 失效缓存。
 	clipOpts := make([]appclip.Option, 0, 2)
 	if mqClient != nil {
-		clipOpts = append(clipOpts, appclip.WithPublisher(mqClient))
+		clipOpts = append(clipOpts, appclip.WithOutbox())
 	}
 	if feedCache.Enabled() {
 		clipOpts = append(clipOpts, appclip.WithFeedCacheInvalidator(feedCache))

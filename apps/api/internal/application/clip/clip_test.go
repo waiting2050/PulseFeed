@@ -3,6 +3,7 @@ package appclip_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -20,6 +21,7 @@ type clipFakeRepo struct {
 	keys          map[string]int64
 	nextID        int64
 	createCalls   int
+	outboxEvents  []domclip.OutboxEvent
 	listCalls     int
 	deleteCalls   int
 	lastListLimit int
@@ -53,6 +55,29 @@ func (f *clipFakeRepo) Create(_ context.Context, clip *domclip.Clip) error {
 	stored := *clip
 	f.clips[stored.ID] = &stored
 	f.keys[key] = stored.ID
+	return nil
+}
+
+// CreateWithEvents 模拟同事务写入：clip 落库成功后调用 builder，再把事件追加到 outbox。
+func (f *clipFakeRepo) CreateWithEvents(_ context.Context, clip *domclip.Clip, build domclip.EventBuilder) error {
+	f.createCalls++
+	if f.createErr != nil {
+		return f.createErr
+	}
+	key := clipFakeKey(clip.CreatorID, clip.IdempotencyKey)
+	if _, exists := f.keys[key]; exists {
+		return domclip.ErrClipExists
+	}
+	f.nextID++
+	clip.ID = f.nextID
+	events, err := build(clip)
+	if err != nil {
+		return err
+	}
+	stored := *clip
+	f.clips[stored.ID] = &stored
+	f.keys[key] = stored.ID
+	f.outboxEvents = append(f.outboxEvents, events...)
 	return nil
 }
 
@@ -187,6 +212,58 @@ func TestClipCreatePublishedPublishesEvents(t *testing.T) {
 	}
 	if publisher.embeddingEvents[0].ClipID != clip.ID {
 		t.Fatalf("clip.embedding 载荷 clip_id 不正确: %+v", publisher.embeddingEvents[0])
+	}
+}
+
+// TestClipCreatePublishedWritesOutbox 验证启用 outbox 后事件与 clip 同事务写入，
+// 不再直接投递，两条事件各自携带稳定且唯一的 event_id；重复发布不重复写事件。
+func TestClipCreatePublishedWritesOutbox(t *testing.T) {
+	ctx := context.Background()
+	repo := newClipFakeRepo()
+	publisher := &clipFakePublisher{}
+	svc := appclip.New(repo, appclip.WithOutbox(), appclip.WithPublisher(publisher))
+
+	clip, err := svc.CreatePublished(ctx, 7, "标题", "", "/media/1.mp4", "", 0, "key-1")
+	if err != nil {
+		t.Fatalf("启用 outbox 的发布不应失败: %v", err)
+	}
+	if repo.createCalls != 1 {
+		t.Fatalf("仓储写入次数 = %d, 期望 1", repo.createCalls)
+	}
+	if len(publisher.publishedEvents) != 0 || len(publisher.embeddingEvents) != 0 {
+		t.Fatalf("启用 outbox 时不应直接投递事件: published=%d embedding=%d",
+			len(publisher.publishedEvents), len(publisher.embeddingEvents))
+	}
+	if len(repo.outboxEvents) != 2 {
+		t.Fatalf("outbox 事件数 = %d, 期望 2", len(repo.outboxEvents))
+	}
+
+	wantTopics := []string{appclip.TopicClipPublished, appclip.TopicClipEmbedding}
+	seen := make(map[string]bool, 2)
+	for i, item := range repo.outboxEvents {
+		if item.Topic != wantTopics[i] {
+			t.Fatalf("第 %d 条事件 topic = %q, 期望 %q", i, item.Topic, wantTopics[i])
+		}
+		if item.EventID == "" || seen[item.EventID] {
+			t.Fatalf("第 %d 条事件 event_id 为空或重复: %q", i, item.EventID)
+		}
+		seen[item.EventID] = true
+
+		var payload appclip.ClipPublished
+		if err := json.Unmarshal(item.Payload, &payload); err != nil {
+			t.Fatalf("第 %d 条事件载荷无法解析: %v", i, err)
+		}
+		if payload.EventID != item.EventID || payload.ClipID != clip.ID || payload.CreatorID != 7 {
+			t.Fatalf("第 %d 条事件载荷与 outbox 记录不一致: %+v", i, payload)
+		}
+	}
+
+	if _, err := svc.CreatePublished(ctx, 7, "另一个标题", "", "/media/2.mp4", "", 0, "key-1"); err != nil {
+		t.Fatalf("重复发布不应失败: %v", err)
+	}
+	if repo.createCalls != 1 || len(repo.outboxEvents) != 2 {
+		t.Fatalf("重复发布不应再次写库或追加事件: create=%d events=%d",
+			repo.createCalls, len(repo.outboxEvents))
 	}
 }
 
