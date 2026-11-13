@@ -9,8 +9,10 @@ import (
 // Repository 描述候选召回、兴趣行为与曝光查询的持久化能力，由 infra 层实现。
 type Repository interface {
 	// ListCandidates 按 snapshotAt 固定候选池：只取该时刻前已发布的 clip，
-	// 排除读者最近 ImpressionWindowDays 天内曝光过的 clip，
+	// 在候选阶段排除读者本人的作品、已点赞/已收藏的 clip（仅 active 行为）
+	// 与最近 ImpressionWindowDays 天内曝光过的 clip，
 	// 按 snapshotAt 基准的热度降序（hot_score DESC, published_at DESC, id DESC）召回至多 limit 条。
+	// 排除必须在截断之前完成，避免无效项占用候选池额度。
 	ListCandidates(ctx context.Context, viewerID int64, snapshotAt time.Time, limit int) ([]Candidate, error)
 	// ListInterestClips 返回读者在 [since, until] 内曝光过的 clip 及其播放/完播计数，用于兴趣向量聚合。
 	ListInterestClips(ctx context.Context, viewerID int64, since, until time.Time, limit int) ([]InterestClip, error)

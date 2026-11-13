@@ -32,6 +32,7 @@ import (
 
 	infraaccount "pulsefeed/internal/infra/persistence/account"
 	infraclip "pulsefeed/internal/infra/persistence/clip"
+	infraembedding "pulsefeed/internal/infra/persistence/embedding"
 	infraimpression "pulsefeed/internal/infra/persistence/impression"
 	infraaction "pulsefeed/internal/infra/persistence/interaction"
 	infraoutbox "pulsefeed/internal/infra/persistence/outbox"
@@ -87,6 +88,7 @@ func TestMain(m *testing.M) {
 		&infraaccount.RefreshTokenModel{},
 		&infraimpression.PlayEventModel{},
 		&infraimpression.ImpressionModel{},
+		&infraembedding.ClipEmbeddingModel{},
 		&infraaction.ActionModel{},
 		&infraplayback.QoSReportModel{},
 		&infraoutbox.EventModel{},
