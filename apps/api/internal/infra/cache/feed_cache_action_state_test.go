@@ -16,7 +16,7 @@ import (
 )
 
 // newActionTestCache 启动进程内 Redis 并返回可用的 FeedCache，测试结束自动回收。
-func newActionTestCache(t *testing.T) (*FeedCache, *miniredis.Miniredis) {
+func newActionTestCache(t *testing.T, opts ...FeedCacheOption) (*FeedCache, *miniredis.Miniredis) {
 	t.Helper()
 	server, err := miniredis.Run()
 	if err != nil {
@@ -27,7 +27,7 @@ func newActionTestCache(t *testing.T) (*FeedCache, *miniredis.Miniredis) {
 	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
 	t.Cleanup(func() { _ = client.Close() })
 
-	return NewFeedCache(client), server
+	return NewFeedCache(client, opts...), server
 }
 
 // likeShardSums 读取该 clip 的 16 个点赞分片，返回分片值与总和。

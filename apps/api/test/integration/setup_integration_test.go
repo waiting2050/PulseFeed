@@ -33,6 +33,7 @@ import (
 	infraaccount "pulsefeed/internal/infra/persistence/account"
 	infraclip "pulsefeed/internal/infra/persistence/clip"
 	infraimpression "pulsefeed/internal/infra/persistence/impression"
+	infraaction "pulsefeed/internal/infra/persistence/interaction"
 	infraplayback "pulsefeed/internal/infra/persistence/playback"
 )
 
@@ -83,6 +84,7 @@ func TestMain(m *testing.M) {
 		&infraaccount.UserProfileModel{},
 		&infraimpression.PlayEventModel{},
 		&infraimpression.ImpressionModel{},
+		&infraaction.ActionModel{},
 		&infraplayback.QoSReportModel{},
 	}
 	if err := db.AutoMigrate(models...); err != nil {

@@ -96,8 +96,10 @@ func Register(engine *gin.Engine, cfg *config.Config, db *sql.DB) error {
 	uploadHandler := httpupload.New("./uploads")
 
 	// feed 链路：latest 场景复合游标分页；页缓存 + singleflight 回源，Redis 缺失/禁用自动降级纯 DB。
+	feedRepo := infrafeed.New(gormDB)
 	redisClient := infracache.New(cfg.Redis)
-	feedCache := infracache.NewFeedCache(redisClient)
+	// 互动计数缓存以 pf_clip_stats 为基线：首次访问/TTL 到期时种子化，保证接口计数与 DB 对齐。
+	feedCache := infracache.NewFeedCache(redisClient, infracache.WithActionStatsReader(feedRepo))
 	if feedCache.Enabled() {
 		log.Printf("redis 缓存已启用 (addr=%s db=%d)", cfg.Redis.Addr, cfg.Redis.DB)
 	} else {
@@ -114,7 +116,6 @@ func Register(engine *gin.Engine, cfg *config.Config, db *sql.DB) error {
 	}
 	clipService := appclip.New(clipRepo, clipOpts...)
 	clipHandler := httpclip.New(clipService)
-	feedRepo := infrafeed.New(gormDB)
 	// 向量与推荐链路：embedding 仓储同时服务推荐兴趣向量聚合，Worker 侧负责生成向量。
 	embeddingRepo := infraembedding.New(gormDB)
 	recommendationRepo := infrarecommendation.New(gormDB)

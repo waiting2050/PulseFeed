@@ -39,6 +39,16 @@ const (
 	actionShardCount = 16
 	// actionStateAttempts 是 WATCH 事务在并发冲突下的最大重试次数。
 	actionStateAttempts = 3
+	// actionSeedAttempts 是计数基线种子化时 WATCH 快照冲突的最大重试次数。
+	actionSeedAttempts = 3
+
+	// actionCountTTL 是互动计数基线键与分片键的有效期：24 小时后按 pf_clip_stats 重新种子化，
+	// 避免长期偏移与冷数据常驻；写入时基线随分片一起续期。
+	actionCountTTL = 24 * time.Hour
+
+	// actionBaseFieldLike / actionBaseFieldSave 是计数基线 hash 的两个字段。
+	actionBaseFieldLike = "like"
+	actionBaseFieldSave = "save"
 
 	// inboxMaxEntries 是 inbox/outbox 裁剪上限：只保留按分值（发布时间）最新的 N 条。
 	inboxMaxEntries = 1000
@@ -68,11 +78,30 @@ type FeedCache struct {
 	client *redis.Client
 	// now 返回当前时间；为 nil 时使用 time.Now，测试可注入固定时钟验证分钟桶翻转。
 	now func() time.Time
+	// actionStats 提供 pf_clip_stats 基线，用于互动计数缓存的首次种子化与 TTL 重种子化。
+	actionStats ActionStatsReader
+}
+
+// ActionStatsReader 是互动计数种子化的 DB 基线读取端口，由 feed 仓储实现。
+type ActionStatsReader interface {
+	BatchGetStats(ctx context.Context, clipIDs []int64) (map[int64]*domfeed.EntryStats, error)
+}
+
+// FeedCacheOption 用于装配 FeedCache 的可选依赖。
+type FeedCacheOption func(*FeedCache)
+
+// WithActionStatsReader 注入互动计数基线读取端口；未注入时基线按 0 种子化。
+func WithActionStatsReader(reader ActionStatsReader) FeedCacheOption {
+	return func(c *FeedCache) { c.actionStats = reader }
 }
 
 // NewFeedCache 创建 Feed 缓存；client 传 nil 时缓存禁用，全部操作降级。
-func NewFeedCache(client *redis.Client) *FeedCache {
-	return &FeedCache{client: client}
+func NewFeedCache(client *redis.Client, opts ...FeedCacheOption) *FeedCache {
+	c := &FeedCache{client: client}
+	for _, opt := range opts {
+		opt(c)
+	}
+	return c
 }
 
 // Enabled 报告缓存是否启用。
@@ -250,7 +279,8 @@ func (c *FeedCache) SetStats(ctx context.Context, stats map[int64]*domfeed.Entry
 }
 
 // SetActionState 以 WATCH + 事务管道更新读者对某个 clip 的行为状态，
-// 仅在状态真正变化时按用户散列累加/累减 16 分片计数；Redis 未启用时返回 ErrActionStateUnavailable。
+// 仅在状态真正变化时按用户散列累加/累减 16 分片增量；返回「DB 基线 + 分片增量」的最新计数。
+// Redis 未启用时返回 ErrActionStateUnavailable，由调用方回退同步落库。
 func (c *FeedCache) SetActionState(ctx context.Context, userID, clipID int64, actionType dominteraction.ActionType, active bool) (*dominteraction.ActionResult, error) {
 	if !c.Enabled() {
 		return nil, ErrActionStateUnavailable
@@ -259,10 +289,22 @@ func (c *FeedCache) SetActionState(ctx context.Context, userID, clipID int64, ac
 		return nil, dominteraction.ErrInvalidActionType
 	}
 
+	// 首次访问或基线 TTL 到期时，用 pf_clip_stats 种子化 base 键；分片只存增量。
+	if err := c.ensureActionBase(ctx, clipID); err != nil {
+		return nil, err
+	}
+
 	stateKey := actionStateKey(clipID, userID, actionType)
 	target := "0"
 	if active {
 		target = "1"
+	}
+
+	// 取消操作的下限保护：写入前先取一次当前合计，合计已为 0 时只翻转状态位、不再递减分片。
+	// 多读者并发下这个判断是近似的，最终返回值仍由 sumActionCounts 钳制为非负。
+	likeBefore, saveBefore, err := c.sumActionCounts(ctx, clipID)
+	if err != nil {
+		return nil, err
 	}
 
 	var lastErr error
@@ -284,23 +326,38 @@ func (c *FeedCache) SetActionState(ctx context.Context, userID, clipID int64, ac
 				return nil
 			}
 
+			delta := int64(0)
+			switch {
+			case active && !current:
+				delta = 1
+			case !active && exists && current:
+				delta = -1
+			}
+			if delta < 0 {
+				currentTotal := likeBefore
+				if actionType == dominteraction.ActionSave {
+					currentTotal = saveBefore
+				}
+				if currentTotal <= 0 {
+					// 计数已到 0：取消只翻转状态位，分片不再下探为负数。
+					delta = 0
+				}
+			}
+
 			_, txErr := tx.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
 				pipe.Set(ctx, stateKey, target, 0)
-				delta := int64(0)
-				switch {
-				case active && !current:
-					delta = 1
-				case !active && exists && current:
-					delta = -1
-				}
+				countKey := actionCountKey(clipID, actionShard(userID), actionType)
 				if delta != 0 {
-					key := actionCountKey(clipID, actionShard(userID), actionType)
 					if delta > 0 {
-						pipe.IncrBy(ctx, key, delta)
+						pipe.IncrBy(ctx, countKey, delta)
 					} else {
-						pipe.DecrBy(ctx, key, -delta)
+						pipe.DecrBy(ctx, countKey, -delta)
 					}
+					// 写入即续期分片增量，与基线一起在 24 小时后重新种子化。
+					pipe.Expire(ctx, countKey, actionCountTTL)
 				}
+				// 任何状态写入都续期基线，避免 base 先于分片过期后读数只覆盖老快照。
+				pipe.Expire(ctx, actionBaseKey(clipID), actionCountTTL)
 				return nil
 			})
 			if txErr != nil {
@@ -335,37 +392,178 @@ func (c *FeedCache) SetActionState(ctx context.Context, userID, clipID int64, ac
 	return nil, fmt.Errorf("更新互动状态缓存冲突重试耗尽: %w", lastErr)
 }
 
-// sumActionCounts 汇总某个 clip 的点赞/收藏 16 分片计数。
+// sumActionCounts 返回 clip 当前可见的点赞/收藏计数：
+// base 基线（pf_clip_stats 种子值或重种子值）+ 16 分片增量，两类结果各自钳制为非负。
 func (c *FeedCache) sumActionCounts(ctx context.Context, clipID int64) (int64, int64, error) {
-	keys := make([]string, 0, actionShardCount*2)
-	for shard := 0; shard < actionShardCount; shard++ {
-		keys = append(keys, actionCountKey(clipID, shard, dominteraction.ActionLike))
+	baseKey := actionBaseKey(clipID)
+	values, err := c.client.HMGet(ctx, baseKey, actionBaseFieldLike, actionBaseFieldSave).Result()
+	if err != nil {
+		return 0, 0, fmt.Errorf("读取互动计数基线失败: %w", err)
 	}
-	for shard := 0; shard < actionShardCount; shard++ {
-		keys = append(keys, actionCountKey(clipID, shard, dominteraction.ActionSave))
+	if values[0] == nil && values[1] == nil {
+		// 基线在读取瞬间缺失（TTL 到期或被删除）：先重种子化，避免只拿分片增量当总数。
+		if err := c.ensureActionBase(ctx, clipID); err != nil {
+			return 0, 0, err
+		}
+		if values, err = c.client.HMGet(ctx, baseKey, actionBaseFieldLike, actionBaseFieldSave).Result(); err != nil {
+			return 0, 0, fmt.Errorf("读取互动计数基线失败: %w", err)
+		}
 	}
 
-	values, err := c.client.MGet(ctx, keys...).Result()
+	likeSum, err := sumActionShards(ctx, c.client, clipID, dominteraction.ActionLike)
 	if err != nil {
-		return 0, 0, fmt.Errorf("读取互动计数缓存失败: %w", err)
+		return 0, 0, err
 	}
-	like, save := int64(0), int64(0)
-	for i, value := range values {
-		text, ok := value.(string)
-		if !ok || text == "" {
-			continue
-		}
-		n, parseErr := strconv.ParseInt(text, 10, 64)
-		if parseErr != nil {
-			continue
-		}
-		if i < actionShardCount {
-			like += n
-		} else {
-			save += n
-		}
+	saveSum, err := sumActionShards(ctx, c.client, clipID, dominteraction.ActionSave)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	like := parseCountValue(values[0]) + likeSum
+	save := parseCountValue(values[1]) + saveSum
+	if like < 0 {
+		like = 0
+	}
+	if save < 0 {
+		save = 0
 	}
 	return like, save, nil
+}
+
+// ensureActionBase 确保 clip 的计数基线键存在，缺失时按「库种子 + 增量」重新种子化。
+//
+// 种子公式：base[kind] = pf_clip_stats[kind] - Σ(shards[kind])，读路径返回 base + Σ(shards)。
+// 这个公式同时避开两种错误：
+//   - 不重复计：已经由 Worker 落库的增量既在 stats 里、也还留在分片里；把 Σ 从 stats 中减掉写进 base，
+//     两条来源只保留 stats 这一份。若直接把 base 写成 stats（旧实现的读法），再叠加分片就会多算已落库部分。
+//   - 不丢增量：种子化不删除、不清零任何分片，只调整 base；尚未由 Worker 落库、只存在于 Redis 的增量
+//     原样保留在分片中（并在落库后的下一次重种子化时由 stats 吸收），不会像「清空分片」那样丢弃。
+//
+// 并发一致性：stats 在 Redis 之外读取，无法放进 MULTI。因此先 WATCH 基线与全部分片键，
+// 在 WATCH 事务内重新求和分片并读取 stats；提交前任一相关键被改动都会触发 TxFailedErr 重试，
+// 保证 base 使用的分片快照与写入时刻一致。分片写入先于 MQ 投递、MQ 投递先于 Worker 落库，
+// 所以「先求和分片、后读 stats」时读到的 stats 一定覆盖分片增量，base 不会把已落库部分算重。
+func (c *FeedCache) ensureActionBase(ctx context.Context, clipID int64) error {
+	if !c.Enabled() {
+		return ErrActionStateUnavailable
+	}
+	baseKey := actionBaseKey(clipID)
+	exists, err := c.client.Exists(ctx, baseKey).Result()
+	if err != nil {
+		return fmt.Errorf("检查互动计数基线失败: %w", err)
+	}
+	if exists == 1 {
+		return nil
+	}
+
+	shardKeys := make([]string, 0, actionShardCount*2)
+	for shard := 0; shard < actionShardCount; shard++ {
+		shardKeys = append(shardKeys, actionCountKey(clipID, shard, dominteraction.ActionLike))
+	}
+	for shard := 0; shard < actionShardCount; shard++ {
+		shardKeys = append(shardKeys, actionCountKey(clipID, shard, dominteraction.ActionSave))
+	}
+	watchKeys := append([]string{baseKey}, shardKeys...)
+
+	var lastErr error
+	for attempt := 0; attempt < actionSeedAttempts; attempt++ {
+		err := c.client.Watch(ctx, func(tx *redis.Tx) error {
+			exists, err := tx.Exists(ctx, baseKey).Result()
+			if err != nil {
+				return err
+			}
+			if exists == 1 {
+				// 并发的其它请求已完成种子化，无需重复写。
+				return nil
+			}
+			likeSum, err := sumActionShards(ctx, tx, clipID, dominteraction.ActionLike)
+			if err != nil {
+				return err
+			}
+			saveSum, err := sumActionShards(ctx, tx, clipID, dominteraction.ActionSave)
+			if err != nil {
+				return err
+			}
+			stats, err := c.loadActionStats(ctx, clipID)
+			if err != nil {
+				return err
+			}
+			_, txErr := tx.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+				pipe.HSetNX(ctx, baseKey, actionBaseFieldLike, strconv.FormatInt(stats.LikeCount-likeSum, 10))
+				pipe.HSetNX(ctx, baseKey, actionBaseFieldSave, strconv.FormatInt(stats.SaveCount-saveSum, 10))
+				pipe.Expire(ctx, baseKey, actionCountTTL)
+				// 分片与基线同时起算 TTL，避免分片先过期导致「base 还在但增量已丢」的读数偏低。
+				for _, key := range shardKeys {
+					pipe.Expire(ctx, key, actionCountTTL)
+				}
+				return nil
+			})
+			return txErr
+		}, watchKeys...)
+		if errors.Is(err, redis.TxFailedErr) {
+			lastErr = err
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("互动计数基线种子化失败: %w", err)
+		}
+		return nil
+	}
+	// 冲突重试耗尽：若并发的其它请求已写好基线则视为成功，否则返回错误让调用方回退同步落库。
+	if exists, existsErr := c.client.Exists(ctx, baseKey).Result(); existsErr == nil && exists == 1 {
+		return nil
+	}
+	return fmt.Errorf("互动计数基线种子化冲突重试耗尽: %w", lastErr)
+}
+
+// loadActionStats 读取 clip 的 pf_clip_stats 基线；未注入读取端口或计数行缺失时按 0 处理。
+func (c *FeedCache) loadActionStats(ctx context.Context, clipID int64) (domfeed.EntryStats, error) {
+	if c.actionStats == nil {
+		return domfeed.EntryStats{}, nil
+	}
+	found, err := c.actionStats.BatchGetStats(ctx, []int64{clipID})
+	if err != nil {
+		return domfeed.EntryStats{}, fmt.Errorf("读取 pf_clip_stats 基线失败: %w", err)
+	}
+	if stats, ok := found[clipID]; ok && stats != nil {
+		return *stats, nil
+	}
+	return domfeed.EntryStats{}, nil
+}
+
+// countKeyReader 是分片求和所需的最小命令集合，*redis.Client 与 *redis.Tx 均满足。
+type countKeyReader interface {
+	MGet(ctx context.Context, keys ...string) *redis.SliceCmd
+}
+
+// sumActionShards 汇总某个 clip 单类行为（like/save）的 16 分片增量。
+func sumActionShards(ctx context.Context, reader countKeyReader, clipID int64, actionType dominteraction.ActionType) (int64, error) {
+	keys := make([]string, 0, actionShardCount)
+	for shard := 0; shard < actionShardCount; shard++ {
+		keys = append(keys, actionCountKey(clipID, shard, actionType))
+	}
+	values, err := reader.MGet(ctx, keys...).Result()
+	if err != nil {
+		return 0, fmt.Errorf("读取互动计数分片失败: %w", err)
+	}
+	var total int64
+	for _, value := range values {
+		total += parseCountValue(value)
+	}
+	return total, nil
+}
+
+// parseCountValue 把 Redis 返回值解析为计数；缺失或非法一律按 0 处理。
+func parseCountValue(value any) int64 {
+	text, ok := value.(string)
+	if !ok || text == "" {
+		return 0
+	}
+	n, err := strconv.ParseInt(text, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return n
 }
 
 // RecordHotScore 按 clip ID 与当前分钟把热度增量累加到分钟桶 ZSET（ZINCRBY）：
@@ -547,6 +745,11 @@ func parseFeedBoxMember(member string) (int64, int64, bool) {
 // actionStateKey 返回单个读者行为状态键。
 func actionStateKey(clipID, userID int64, actionType dominteraction.ActionType) string {
 	return fmt.Sprintf("%s:action:state:%d:%d:%s", keyPrefix, clipID, userID, actionType)
+}
+
+// actionBaseKey 返回某个 clip 的互动计数基线 hash 键：字段 like/save 保存「库种子 - 分片增量」。
+func actionBaseKey(clipID int64) string {
+	return fmt.Sprintf("%s:action:base:%d", keyPrefix, clipID)
 }
 
 // actionCountKey 返回按用户散列分片后的计数键。
