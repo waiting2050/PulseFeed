@@ -46,6 +46,9 @@ type Client struct {
 	// publishMu 保护 publishCh：amqp 通道不是并发安全的，发布必须串行化。
 	publishMu sync.Mutex
 	publishCh *amqp.Channel
+
+	// deadRoutes 记录业务队列到死信交换机/路由键的映射，供主动转录死信时使用。
+	deadRoutes map[string]deadRoute
 }
 
 // New 建立连接并声明三组交换机/队列/绑定；url 为空时返回 nil 表示 MQ 链路禁用。
@@ -59,7 +62,7 @@ func New(cfg config.RabbitMQConfig) (*Client, error) {
 		return nil, fmt.Errorf("连接 RabbitMQ 失败: %w", err)
 	}
 
-	client := &Client{cfg: cfg, conn: conn}
+	client := &Client{cfg: cfg, conn: conn, deadRoutes: make(map[string]deadRoute, 4)}
 	if err := client.declareTopology(); err != nil {
 		_ = conn.Close()
 		return nil, err
@@ -136,6 +139,8 @@ func (c *Client) declareTopology() error {
 		if err := declareQueue(ch, deadQueue, dlx, deadRouting, nil); err != nil {
 			return err
 		}
+		// 主动转录死信时需要交换机与路由键，按队列名建立映射。
+		c.deadRoutes[b.queue] = deadRoute{exchange: dlx, routing: deadRouting, sourceRouting: b.routing}
 	}
 
 	// 发布通道在拓扑声明完成后保持打开，供后续 Publish* 串行复用。
@@ -214,6 +219,11 @@ func (c *Client) PublishRaw(ctx context.Context, exchange, routing, messageID st
 // publishBytes 在发布通道上投递消息并等待 broker 的 publisher confirm：
 // 只有收到 ack 才返回 nil；nack、等待超时或通道异常都会返回错误，由调用方决定重试或标记失败。
 func (c *Client) publishBytes(ctx context.Context, exchange, routing, messageID string, body []byte) error {
+	return c.publishMessage(ctx, exchange, routing, messageID, nil, body)
+}
+
+// publishMessage 投递一条持久化消息并等待 broker 确认；headers 为 nil 时不附加头信息。
+func (c *Client) publishMessage(ctx context.Context, exchange, routing, messageID string, headers amqp.Table, body []byte) error {
 	// 单次发布超时：broker 异常时不无限等待，便于上层回退同步链路或保留 outbox 事件待重试。
 	publishCtx, cancel := context.WithTimeout(ctx, publishTimeout)
 	defer cancel()
@@ -229,6 +239,7 @@ func (c *Client) publishBytes(ctx context.Context, exchange, routing, messageID 
 		DeliveryMode: amqp.Persistent,
 		MessageId:    messageID,
 		Timestamp:    time.Now(),
+		Headers:      headers,
 		Body:         body,
 	})
 	if err != nil {
@@ -303,15 +314,31 @@ func (c *Client) Consume(ctx context.Context, queue string, handler func(context
 				permanent := messaging.IsPermanent(err)
 				exhausted := attempts[key] >= MaxDeliveryAttempts
 				if permanent || exhausted {
-					reason := "不可重试"
+					reasonText := "不可重试"
+					deadReason := DeadReasonPermanent
 					if !permanent {
-						reason = fmt.Sprintf("超过重试上限 %d 次", MaxDeliveryAttempts)
+						reasonText = fmt.Sprintf("超过重试上限 %d 次", MaxDeliveryAttempts)
+						deadReason = DeadReasonExhausted
 					}
-					// 不重新入队：broker 按队列的 x-dead-letter-exchange 转入死信队列。
-					log.Printf("warning: 消费队列 %q 消息失败，转入死信队列（%s, delivery_tag=%d）: %v",
-						queue, reason, delivery.DeliveryTag, err)
-					if nackErr := delivery.Nack(false, false); nackErr != nil {
-						log.Printf("warning: 消息转入死信失败 (delivery_tag=%d): %v", delivery.DeliveryTag, nackErr)
+					// 主动转录到死信队列并补齐诊断头（原队列/原因/重试次数/错误），
+					// 只有 broker 确认接收才 ack 原消息，避免“先 ack 后投递”造成丢失。
+					if deadErr := c.forwardDeadLetter(ctx, queue, delivery, deadReason, attempts[key], err); deadErr != nil {
+						log.Printf("error: 消费队列 %q 消息转入死信失败，重新入队避免丢失（%s, delivery_tag=%d）: %v",
+							queue, reasonText, delivery.DeliveryTag, deadErr)
+						if nackErr := delivery.Nack(false, true); nackErr != nil {
+							log.Printf("warning: 消息重新入队失败 (delivery_tag=%d): %v", delivery.DeliveryTag, nackErr)
+						}
+						select {
+						case <-ctx.Done():
+							return nil
+						case <-time.After(deadLetterRetryDelay):
+						}
+						continue
+					}
+					log.Printf("warning: 消费队列 %q 消息已转入死信队列（%s, 处理 %d 次, delivery_tag=%d）: %v",
+						queue, reasonText, attempts[key], delivery.DeliveryTag, err)
+					if ackErr := delivery.Ack(false); ackErr != nil {
+						log.Printf("warning: 消息确认失败 (delivery_tag=%d): %v", delivery.DeliveryTag, ackErr)
 					}
 					delete(attempts, key)
 					continue

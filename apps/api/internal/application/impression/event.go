@@ -20,6 +20,9 @@ type PlayRecorded struct {
 	OccurredAt time.Time `json:"occurred_at"`
 }
 
+// TopicPlayRecorded 是播放事件补偿的 outbox 主题，relay 据此投递到曝光交换机。
+const TopicPlayRecorded = "impression.play_recorded"
+
 // PlayEventPublisher 是 play.recorded 事件发布端口，由 infra/mq 实现并经组合根注入；
 // 未注入时上报成功但不投递事件（Worker 无法补偿，仅靠 API 同步链路保证一致性）。
 type PlayEventPublisher interface {

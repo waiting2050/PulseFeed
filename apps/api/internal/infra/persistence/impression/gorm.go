@@ -11,6 +11,7 @@ import (
 	domclip "pulsefeed/internal/domain/clip"
 	domimpression "pulsefeed/internal/domain/impression"
 	infraclip "pulsefeed/internal/infra/persistence/clip"
+	infraoutbox "pulsefeed/internal/infra/persistence/outbox"
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -32,6 +33,18 @@ func New(db *gorm.DB) *Repository {
 // RecordPlayEvent 幂等写入展示/播放事件：同 event_id 已存在时为 no-op；
 // 仅首次写入时按事件类型更新聚合行，并把事件标记为已聚合。
 func (r *Repository) RecordPlayEvent(ctx context.Context, event *domimpression.PlayEvent) (bool, error) {
+	return r.recordPlayEvent(ctx, event, nil)
+}
+
+// RecordPlayEventWithEvents 与 RecordPlayEvent 写入同一批业务数据，
+// 并在事件首次写入时把 build 构造的 outbox 事件一并落库，保证“落库成功就一定被投递”。
+func (r *Repository) RecordPlayEventWithEvents(ctx context.Context, event *domimpression.PlayEvent, build domimpression.EventBuilder) (bool, error) {
+	return r.recordPlayEvent(ctx, event, build)
+}
+
+// recordPlayEvent 在一个事务内完成事件写入、当日聚合与（可选的）outbox 写入；
+// build 为 nil 时退化为纯落库路径。
+func (r *Repository) recordPlayEvent(ctx context.Context, event *domimpression.PlayEvent, build domimpression.EventBuilder) (bool, error) {
 	var isNew bool
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		// 校验 clip 存在且为发布态，与互动链路保持一致。
@@ -70,6 +83,20 @@ func (r *Repository) RecordPlayEvent(ctx context.Context, event *domimpression.P
 		if event.EventType == domimpression.EventTypePlay {
 			if err := incrementPlayCount(tx, event.EventID, event.ClipID); err != nil {
 				return err
+			}
+		}
+		// 只有首次写入才产生 outbox 事件：重复上报由唯一键吸收，不重复投递。
+		if build != nil {
+			events, err := build(true)
+			if err != nil {
+				return err
+			}
+			now := time.Now()
+			for _, item := range events {
+				record := infraoutbox.NewEventModel(item.EventID, item.Topic, item.Payload, now)
+				if err := tx.Create(record).Error; err != nil {
+					return err
+				}
 			}
 		}
 		isNew = true

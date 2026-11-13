@@ -1,9 +1,12 @@
 // service.go 编排播放事件上报用例：校验 → 幂等落库（含当日曝光聚合）→ 投递 play.recorded 事件。
-// 事件投递失败不回滚落库结果，Worker 消费链路保证曝光最终一致。
+// 启用 outbox 时事件与落库同事务写入，由 relay 经 publisher confirm 投递，失败按退避重试；
+// 未启用时沿用直接投递，投递失败不回滚落库结果，Worker 消费链路保证曝光最终一致。
 package appimpression
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"log"
 	"time"
 
@@ -20,10 +23,19 @@ func WithPublisher(p PlayEventPublisher) Option {
 	}
 }
 
+// WithOutbox 启用事务性 outbox：play.recorded 事件与播放事件同事务落库，
+// 由 Worker 的 relay 经 publisher confirm 投递，避免“落库成功但消息丢失”。
+func WithOutbox() Option {
+	return func(s *Service) {
+		s.outbox = true
+	}
+}
+
 // Service 提供曝光相关用例。
 type Service struct {
 	repo      domimpression.Repository
 	publisher PlayEventPublisher
+	outbox    bool
 }
 
 // New 创建曝光应用服务。
@@ -42,6 +54,38 @@ func (s *Service) RecordPlayEvent(ctx context.Context, in domimpression.PlayEven
 		return err
 	}
 
+	payload := PlayRecorded{
+		EventID:    event.EventID,
+		ViewerID:   event.ViewerID,
+		ClipID:     event.ClipID,
+		EventType:  string(event.EventType),
+		Scene:      event.Scene,
+		RequestID:  event.RequestID,
+		WatchMs:    event.WatchMs,
+		Completed:  event.Completed,
+		Impression: event.Impression,
+		OccurredAt: event.CreatedAt,
+	}
+
+	if s.outbox {
+		// 事件与播放事件同事务落库：落库成功即一定被 relay 投递；重复 event_id 不产生新事件。
+		_, err := s.repo.RecordPlayEventWithEvents(ctx, event, func(isNew bool) ([]domimpression.OutboxEvent, error) {
+			if !isNew {
+				return nil, nil
+			}
+			body, err := json.Marshal(payload)
+			if err != nil {
+				return nil, fmt.Errorf("序列化 play.recorded 事件失败: %w", err)
+			}
+			return []domimpression.OutboxEvent{{
+				EventID: event.EventID,
+				Topic:   TopicPlayRecorded,
+				Payload: body,
+			}}, nil
+		})
+		return err
+	}
+
 	// 落库（含当日曝光 upsert）；同 event_id 重复上报为 no-op。
 	if _, err := s.repo.RecordPlayEvent(ctx, event); err != nil {
 		return err
@@ -49,18 +93,6 @@ func (s *Service) RecordPlayEvent(ctx context.Context, in domimpression.PlayEven
 
 	// 投递事件供 Worker 做曝光补偿；失败仅记日志，不影响接口返回。
 	if s.publisher != nil {
-		payload := PlayRecorded{
-			EventID:    event.EventID,
-			ViewerID:   event.ViewerID,
-			ClipID:     event.ClipID,
-			EventType:  string(event.EventType),
-			Scene:      event.Scene,
-			RequestID:  event.RequestID,
-			WatchMs:    event.WatchMs,
-			Completed:  event.Completed,
-			Impression: event.Impression,
-			OccurredAt: event.CreatedAt,
-		}
 		if err := s.publisher.PublishPlayRecorded(ctx, payload); err != nil {
 			log.Printf("投递 play.recorded 事件失败 (event_id=%s): %v", event.EventID, err)
 		}

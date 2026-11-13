@@ -217,12 +217,13 @@ func Register(engine *gin.Engine, cfg *config.Config, db *sql.DB) error {
 	actionService := appaction.New(actionRepo, actionOpts...)
 	actionHandler := httpaction.New(actionService)
 
-	// 曝光链路：播放事件幂等落库 + 当日曝光聚合；MQ 可用时投递 play.recorded 供 Worker 补偿。
+	// 曝光链路：播放事件幂等落库 + 当日曝光聚合；MQ 可用时启用事务性 outbox，
+	// play.recorded 与播放事件同事务落库后由 Worker 的 relay 投递。
 	impressionRepo := infraimpression.New(gormDB)
 	impressionOpts := make([]appimpression.Option, 0, 1)
 	if mqClient != nil {
-		impressionOpts = append(impressionOpts, appimpression.WithPublisher(mqClient))
-		log.Printf("播放事件异步链路已启用 (queue=%s)", cfg.RabbitMQ.PlayEventRecordedQueue)
+		impressionOpts = append(impressionOpts, appimpression.WithOutbox())
+		log.Printf("播放事件异步链路已启用 outbox (queue=%s)", cfg.RabbitMQ.PlayEventRecordedQueue)
 	}
 	impressionService := appimpression.New(impressionRepo, impressionOpts...)
 	impressionHandler := httpimpression.New(impressionService)

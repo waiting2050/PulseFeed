@@ -23,6 +23,8 @@ type impressionFakeRepository struct {
 	impressions map[string]*domimpression.Impression
 	synced      map[string]bool
 	recordCalls int
+	withEvents  int
+	outbox      []domimpression.OutboxEvent
 	upsertCalls int
 	markCalls   int
 	syncedCalls int
@@ -121,6 +123,22 @@ func (f *impressionFakeRepository) RecordPlayEvent(_ context.Context, event *dom
 	f.applyImpression(event)
 	f.synced[event.EventID] = true
 	f.lastIsNew = true
+	return true, nil
+}
+
+// RecordPlayEventWithEvents 模拟同事务写入：事件落库成功后按 isNew 构造 outbox 事件；
+// 重复 event_id 不产生新事件。
+func (f *impressionFakeRepository) RecordPlayEventWithEvents(ctx context.Context, event *domimpression.PlayEvent, build domimpression.EventBuilder) (bool, error) {
+	f.withEvents++
+	isNew, err := f.RecordPlayEvent(ctx, event)
+	if err != nil || !isNew {
+		return isNew, err
+	}
+	events, err := build(isNew)
+	if err != nil {
+		return isNew, err
+	}
+	f.outbox = append(f.outbox, events...)
 	return true, nil
 }
 
@@ -380,6 +398,80 @@ func TestRecordPlayEventIgnoresPublisherFailure(t *testing.T) {
 	}
 	if payload.OccurredAt.IsZero() {
 		t.Fatalf("投递载荷缺少发生时间")
+	}
+}
+
+// TestRecordPlayEventWithOutboxWritesEventInsteadOfPublishing 验证启用 outbox 后
+// 事件与落库同事务写入，不再直接投递 MQ，且载荷保留完整字段。
+func TestRecordPlayEventWithOutboxWritesEventInsteadOfPublishing(t *testing.T) {
+	repo := newImpressionFakeRepository(10)
+	publisher := &impressionFakePublisher{}
+	service := appimpression.New(repo, appimpression.WithOutbox(), appimpression.WithPublisher(publisher))
+
+	if err := service.RecordPlayEvent(context.Background(), playEventInput("evt-outbox", 10, 1500, "play", false)); err != nil {
+		t.Fatalf("上报返回错误: %v", err)
+	}
+	if repo.withEvents != 1 {
+		t.Fatalf("outbox 写入次数 = %d, 期望 1", repo.withEvents)
+	}
+	if len(publisher.events) != 0 {
+		t.Fatalf("启用 outbox 后不应直接投递 MQ, 实际 %d 次", len(publisher.events))
+	}
+	if len(repo.outbox) != 1 {
+		t.Fatalf("outbox 事件数 = %d, 期望 1", len(repo.outbox))
+	}
+
+	event := repo.outbox[0]
+	if event.EventID != "evt-outbox" {
+		t.Fatalf("outbox event_id = %s, 期望 evt-outbox", event.EventID)
+	}
+	if event.Topic != appimpression.TopicPlayRecorded {
+		t.Fatalf("outbox topic = %s, 期望 %s", event.Topic, appimpression.TopicPlayRecorded)
+	}
+
+	var payload appimpression.PlayRecorded
+	if err := json.Unmarshal(event.Payload, &payload); err != nil {
+		t.Fatalf("解析 outbox 载荷失败: %v", err)
+	}
+	if payload.EventID != "evt-outbox" || payload.ViewerID != 7 || payload.ClipID != 10 {
+		t.Fatalf("outbox 载荷字段 = %+v, 期望 event_id=evt-outbox viewer_id=7 clip_id=10", payload)
+	}
+	if payload.OccurredAt.IsZero() {
+		t.Fatalf("outbox 载荷缺少发生时间")
+	}
+}
+
+// TestRecordPlayEventWithOutboxSkipsDuplicate 验证同 event_id 重复上报只产生一条 outbox 事件，
+// 避免 relay 重复投递造成下游重复计数。
+func TestRecordPlayEventWithOutboxSkipsDuplicate(t *testing.T) {
+	repo := newImpressionFakeRepository(10)
+	service := appimpression.New(repo, appimpression.WithOutbox())
+	ctx := context.Background()
+
+	for i := 0; i < 2; i++ {
+		if err := service.RecordPlayEvent(ctx, playEventInput("evt-dup", 10, 1200, "play", false)); err != nil {
+			t.Fatalf("第 %d 次上报返回错误: %v", i+1, err)
+		}
+	}
+	if len(repo.events) != 1 {
+		t.Fatalf("播放事件行数 = %d, 期望 1", len(repo.events))
+	}
+	if len(repo.outbox) != 1 {
+		t.Fatalf("outbox 事件数 = %d, 期望 1（重复上报不重复投递）", len(repo.outbox))
+	}
+}
+
+// TestRecordPlayEventWithOutboxPropagatesStoreError 验证落库失败时向上返回错误，不吞错。
+func TestRecordPlayEventWithOutboxPropagatesStoreError(t *testing.T) {
+	repo := newImpressionFakeRepository(10)
+	repo.recordErr = errors.New("数据库不可用")
+	service := appimpression.New(repo, appimpression.WithOutbox())
+
+	if err := service.RecordPlayEvent(context.Background(), playEventInput("evt-err", 10, 500, "play", false)); !errors.Is(err, repo.recordErr) {
+		t.Fatalf("错误 = %v, 期望透传 %v", err, repo.recordErr)
+	}
+	if len(repo.outbox) != 0 {
+		t.Fatalf("落库失败不应产生 outbox 事件, 实际 %d", len(repo.outbox))
 	}
 }
 

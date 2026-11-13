@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	appclip "pulsefeed/internal/application/clip"
+	appdlq "pulsefeed/internal/application/dlq"
 	appembedding "pulsefeed/internal/application/embedding"
 	appimpression "pulsefeed/internal/application/impression"
 	appaction "pulsefeed/internal/application/interaction"
@@ -19,6 +20,7 @@ import (
 	infradatabase "pulsefeed/internal/infra/database"
 	inframetrics "pulsefeed/internal/infra/metrics"
 	inframq "pulsefeed/internal/infra/mq"
+	infradlq "pulsefeed/internal/infra/persistence/dlq"
 	infraembedding "pulsefeed/internal/infra/persistence/embedding"
 	infrafeed "pulsefeed/internal/infra/persistence/feed"
 	infraimpression "pulsefeed/internal/infra/persistence/impression"
@@ -92,6 +94,11 @@ func main() {
 			Exchange:   cfg.RabbitMQ.ClipExchange,
 			RoutingKey: inframq.EmbeddingRouting,
 		},
+		// 播放事件与 clip 同走 outbox：落库成功即由 relay 经 confirm 投递，重复投递按 event_id 幂等。
+		appimpression.TopicPlayRecorded: {
+			Exchange:   cfg.RabbitMQ.ImpressionExchange,
+			RoutingKey: cfg.RabbitMQ.PlayEventRecordedRouting,
+		},
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -105,13 +112,32 @@ func main() {
 		}
 	}()
 
+	// 死信消费者：把四个 .dead 队列中的消息落库并记录日志/指标，
+	// 消费失败会重新入队，保证死信不会“只声明不消费”而静默堆积。
+	dlqConsumer := appdlq.New(infradlq.New(gormDB), workerMetrics, map[string]string{
+		cfg.RabbitMQ.ClipPublishedQueue:     appclip.TopicClipPublished,
+		cfg.RabbitMQ.ClipEmbeddingQueue:     appclip.TopicClipEmbedding,
+		cfg.RabbitMQ.ActionChangedQueue:     appaction.TopicActionChanged,
+		cfg.RabbitMQ.PlayEventRecordedQueue: appimpression.TopicPlayRecorded,
+	})
+	handleDeadLetter := func(ctx context.Context, message inframq.DeadLetter) error {
+		return dlqConsumer.Handle(ctx, appdlq.Message{
+			SourceQueue: message.SourceQueue,
+			Reason:      message.Reason,
+			Attempts:    message.Attempts,
+			LastError:   message.LastError,
+			MessageID:   message.MessageID,
+			Payload:     message.Payload,
+		})
+	}
+
 	// 四个消费者各自持有独立 AMQP 通道并发消费，outbox relay 独立轮询；任一消费者异常退出即终止进程。
 	log.Printf("worker 已启动: %s (queue=%s)", actionWorker.Name(), cfg.RabbitMQ.ActionChangedQueue)
 	log.Printf("worker 已启动: %s (queue=%s)", fanoutWorker.Name(), cfg.RabbitMQ.ClipPublishedQueue)
 	log.Printf("worker 已启动: %s (queue=%s)", embeddingWorker.Name(), cfg.RabbitMQ.ClipEmbeddingQueue)
 	log.Printf("worker 已启动: %s (queue=%s)", playEventWorker.Name(), cfg.RabbitMQ.PlayEventRecordedQueue)
 	log.Printf("worker 已启动: outbox_relay")
-	errCh := make(chan error, 5)
+	errCh := make(chan error, 9)
 	go func() {
 		errCh <- outboxRelay.Run(ctx)
 	}()
@@ -131,6 +157,25 @@ func main() {
 		errCh <- mqClient.Consume(ctx, cfg.RabbitMQ.PlayEventRecordedQueue,
 			observeWorker(workerMetrics, playEventWorker.Name(), playEventWorker.Handle))
 	}()
+
+	// 四组死信队列与业务消费者一一对应；死信消费异常退出同样终止进程，避免告警链路失效。
+	deadQueues := []struct {
+		queue    string
+		exchange string
+		routing  string
+	}{
+		{cfg.RabbitMQ.ClipPublishedQueue, cfg.RabbitMQ.ClipExchange, cfg.RabbitMQ.ClipPublishedRouting},
+		{cfg.RabbitMQ.ClipEmbeddingQueue, cfg.RabbitMQ.ClipExchange, inframq.EmbeddingRouting},
+		{cfg.RabbitMQ.ActionChangedQueue, cfg.RabbitMQ.InteractionExchange, cfg.RabbitMQ.ActionChangedRouting},
+		{cfg.RabbitMQ.PlayEventRecordedQueue, cfg.RabbitMQ.ImpressionExchange, cfg.RabbitMQ.PlayEventRecordedRouting},
+	}
+	for _, item := range deadQueues {
+		_, deadQueue, _ := inframq.DeadLetterNames(item.exchange, item.queue, item.routing)
+		log.Printf("worker 已启动: dlq (queue=%s)", deadQueue)
+		go func(deadQueue string) {
+			errCh <- mqClient.ConsumeDeadLetters(ctx, deadQueue, handleDeadLetter)
+		}(deadQueue)
+	}
 	if err := <-errCh; err != nil {
 		log.Fatalf("Worker 消费异常退出: %v", err)
 	}

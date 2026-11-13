@@ -28,6 +28,9 @@ type ActionChanged struct {
 	OccurredAt     time.Time                 `json:"occurred_at"`
 }
 
+// TopicActionChanged 是 interaction.action_changed 事件的逻辑类型，用于死信消息归类。
+const TopicActionChanged = "interaction.action_changed"
+
 // ActionStateCache 是互动状态的 Redis 先行写入端口，由 infra/cache 实现。
 type ActionStateCache interface {
 	// SetActionState 更新读者行为状态与分片计数，返回该 clip 的最新计数。

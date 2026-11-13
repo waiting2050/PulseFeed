@@ -22,6 +22,7 @@ type Metrics struct {
 	feedDuration *prometheus.HistogramVec
 	cacheEvents  *prometheus.CounterVec
 	workerEvents *prometheus.CounterVec
+	dlqMessages  *prometheus.CounterVec
 
 	qosReports   *prometheus.CounterVec
 	qosLatency   prometheus.Histogram
@@ -74,6 +75,10 @@ func New(component string) *Metrics {
 		Name: "pulsefeed_worker_events_total",
 		Help: "Worker 消息处理次数，按 Worker 名称与结果区分。",
 	}, []string{"worker", "result"})
+	dlqMessages := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "pulsefeed_dlq_messages_total",
+		Help: "死信消息消费次数，按来源队列、事件类型与死信原因区分。",
+	}, []string{"queue", "event_type", "reason"})
 	qosReports := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "pulsefeed_playback_qos_reports_total",
 		Help: "QoS 上报次数，按结果（inserted/duplicate/error）区分。",
@@ -116,6 +121,7 @@ func New(component string) *Metrics {
 		feedDuration,
 		cacheEvents,
 		workerEvents,
+		dlqMessages,
 		qosReports,
 		qosLatency,
 		qosStalls,
@@ -135,6 +141,7 @@ func New(component string) *Metrics {
 		feedDuration:    feedDuration,
 		cacheEvents:     cacheEvents,
 		workerEvents:    workerEvents,
+		dlqMessages:     dlqMessages,
 		qosReports:      qosReports,
 		qosLatency:      qosLatency,
 		qosStalls:       qosStalls,
@@ -178,6 +185,14 @@ func (m *Metrics) ObserveWorker(worker, result string) {
 		return
 	}
 	m.workerEvents.WithLabelValues(worker, result).Inc()
+}
+
+// ObserveDeadLetter 记录一条已消费的死信消息。
+func (m *Metrics) ObserveDeadLetter(queue, eventType, reason string) {
+	if m == nil {
+		return
+	}
+	m.dlqMessages.WithLabelValues(queue, eventType, reason).Inc()
 }
 
 // ObserveQoS 记录一次 QoS 上报；延迟、卡顿与完播只在首次落库（inserted）时聚合，
