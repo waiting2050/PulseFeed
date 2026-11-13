@@ -18,6 +18,8 @@ func Models() []any {
 	return []any{
 		&infraaccount.UserModel{},
 		&infraaccount.UserProfileModel{},
+		// 刷新令牌会话链：登录建链、轮换留同链、登出/重放按链吊销。
+		&infraaccount.RefreshTokenModel{},
 		&infraclip.ClipModel{},
 		&infraclip.ClipStatsModel{},
 		&infraaction.ActionModel{},

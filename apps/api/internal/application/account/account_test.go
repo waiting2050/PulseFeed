@@ -57,6 +57,16 @@ func (f *accountFakeRepo) FindByAccount(_ context.Context, name string) (*domain
 	return &clone, nil
 }
 
+func (f *accountFakeRepo) FindByID(_ context.Context, userID int64) (*domainaccount.Account, error) {
+	for _, account := range f.accounts {
+		if account.ID == userID {
+			clone := *account
+			return &clone, nil
+		}
+	}
+	return nil, domainaccount.ErrAccountNotFound
+}
+
 func (f *accountFakeRepo) GetProfile(_ context.Context, userID int64) (*domainaccount.UserProfile, error) {
 	profile, ok := f.profiles[userID]
 	if !ok {
@@ -78,16 +88,18 @@ func (f *accountFakeRepo) UpdateProfile(_ context.Context, profile *domainaccoun
 
 // accountFakeIssuer 记录签发入参并按配置返回令牌或错误。
 type accountFakeIssuer struct {
-	token      string
-	ttl        time.Duration
-	issueErr   error
-	issuedUser int64
-	issuedRole string
+	token        string
+	ttl          time.Duration
+	issueErr     error
+	issuedUser   int64
+	issuedRole   string
+	issuedFamily string
 }
 
-func (f *accountFakeIssuer) Issue(userID int64, role string) (string, error) {
+func (f *accountFakeIssuer) Issue(userID int64, role, familyID string) (string, error) {
 	f.issuedUser = userID
 	f.issuedRole = role
+	f.issuedFamily = familyID
 	if f.issueErr != nil {
 		return "", f.issueErr
 	}
@@ -98,11 +110,46 @@ func (f *accountFakeIssuer) AccessTTL() time.Duration {
 	return f.ttl
 }
 
-// newAccountService 装配内存仓储与固定令牌签发器。
+// accountFakeSessions 是内存版刷新令牌仓储，登录用例只需要 Create 生效。
+type accountFakeSessions struct {
+	created []*domainaccount.RefreshToken
+}
+
+func (f *accountFakeSessions) Create(_ context.Context, token *domainaccount.RefreshToken) error {
+	token.ID = int64(len(f.created) + 1)
+	f.created = append(f.created, token)
+	return nil
+}
+
+func (f *accountFakeSessions) FindByHash(_ context.Context, _ string) (*domainaccount.RefreshToken, error) {
+	return nil, nil
+}
+
+func (f *accountFakeSessions) Rotate(_ context.Context, _ string, _ *domainaccount.RefreshToken, _ time.Duration) (*domainaccount.RotateResult, error) {
+	return &domainaccount.RotateResult{Outcome: domainaccount.RotateNotFound}, nil
+}
+
+func (f *accountFakeSessions) FindActiveByHash(_ context.Context, _ string) (*domainaccount.RefreshToken, error) {
+	return nil, nil
+}
+
+func (f *accountFakeSessions) RevokeFamily(_ context.Context, _ int64, _ string, _ string) (int64, error) {
+	return 0, nil
+}
+
+func (f *accountFakeSessions) RevokeAll(_ context.Context, _ int64, _ string) (int64, error) {
+	return 0, nil
+}
+
+// newAccountService 装配内存仓储、固定令牌签发器与刷新令牌仓储。
 func newAccountService() (*appaccount.Service, *accountFakeRepo, *accountFakeIssuer) {
 	repo := newAccountFakeRepo()
 	issuer := &accountFakeIssuer{token: "token-abc", ttl: 15 * time.Minute}
-	return appaccount.New(repo, appaccount.WithTokenIssuer(issuer)), repo, issuer
+	return appaccount.New(repo,
+		appaccount.WithTokenIssuer(issuer),
+		appaccount.WithSessionRepository(&accountFakeSessions{}),
+		appaccount.WithRefreshPolicy(14*24*time.Hour, 30*time.Second),
+	), repo, issuer
 }
 
 // TestAccountRegisterCreatesProfile 验证注册成功时的规范化、昵称回退与哈希落库。
@@ -229,7 +276,7 @@ func TestAccountLoginIssuesToken(t *testing.T) {
 	if _, err := svc.Register(ctx, "BobChen", "secret-123", ""); err != nil {
 		t.Fatalf("注册不应失败: %v", err)
 	}
-	session, err := svc.Login(ctx, "  BOBCHEN  ", "secret-123")
+	session, err := svc.Login(ctx, "  BOBCHEN  ", "secret-123", "test-agent")
 	if err != nil {
 		t.Fatalf("正确凭证登录不应失败: %v", err)
 	}
@@ -255,7 +302,7 @@ func TestAccountLoginRejectsWrongPassword(t *testing.T) {
 	if _, err := svc.Register(ctx, "alice", "secret-123", ""); err != nil {
 		t.Fatalf("注册不应失败: %v", err)
 	}
-	session, err := svc.Login(ctx, "alice", "wrong-secret")
+	session, err := svc.Login(ctx, "alice", "wrong-secret", "test-agent")
 	if !errors.Is(err, domainaccount.ErrInvalidCredentials) {
 		t.Fatalf("错误密码期望 ErrInvalidCredentials，实际 %v", err)
 	}
@@ -275,7 +322,7 @@ func TestAccountLoginRejectsDisabledAccount(t *testing.T) {
 	// 模拟运营侧将账号状态改为禁用（非 StatusNormal）。
 	repo.accounts["alice"].Status = 2
 
-	session, err := svc.Login(ctx, "alice", "secret-123")
+	session, err := svc.Login(ctx, "alice", "secret-123", "test-agent")
 	if !errors.Is(err, domainaccount.ErrAccountDisabled) {
 		t.Fatalf("禁用账号期望 ErrAccountDisabled，实际 %v", err)
 	}
@@ -292,7 +339,7 @@ func TestAccountLoginHidesUnknownAccount(t *testing.T) {
 	ctx := context.Background()
 	svc, repo, _ := newAccountService()
 
-	_, err := svc.Login(ctx, "nobody", "secret-123")
+	_, err := svc.Login(ctx, "nobody", "secret-123", "test-agent")
 	if !errors.Is(err, domainaccount.ErrInvalidCredentials) {
 		t.Fatalf("不存在账号期望 ErrInvalidCredentials，实际 %v", err)
 	}
@@ -309,7 +356,7 @@ func TestAccountLoginRequiresIssuer(t *testing.T) {
 	ctx := context.Background()
 	svc := appaccount.New(newAccountFakeRepo())
 
-	session, err := svc.Login(ctx, "alice", "secret-123")
+	session, err := svc.Login(ctx, "alice", "secret-123", "test-agent")
 	if err == nil {
 		t.Fatalf("未注入 issuer 时登录应失败")
 	}

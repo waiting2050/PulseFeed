@@ -18,4 +18,8 @@ var (
 	ErrEmptyProfileUpdate = errors.New("profile update is empty")
 	// ErrAccountDisabled 表示账号状态非正常（如被禁用），不允许登录。
 	ErrAccountDisabled = errors.New("账号已被禁用或状态异常")
+	// ErrSessionInvalid 表示刷新令牌无效、已吊销、已过期或判定为重放，需要重新登录。
+	ErrSessionInvalid = errors.New("登录状态已失效，请重新登录")
+	// ErrRefreshLimited 表示刷新请求触发限流，需要退避后重试。
+	ErrRefreshLimited = errors.New("请求过于频繁，请稍后重试")
 )

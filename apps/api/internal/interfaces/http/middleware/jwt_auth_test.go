@@ -18,7 +18,7 @@ import (
 // newTestIssuer 创建测试用签发器，令牌有效期足够覆盖用例执行时长。
 func newTestIssuer(t *testing.T) *infrajwt.Issuer {
 	t.Helper()
-	issuer, err := infrajwt.New("test-secret", time.Hour)
+	issuer, err := infrajwt.New("test-secret", time.Hour, 0)
 	if err != nil {
 		t.Fatalf("创建签发器失败: %v", err)
 	}
@@ -28,7 +28,7 @@ func newTestIssuer(t *testing.T) *infrajwt.Issuer {
 // issueTestToken 为指定用户签发合法令牌。
 func issueTestToken(t *testing.T, issuer *infrajwt.Issuer, userID int64) string {
 	t.Helper()
-	token, err := issuer.Issue(userID, "user")
+	token, err := issuer.Issue(userID, "user", "family-test")
 	if err != nil {
 		t.Fatalf("签发令牌失败: %v", err)
 	}
@@ -54,8 +54,8 @@ func serveWithMiddleware(mw gin.HandlerFunc, authorization string) *httptest.Res
 	return rec
 }
 
-// assertUnauthorizedEnvelope 断言 401 响应体是 {code, message} 错误信封。
-func assertUnauthorizedEnvelope(t *testing.T, rec *httptest.ResponseRecorder) {
+// assertUnauthorizedEnvelope 断言 401 响应体是 {code, message} 错误信封，且业务码符合预期。
+func assertUnauthorizedEnvelope(t *testing.T, rec *httptest.ResponseRecorder, wantCode int) {
 	t.Helper()
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("期望状态码 401，实际 %d，body=%s", rec.Code, rec.Body.String())
@@ -67,8 +67,8 @@ func assertUnauthorizedEnvelope(t *testing.T, rec *httptest.ResponseRecorder) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
 		t.Fatalf("错误信封不是合法 JSON: %v, body=%s", err, rec.Body.String())
 	}
-	if envelope.Code != http.StatusUnauthorized {
-		t.Fatalf("错误信封 code 期望 401，实际 %d", envelope.Code)
+	if envelope.Code != wantCode {
+		t.Fatalf("错误信封 code 期望 %d，实际 %d", wantCode, envelope.Code)
 	}
 	if envelope.Message == "" {
 		t.Fatalf("错误信封 message 不应为空")
@@ -97,34 +97,38 @@ func TestRequiredJWTAuth(t *testing.T) {
 	issuer := newTestIssuer(t)
 	validToken := issueTestToken(t, issuer, 42)
 
-	otherIssuer, err := infrajwt.New("another-secret", time.Hour)
+	otherIssuer, err := infrajwt.New("another-secret", time.Hour, 0)
 	if err != nil {
 		t.Fatalf("创建另一签发器失败: %v", err)
 	}
 	foreignToken := issueTestToken(t, otherIssuer, 42)
 
-	expiredIssuer, err := infrajwt.New("test-secret", time.Millisecond)
+	expiredIssuer, err := infrajwt.New("test-secret", time.Millisecond, 0)
 	if err != nil {
 		t.Fatalf("创建短 TTL 签发器失败: %v", err)
 	}
 	expiredToken := issueTestToken(t, expiredIssuer, 42)
 	time.Sleep(5 * time.Millisecond)
 
-	unauthorizedCases := map[string]string{
-		"缺失 Authorization": "",
-		"缺少 Bearer 前缀":     validToken,
-		"令牌为空":             "Bearer ",
-		"签名不匹配":            "Bearer " + foreignToken,
-		"令牌已过期":            "Bearer " + expiredToken,
+	unauthorizedCases := []struct {
+		name   string
+		header string
+		code   int
+	}{
+		{name: "缺失 Authorization", header: "", code: 40102},
+		{name: "缺少 Bearer 前缀", header: validToken, code: 40102},
+		{name: "令牌为空", header: "Bearer ", code: 40102},
+		{name: "签名不匹配", header: "Bearer " + foreignToken, code: 40102},
+		{name: "令牌已过期", header: "Bearer " + expiredToken, code: 40101},
 	}
-	for name, header := range unauthorizedCases {
-		t.Run(name, func(t *testing.T) {
-			assertUnauthorizedEnvelope(t, serveWithMiddleware(NewJWTAuth(issuer), header))
+	for _, tt := range unauthorizedCases {
+		t.Run(tt.name, func(t *testing.T) {
+			assertUnauthorizedEnvelope(t, serveWithMiddleware(NewJWTAuth(issuer, nil, nil), tt.header), tt.code)
 		})
 	}
 
 	t.Run("合法令牌", func(t *testing.T) {
-		rec := serveWithMiddleware(NewJWTAuth(issuer), "Bearer "+validToken)
+		rec := serveWithMiddleware(NewJWTAuth(issuer, nil, nil), "Bearer "+validToken)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("期望 200，实际 %d，body=%s", rec.Code, rec.Body.String())
 		}
@@ -147,13 +151,13 @@ func TestOptionalJWTAuth(t *testing.T) {
 	issuer := newTestIssuer(t)
 	validToken := issueTestToken(t, issuer, 7)
 
-	otherIssuer, err := infrajwt.New("another-secret", time.Hour)
+	otherIssuer, err := infrajwt.New("another-secret", time.Hour, 0)
 	if err != nil {
 		t.Fatalf("创建另一签发器失败: %v", err)
 	}
 	foreignToken := issueTestToken(t, otherIssuer, 7)
 
-	expiredIssuer, err := infrajwt.New("test-secret", time.Millisecond)
+	expiredIssuer, err := infrajwt.New("test-secret", time.Millisecond, 0)
 	if err != nil {
 		t.Fatalf("创建短 TTL 签发器失败: %v", err)
 	}
@@ -170,13 +174,13 @@ func TestOptionalJWTAuth(t *testing.T) {
 	}
 	for name, header := range anonymousCases {
 		t.Run(name, func(t *testing.T) {
-			assertAnonymousOK(t, serveWithMiddleware(NewOptionalJWTAuth(issuer), header))
+			assertAnonymousOK(t, serveWithMiddleware(NewOptionalJWTAuth(issuer, nil, nil), header))
 		})
 	}
 
 	t.Run("合法令牌写入用户", func(t *testing.T) {
 		token := issueTestToken(t, issuer, 7)
-		rec := serveWithMiddleware(NewOptionalJWTAuth(issuer), "Bearer "+token)
+		rec := serveWithMiddleware(NewOptionalJWTAuth(issuer, nil, nil), "Bearer "+token)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("期望 200，实际 %d", rec.Code)
 		}
@@ -198,7 +202,7 @@ func TestInternalTokenAuth(t *testing.T) {
 	const expected = "internal-secret"
 
 	t.Run("缺失头拦截", func(t *testing.T) {
-		assertUnauthorizedEnvelope(t, serveWithMiddleware(NewInternalTokenAuth(expected), ""))
+		assertUnauthorizedEnvelope(t, serveWithMiddleware(NewInternalTokenAuth(expected), ""), http.StatusUnauthorized)
 	})
 
 	t.Run("错误 token 拦截", func(t *testing.T) {
@@ -210,7 +214,7 @@ func TestInternalTokenAuth(t *testing.T) {
 		req.Header.Set("X-Internal-Token", "internal-secreX")
 		rec := httptest.NewRecorder()
 		engine.ServeHTTP(rec, req)
-		assertUnauthorizedEnvelope(t, rec)
+		assertUnauthorizedEnvelope(t, rec, http.StatusUnauthorized)
 	})
 
 	t.Run("正确 token 放行", func(t *testing.T) {

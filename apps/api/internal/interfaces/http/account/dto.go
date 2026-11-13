@@ -14,6 +14,11 @@ type loginRequest struct {
 	Password string `json:"password"`
 }
 
+// refreshRequest 是刷新接口的请求体。
+type refreshRequest struct {
+	RefreshToken string `json:"refresh_token"`
+}
+
 // updateProfileRequest 是资料部分更新的请求体，字段缺省表示不修改。
 type updateProfileRequest struct {
 	Nickname  *string `json:"nickname"`
@@ -30,11 +35,15 @@ type profileResponse struct {
 	Bio       string `json:"bio"`
 }
 
-// sessionResponse 是登录成功的响应，携带 Bearer 访问令牌。
+// sessionResponse 是登录与刷新成功的响应，携带双令牌与有效期。
 type sessionResponse struct {
-	AccessToken string `json:"access_token"`
-	TokenType   string `json:"token_type"`
-	ExpiresIn   int64  `json:"expires_in"`
-	UserID      int64  `json:"user_id"`
-	Account     string `json:"account"`
+	AccessToken      string `json:"access_token"`
+	RefreshToken     string `json:"refresh_token"`
+	TokenType        string `json:"token_type"`
+	ExpiresIn        int64  `json:"expires_in"`
+	RefreshExpiresIn int64  `json:"refresh_expires_in"`
+	// Reused 仅刷新接口返回：true 表示命中宽限期回放，登录响应不带该字段。
+	Reused  *bool  `json:"reused,omitempty"`
+	UserID  int64  `json:"user_id"`
+	Account string `json:"account"`
 }

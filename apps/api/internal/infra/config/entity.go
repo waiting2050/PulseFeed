@@ -13,10 +13,13 @@ type Config struct {
 	RabbitMQ RabbitMQConfig `yaml:"rabbitmq"`
 }
 
-// JWTConfig 描述令牌签发参数。
+// JWTConfig 描述令牌签发参数：访问令牌有效期、刷新令牌有效期、宽限窗口与时钟容差。
 type JWTConfig struct {
-	Secret    string        `yaml:"secret"`
-	AccessTTL time.Duration `yaml:"access_ttl"`
+	Secret       string        `yaml:"secret"`
+	AccessTTL    time.Duration `yaml:"access_ttl"`
+	RefreshTTL   time.Duration `yaml:"refresh_ttl"`
+	RefreshGrace time.Duration `yaml:"refresh_grace"`
+	Leeway       time.Duration `yaml:"leeway"`
 }
 
 // InternalConfig 描述内部接口鉴权参数。

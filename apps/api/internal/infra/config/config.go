@@ -22,11 +22,36 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("解析配置文件 %q 失败: %w", path, err)
 	}
 
+	// 密钥优先取环境变量，便于容器与 CI 注入而不把真实密钥写进仓库。
+	if secret := os.Getenv("PULSEFEED_JWT_SECRET"); secret != "" {
+		cfg.JWT.Secret = secret
+	}
+
 	if err := cfg.validate(); err != nil {
 		return nil, fmt.Errorf("校验配置文件 %q 失败: %w", path, err)
 	}
 
 	return cfg, nil
+}
+
+// minJWTSecretBytes 是 HS256 密钥的最小长度，低于该长度直接拒绝启动。
+const minJWTSecretBytes = 32
+
+// placeholderSecrets 是仓库里出现过的示例值，命中即视为未配置。
+var placeholderSecrets = []string{"placeholder-secret", "change-me", "pulsefeed-docker-secret"}
+
+// validateJWTSecret 校验密钥长度与占位值；任一不满足都拒绝启动。
+func validateJWTSecret(secret string) error {
+	if len(secret) < minJWTSecretBytes {
+		return fmt.Errorf("jwt.secret 至少 %d 字节，当前 %d 字节", minJWTSecretBytes, len(secret))
+	}
+	lower := strings.ToLower(secret)
+	for _, placeholder := range placeholderSecrets {
+		if lower == placeholder || strings.Contains(lower, "placeholder") {
+			return fmt.Errorf("jwt.secret 仍是占位值，请通过 PULSEFEED_JWT_SECRET 注入真实密钥")
+		}
+	}
+	return nil
 }
 
 // validate 检查所有必填配置项，任一项缺失或非法都会返回错误。
@@ -53,6 +78,9 @@ func (c *Config) validate() error {
 
 	requireString("jwt.secret", c.JWT.Secret)
 	requireDuration("jwt.access_ttl", c.JWT.AccessTTL)
+	requireDuration("jwt.refresh_ttl", c.JWT.RefreshTTL)
+	requireDuration("jwt.refresh_grace", c.JWT.RefreshGrace)
+	requireDuration("jwt.leeway", c.JWT.Leeway)
 
 	requireString("internal.token", c.Internal.Token)
 
@@ -79,6 +107,10 @@ func (c *Config) validate() error {
 
 	if len(missing) > 0 {
 		return fmt.Errorf("缺少必填配置项: %s", strings.Join(missing, ", "))
+	}
+
+	if err := validateJWTSecret(c.JWT.Secret); err != nil {
+		return err
 	}
 
 	return nil

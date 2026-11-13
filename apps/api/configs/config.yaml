@@ -1,8 +1,11 @@
 port: 8090
 
 jwt:
-  secret: placeholder-secret
-  access_ttl: 15m
+  secret: pulsefeed-local-dev-secret-4f8c2b7e9a1d
+  access_ttl: 30m
+  refresh_ttl: 336h
+  refresh_grace: 30s
+  leeway: 30s
 
 internal:
   token: placeholder-internal-token

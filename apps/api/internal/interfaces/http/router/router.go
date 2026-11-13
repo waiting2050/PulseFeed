@@ -71,14 +71,7 @@ func Register(engine *gin.Engine, cfg *config.Config, db *sql.DB) error {
 	apiMetrics := inframetrics.New("api")
 	engine.Use(observeHTTP(apiMetrics))
 
-	// 认证链路：JWT 签发器 → 仓储 → 应用服务 → 处理器 → 路由。
-	issuer, err := infrajwt.New(cfg.JWT.Secret, cfg.JWT.AccessTTL)
-	if err != nil {
-		return fmt.Errorf("初始化 JWT 签发器失败: %w", err)
-	}
-	accountRepo := infraaccount.New(gormDB)
-	accountService := appaccount.New(accountRepo, appaccount.WithTokenIssuer(issuer))
-	accountHandler := httpaccount.New(accountService)
+	// 认证链路在 Redis 就绪后装配：签发器 → 仓储/缓存/限流/拒绝名单 → 应用服务 → 处理器。
 
 	// MQ 基座：url 为空或连接失败时不阻塞启动，异步链路自动降级为同步落库。
 	mqClient, mqErr := inframq.New(cfg.RabbitMQ)
@@ -105,6 +98,27 @@ func Register(engine *gin.Engine, cfg *config.Config, db *sql.DB) error {
 	} else {
 		log.Printf("redis.addr 为空，缓存已禁用，Feed 走 DB")
 	}
+
+	// 认证链路：JWT 签发器 → 刷新令牌仓储/宽限缓存/限流/拒绝名单 → 应用服务 → 处理器。
+	issuer, err := infrajwt.New(cfg.JWT.Secret, cfg.JWT.AccessTTL, cfg.JWT.Leeway)
+	if err != nil {
+		return fmt.Errorf("初始化 JWT 签发器失败: %w", err)
+	}
+	accountRepo := infraaccount.New(gormDB)
+	sessionRepo := infraaccount.NewSession(gormDB)
+	rotationCache := infracache.NewRotationCache(redisClient)
+	refreshGuard := infracache.NewRefreshGuard(redisClient)
+	denylist := infracache.NewDenylist(redisClient)
+	accountService := appaccount.New(accountRepo,
+		appaccount.WithTokenIssuer(issuer),
+		appaccount.WithSessionRepository(sessionRepo),
+		appaccount.WithRotationCache(rotationCache),
+		appaccount.WithRefreshLimiter(refreshGuard),
+		appaccount.WithAccessDenylist(denylist),
+		appaccount.WithMetrics(apiMetrics),
+		appaccount.WithRefreshPolicy(cfg.JWT.RefreshTTL, cfg.JWT.RefreshGrace),
+	)
+	accountHandler := httpaccount.New(accountService)
 	// clip 链路：仓储 → 应用服务 → 处理器；MQ 可用时启用事务性 outbox，
 	// 事件与 clip 同事务落库后由 Worker 的 relay 投递；删除成功后经 FeedCache 失效缓存。
 	clipOpts := make([]appclip.Option, 0, 2)
@@ -204,12 +218,13 @@ func Register(engine *gin.Engine, cfg *config.Config, db *sql.DB) error {
 	impressionService := appimpression.New(impressionRepo, impressionOpts...)
 	impressionHandler := httpimpression.New(impressionService)
 
-	jwtAuth := middleware.NewJWTAuth(issuer)
-	optionalAuth := middleware.NewOptionalJWTAuth(issuer)
+	jwtAuth := middleware.NewJWTAuth(issuer, denylist, apiMetrics)
+	optionalAuth := middleware.NewOptionalJWTAuth(issuer, denylist, apiMetrics)
 
 	api := engine.Group("/api")
 	api.POST("/users", accountHandler.Register)
 	api.POST("/sessions", accountHandler.Login)
+	api.POST("/sessions/refresh", accountHandler.Refresh)
 	api.GET("/users/:userId", accountHandler.GetByID)
 	api.GET("/users/:userId/clips", clipHandler.ListByCreator)
 	// 公开主页的关系概览与关注/粉丝列表：允许匿名读取，带 token 时回显当前读者是否已关注。

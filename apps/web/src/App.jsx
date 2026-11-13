@@ -10,7 +10,15 @@ import PublishPage from './pages/PublishPage.jsx'
 import MessagesPage from './pages/MessagesPage.jsx'
 import PlaybackPage from './pages/PlaybackPage.jsx'
 import ProfilePage from './pages/ProfilePage.jsx'
-import { api, getToken, hydrateToken, invalidatePlaybackConfig, loadPlaybackConfig, setToken } from './lib/api.js'
+import {
+  api,
+  clearSession,
+  getToken,
+  hydrateToken,
+  invalidatePlaybackConfig,
+  loadPlaybackConfig,
+  subscribeSession,
+} from './lib/api.js'
 
 // readNext 只接受站内绝对路径，避免登录回跳被外部地址利用。
 function readNext(search) {
@@ -54,6 +62,19 @@ export default function App() {
   const [authError, setAuthError] = useState('')
   const [busy, setBusy] = useState(false)
 
+  // 登录态唯一的写入方是 api.js：登录、刷新、登出、跨标签页同步都经订阅回传。
+  useEffect(
+    () =>
+      subscribeSession((next) => {
+        setTokenState(next)
+        if (!next) {
+          setMe(null)
+          setUnread(0)
+        }
+      }),
+    [],
+  )
+
   useEffect(() => {
     if (!token) {
       setMe(null)
@@ -91,8 +112,7 @@ export default function App() {
       const data = await api.login({ account, password })
       const nextToken = (data && data.access_token) || ''
       if (!nextToken) throw new Error('登录响应缺少 access_token')
-      setToken(nextToken)
-      setTokenState(nextToken)
+      setTokenState(getToken())
       navigate(readNext(location.search) || '/feed', { replace: true })
     } catch (err) {
       setAuthError(err.message)
@@ -108,8 +128,7 @@ export default function App() {
       // 登出失败不阻塞本地状态清理。
     }
     invalidatePlaybackConfig()
-    setToken('')
-    setTokenState('')
+    clearSession()
     setMe(null)
     setUnread(0)
     navigate('/login', { replace: true })

@@ -82,7 +82,9 @@ func TestMain(m *testing.M) {
 	models := []any{
 		&infraclip.ClipModel{},
 		&infraclip.ClipStatsModel{},
+		&infraaccount.UserModel{},
 		&infraaccount.UserProfileModel{},
+		&infraaccount.RefreshTokenModel{},
 		&infraimpression.PlayEventModel{},
 		&infraimpression.ImpressionModel{},
 		&infraaction.ActionModel{},

@@ -1,10 +1,17 @@
-// api.js 收口所有 HTTP 访问：统一信封解析、Bearer 注入、幂等键、上传与错误信息。
-const TOKEN_KEY = 'pulsefeed.token'
+// api.js 收口所有 HTTP 访问：统一信封解析、Bearer 注入、幂等键、401 单飞刷新与挂起重放。
+const ACCESS_KEY = 'pulsefeed.token'
+const REFRESH_KEY = 'pulsefeed.refresh'
 
 // 上传接口沿用的既有 kind 取值与创建接口字段名，不在前端另起别名。
 const FILE_KIND = 'video'
 
+// 429 退避重试的固定间隔；只重试一次，避免限流时形成自激。
+const RATE_LIMIT_BACKOFF_MS = 1000
+
 let accessToken = ''
+let refreshing = null // 模块级单飞 Promise：并发 401 只发起一次刷新
+let pending = [] // 刷新期间挂起的可重放请求
+let listeners = [] // App.jsx 订阅登录态变化
 
 export class ApiError extends Error {
   constructor(message, code = 0) {
@@ -16,7 +23,7 @@ export class ApiError extends Error {
 
 // hydrateToken 从本地存储恢复登录态，应用启动时调用一次。
 export function hydrateToken() {
-  accessToken = localStorage.getItem(TOKEN_KEY) || ''
+  accessToken = localStorage.getItem(ACCESS_KEY) || ''
   return accessToken
 }
 
@@ -24,13 +31,44 @@ export function getToken() {
   return accessToken
 }
 
-// setToken 同步内存与本地存储；传空值即清除登录态。
-export function setToken(token) {
+// getRefreshToken 每次现读 localStorage，避免多标签页拿到已被轮换的旧值。
+export function getRefreshToken() {
+  return localStorage.getItem(REFRESH_KEY) || ''
+}
+
+// subscribeSession 让 App.jsx 订阅登录态变化；返回取消订阅函数。
+export function subscribeSession(listener) {
+  listeners.push(listener)
+  return () => {
+    listeners = listeners.filter((item) => item !== listener)
+  }
+}
+
+function emitSession(token) {
   accessToken = token || ''
-  if (accessToken) {
-    localStorage.setItem(TOKEN_KEY, accessToken)
-  } else {
-    localStorage.removeItem(TOKEN_KEY)
+  listeners.forEach((listener) => listener(accessToken))
+}
+
+// applyPair 写入一对令牌并通知订阅者；登录与刷新共用。
+function applyPair(data) {
+  const access = (data && data.access_token) || ''
+  localStorage.setItem(ACCESS_KEY, access)
+  if (data && data.refresh_token) localStorage.setItem(REFRESH_KEY, data.refresh_token)
+  emitSession(access)
+}
+
+// clearSession 清空两个令牌并通知订阅者；刷新失败与主动登出共用。
+export function clearSession() {
+  localStorage.removeItem(ACCESS_KEY)
+  localStorage.removeItem(REFRESH_KEY)
+  emitSession('')
+}
+
+function forceLogin() {
+  if (typeof window === 'undefined') return
+  const next = encodeURIComponent(window.location.pathname + window.location.search)
+  if (!window.location.pathname.startsWith('/login')) {
+    window.location.replace(`/login?next=${next}`)
   }
 }
 
@@ -62,21 +100,46 @@ async function readEnvelope(response) {
   return payload ? payload.data : null
 }
 
-async function request(path, { method = 'GET', body, headers = {}, signal } = {}) {
-  const finalHeaders = { ...headers }
-  if (body !== undefined) finalHeaders['Content-Type'] = 'application/json'
-  if (accessToken) finalHeaders.Authorization = `Bearer ${accessToken}`
+// isAuthError 只认 access token 的两种失败；40103 与登录失败的 401 不触发刷新。
+function isAuthError(err) {
+  return err instanceof ApiError && (err.code === 40101 || err.code === 40102)
+}
+
+// 写请求重放白名单：只有重复执行无副作用的接口才允许刷新后自动重放。
+// 非 GET 默认不重放；新增写接口必须显式登记，漏登记只会退化为“用户手动重试”。
+const REPLAYABLE_WRITES = [
+  /^POST \/clips$/,
+  /^POST \/clips\/\d+\/comments$/,
+  /^(PUT|DELETE) \/clips\/\d+\/(like|save)$/,
+  /^(PUT|DELETE) \/users\/me\/following\/\d+$/,
+  /^PATCH \/messages$/,
+  /^PATCH \/users\/me$/,
+  /^DELETE \/clips\/\d+$/,
+  /^DELETE \/comments\/\d+$/,
+  /^DELETE \/sessions\/current$/,
+]
+
+function isReplayable(method, path) {
+  if (method === 'GET' || method === 'HEAD') return true
+  return REPLAYABLE_WRITES.some((pattern) => pattern.test(`${method} ${path}`))
+}
+
+async function send(path, opts = {}, token = accessToken) {
+  const method = opts.method || 'GET'
+  const headers = { ...(opts.headers || {}) }
+  if (opts.body !== undefined) headers['Content-Type'] = 'application/json'
+  if (token) headers.Authorization = `Bearer ${token}`
   if (method !== 'GET' && method !== 'HEAD') {
-    finalHeaders['Idempotency-Key'] = newIdempotencyKey()
+    headers['Idempotency-Key'] = newIdempotencyKey()
   }
 
   let response
   try {
     response = await fetch(`/api${path}`, {
       method,
-      headers: finalHeaders,
-      body: body === undefined ? undefined : JSON.stringify(body),
-      signal,
+      headers,
+      body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
+      signal: opts.signal,
     })
   } catch {
     throw new ApiError('网络异常，请检查连接后重试')
@@ -84,7 +147,12 @@ async function request(path, { method = 'GET', body, headers = {}, signal } = {}
   return readEnvelope(response)
 }
 
+// upload 不进入重放队列：已经收到 401 的上传按失败抛给页面；
+// 若刷新正在进行，则等刷新结束后用新 access token 发送一次（属于首次发送，不是重放）。
 async function upload(path, formData) {
+  if (refreshing) {
+    await refreshing.catch(() => {})
+  }
   const headers = { 'Idempotency-Key': newIdempotencyKey() }
   if (accessToken) headers.Authorization = `Bearer ${accessToken}`
 
@@ -95,6 +163,106 @@ async function upload(path, formData) {
     throw new ApiError('网络异常，上传失败，请重试')
   }
   return readEnvelope(response)
+}
+
+async function request(path, opts = {}) {
+  if (opts.skipAuth) return send(path, opts, '')
+  if (!accessToken) return send(path, opts, '') // 未登录：不带 token，也不刷新
+
+  const method = opts.method || 'GET'
+
+  if (refreshing) {
+    if (opts.ephemeral) return send(path, opts, accessToken) // 即发即忘：不等待、不排队
+    if (!isReplayable(method, path)) {
+      await refreshing // 刷新失败则后续 send 会以未登录身份失败
+      return send(path, opts, accessToken)
+    }
+    return enqueue(path, opts)
+  }
+
+  try {
+    return await send(path, opts, accessToken)
+  } catch (err) {
+    if (!isAuthError(err)) throw err
+    if (opts.ephemeral) throw err // 即发即忘：直接丢弃
+    if (!getRefreshToken()) {
+      clearSession()
+      forceLogin()
+      throw err
+    }
+    if (!isReplayable(method, path)) {
+      await ensureRefresh().catch(() => {}) // 只恢复会话，不重放本次请求
+      throw err
+    }
+    return enqueue(path, opts)
+  }
+}
+
+function enqueue(path, opts) {
+  return new Promise((resolve, reject) => {
+    pending.push({ path, opts, resolve, reject })
+    ensureRefresh()
+  })
+}
+
+// performRefresh 调用刷新接口；429 时保留令牌、退避 1 秒重试一次。
+async function performRefresh() {
+  const refreshToken = getRefreshToken()
+  if (!refreshToken) throw new ApiError('登录状态已失效，请重新登录', 40103)
+  const body = { refresh_token: refreshToken }
+  try {
+    return await send('/sessions/refresh', { method: 'POST', body }, '')
+  } catch (err) {
+    if (err instanceof ApiError && err.code === 429) {
+      await new Promise((resolve) => setTimeout(resolve, RATE_LIMIT_BACKOFF_MS))
+      return send('/sessions/refresh', { method: 'POST', body: { refresh_token: getRefreshToken() } }, '')
+    }
+    throw err
+  }
+}
+
+function ensureRefresh() {
+  if (refreshing) return refreshing
+  refreshing = performRefresh()
+    .then((data) => {
+      applyPair(data)
+      return replayPending()
+    })
+    .catch((err) => {
+      const queued = pending
+      pending = []
+      if (err instanceof ApiError && err.code === 429) {
+        // 限流：保留本地令牌与用户态，只把错误交回给挂起项。
+        queued.forEach((item) => item.reject(err))
+        return
+      }
+      clearSession()
+      queued.forEach((item) => item.reject(err))
+      forceLogin()
+    })
+    .finally(() => {
+      refreshing = null
+    })
+  return refreshing
+}
+
+async function replayPending() {
+  const queued = pending
+  pending = []
+  for (const item of queued) {
+    try {
+      item.resolve(await send(item.path, item.opts, accessToken))
+    } catch (err) {
+      if (isAuthError(err)) {
+        // 重放仍 401：放弃整体会话，剩余请求一并失败。
+        clearSession()
+        queued.forEach((rest) => rest.reject(err))
+        forceLogin()
+        return
+      }
+      item.reject(err) // 业务错误按原样返回
+    }
+  }
 }
 
 function buildQuery(params) {
@@ -108,10 +276,22 @@ function buildQuery(params) {
 
 export const api = {
   register: ({ account, password, nickname }) =>
-    request('/users', { method: 'POST', body: { account, password, nickname: nickname || undefined } }),
+    request('/users', {
+      method: 'POST',
+      body: { account, password, nickname: nickname || undefined },
+      skipAuth: true,
+    }),
 
-  login: ({ account, password }) =>
-    request('/sessions', { method: 'POST', body: { account, password } }),
+  // 登录成功后由 applyPair 统一写入两个键，调用方只消费返回的资料字段。
+  login: async ({ account, password }) => {
+    const data = await request('/sessions', {
+      method: 'POST',
+      body: { account, password },
+      skipAuth: true,
+    })
+    applyPair(data)
+    return data
+  },
 
   logout: () => request('/sessions/current', { method: 'DELETE' }),
 
@@ -188,12 +368,14 @@ export const api = {
   playbackConfig: () => request('/playback-config'),
 
   // 复用既有 QoS 契约：event_id 由客户端生成，后端按其幂等，同一事件重复提交不会重复落库。
-  reportQoS: (report) => request('/playback-qos-reports', { method: 'POST', body: report }),
+  reportQoS: (report) =>
+    request('/playback-qos-reports', { method: 'POST', body: report, ephemeral: true }),
 
   // 展示/播放事件上报：event_type 区分 exposed/play/complete/skip，request_id 关联同一批 Feed 请求。
   reportPlayEvent: ({ clipId, eventId, eventType, scene, requestId, watchMs = 0, completed = false }) =>
     request('/clip-play-events', {
       method: 'POST',
+      ephemeral: true,
       body: {
         clip_id: clipId,
         event_id: eventId,
@@ -207,7 +389,20 @@ export const api = {
 
   savePlaybackConfig: (config) => request('/playback-config', { method: 'PUT', body: config }),
 
-  preloadClips: ({ signal } = {}) => request('/preload-clips', { signal }),
+  preloadClips: ({ signal } = {}) => request('/preload-clips', { signal, ephemeral: true }),
+}
+
+// 多标签页：access 变化时同步内存令牌；refresh 被另一标签页清除时视为会话失效。
+if (typeof window !== 'undefined') {
+  window.addEventListener('storage', (event) => {
+    if (event.key === ACCESS_KEY) {
+      emitSession(event.newValue || '')
+    }
+    if (event.key === REFRESH_KEY && !event.newValue) {
+      clearSession()
+      forceLogin()
+    }
+  })
 }
 
 // 播放配置在登录后拉取一次并缓存；播放结算与配置页共用，避免每次播放都请求。

@@ -27,6 +27,10 @@ type Metrics struct {
 	qosLatency   prometheus.Histogram
 	qosStalls    prometheus.Counter
 	qosCompleted prometheus.Counter
+
+	authRefresh     *prometheus.CounterVec
+	authDenylistErr *prometheus.CounterVec
+	authRevocations prometheus.Counter
 }
 
 // New 按进程组件名创建指标集合并注册到独立注册表；component 取 api 或 worker。
@@ -86,6 +90,18 @@ func New(component string) *Metrics {
 		Name: "pulsefeed_playback_qos_completed_total",
 		Help: "QoS 上报中标记完播的次数，仅统计首次落库的上报。",
 	})
+	authRefresh := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "pulsefeed_auth_refresh_total",
+		Help: "刷新令牌请求次数，按结果（ok/reused/replay/grace_miss/invalid/limited/error）区分。",
+	}, []string{"result"})
+	authDenylistErr := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "pulsefeed_auth_denylist_errors_total",
+		Help: "拒绝名单访问失败次数，按结果区分。",
+	}, []string{"result"})
+	authRevocations := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "pulsefeed_auth_revocations_total",
+		Help: "因登出或重放被吊销的刷新令牌行数。",
+	})
 
 	registry.MustRegister(
 		up,
@@ -99,21 +115,27 @@ func New(component string) *Metrics {
 		qosLatency,
 		qosStalls,
 		qosCompleted,
+		authRefresh,
+		authDenylistErr,
+		authRevocations,
 	)
 
 	return &Metrics{
-		registry:     registry,
-		up:           up,
-		httpRequests: httpRequests,
-		httpDuration: httpDuration,
-		feedRequests: feedRequests,
-		feedDuration: feedDuration,
-		cacheEvents:  cacheEvents,
-		workerEvents: workerEvents,
-		qosReports:   qosReports,
-		qosLatency:   qosLatency,
-		qosStalls:    qosStalls,
-		qosCompleted: qosCompleted,
+		registry:        registry,
+		up:              up,
+		httpRequests:    httpRequests,
+		httpDuration:    httpDuration,
+		feedRequests:    feedRequests,
+		feedDuration:    feedDuration,
+		cacheEvents:     cacheEvents,
+		workerEvents:    workerEvents,
+		qosReports:      qosReports,
+		qosLatency:      qosLatency,
+		qosStalls:       qosStalls,
+		qosCompleted:    qosCompleted,
+		authRefresh:     authRefresh,
+		authDenylistErr: authDenylistErr,
+		authRevocations: authRevocations,
 	}
 }
 
@@ -168,6 +190,30 @@ func (m *Metrics) ObserveQoS(result string, latencyMS, stallCount int, completed
 	if completed {
 		m.qosCompleted.Inc()
 	}
+}
+
+// ObserveRefresh 记录一次刷新令牌请求的结果分类。
+func (m *Metrics) ObserveRefresh(result string) {
+	if m == nil {
+		return
+	}
+	m.authRefresh.WithLabelValues(result).Inc()
+}
+
+// ObserveDenylistError 记录一次拒绝名单访问失败。
+func (m *Metrics) ObserveDenylistError(result string) {
+	if m == nil {
+		return
+	}
+	m.authDenylistErr.WithLabelValues(result).Inc()
+}
+
+// ObserveRevocations 累加被吊销的刷新令牌行数。
+func (m *Metrics) ObserveRevocations(count int64) {
+	if m == nil || count <= 0 {
+		return
+	}
+	m.authRevocations.Add(float64(count))
 }
 
 // Handler 返回当前注册表的 /metrics HTTP 处理器。

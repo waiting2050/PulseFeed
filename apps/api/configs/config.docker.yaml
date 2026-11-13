@@ -2,8 +2,11 @@
 port: 8090
 
 jwt:
-  secret: pulsefeed-docker-secret
-  access_ttl: 15m
+  secret: pulsefeed-compose-dev-secret-9c3a8b1d2e6f
+  access_ttl: 30m
+  refresh_ttl: 336h
+  refresh_grace: 30s
+  leeway: 30s
 
 internal:
   token: pulsefeed-internal-token

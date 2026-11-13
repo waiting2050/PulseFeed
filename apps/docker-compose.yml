@@ -56,6 +56,9 @@ services:
       context: ./api
       dockerfile: Dockerfile
     command: ["/app/pulsefeed-api", "-config", "/app/configs/config.docker.yaml"]
+    environment:
+      # 优先于 YAML：留空时回落到 config.docker.yaml 的开发密钥；生产必须显式注入。
+      PULSEFEED_JWT_SECRET: ${PULSEFEED_JWT_SECRET:-}
     depends_on:
       mysql:
         condition: service_healthy
@@ -79,6 +82,8 @@ services:
       context: ./api
       dockerfile: Dockerfile
     command: ["/app/pulsefeed-worker", "-config", "/app/configs/config.docker.yaml", "-metrics-addr", ":9092"]
+    environment:
+      PULSEFEED_JWT_SECRET: ${PULSEFEED_JWT_SECRET:-}
     # 第二道保险：即使 MQ 初始化仍偶发失败，容器也会自动重启而不是停在 Exited。
     restart: unless-stopped
     depends_on:

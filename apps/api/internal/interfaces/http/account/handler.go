@@ -5,12 +5,22 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 
 	appaccount "pulsefeed/internal/application/account"
 	domainaccount "pulsefeed/internal/domain/account"
 	"pulsefeed/internal/interfaces/http/middleware"
 
 	"github.com/gin-gonic/gin"
+)
+
+const (
+	// codeAccessExpired 表示 access token 过期，前端触发一次刷新。
+	codeAccessExpired = 40101
+	// codeAccessInvalid 表示 access token 无效或命中拒绝名单。
+	codeAccessInvalid = 40102
+	// codeSessionInvalid 表示 refresh token 失效，需要重新登录。
+	codeSessionInvalid = 40103
 )
 
 // Handler 聚合账号相关端点。
@@ -38,35 +48,49 @@ func (h *Handler) Register(c *gin.Context) {
 	ok(c, http.StatusCreated, toProfileResponse(profile))
 }
 
-// Login 处理 POST /api/sessions，成功返回 200 与访问令牌。
+// Login 处理 POST /api/sessions，成功返回 200 与双令牌会话。
 func (h *Handler) Login(c *gin.Context) {
 	var req loginRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		fail(c, http.StatusBadRequest, "请求体非法")
 		return
 	}
-	session, err := h.service.Login(c.Request.Context(), req.Account, req.Password)
+	session, err := h.service.Login(c.Request.Context(), req.Account, req.Password, deviceLabel(c))
 	if err != nil {
 		mapError(c, err)
 		return
 	}
-	ok(c, http.StatusOK, sessionResponse{
-		AccessToken: session.AccessToken,
-		TokenType:   "Bearer",
-		ExpiresIn:   session.ExpiresIn,
-		UserID:      session.UserID,
-		Account:     session.Account,
-	})
+	ok(c, http.StatusOK, toSessionResponse(session, false))
 }
 
-// Logout 处理 DELETE /api/sessions/current，无状态登出返回 204。
+// Refresh 处理 POST /api/sessions/refresh：用 refresh token 换新的一对令牌。
+func (h *Handler) Refresh(c *gin.Context) {
+	var req refreshRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		fail(c, http.StatusBadRequest, "请求体非法")
+		return
+	}
+	if req.RefreshToken == "" {
+		fail(c, http.StatusBadRequest, "refresh_token 不能为空")
+		return
+	}
+	session, err := h.service.Refresh(c.Request.Context(), req.RefreshToken, c.ClientIP())
+	if err != nil {
+		mapSessionError(c, err)
+		return
+	}
+	ok(c, http.StatusOK, toSessionResponse(session, true))
+}
+
+// Logout 处理 DELETE /api/sessions/current：吊销当前会话链并把当前 access token 的 jti 写入拒绝名单。
 func (h *Handler) Logout(c *gin.Context) {
 	userID, authed := middleware.UserIDFromContext(c)
 	if !authed {
-		fail(c, http.StatusUnauthorized, "missing or invalid token")
+		failCode(c, http.StatusUnauthorized, codeAccessInvalid, "missing or invalid token")
 		return
 	}
-	if err := h.service.Logout(c.Request.Context(), userID); err != nil {
+	info, _ := middleware.AccessInfoFrom(c)
+	if err := h.service.Logout(c.Request.Context(), userID, info.FamilyID, info.JTI, info.ExpiresAt); err != nil {
 		mapError(c, err)
 		return
 	}
@@ -77,7 +101,7 @@ func (h *Handler) Logout(c *gin.Context) {
 func (h *Handler) Me(c *gin.Context) {
 	userID, authed := middleware.UserIDFromContext(c)
 	if !authed {
-		fail(c, http.StatusUnauthorized, "missing or invalid token")
+		failCode(c, http.StatusUnauthorized, codeAccessInvalid, "missing or invalid token")
 		return
 	}
 	profile, err := h.service.Me(c.Request.Context(), userID)
@@ -92,7 +116,7 @@ func (h *Handler) Me(c *gin.Context) {
 func (h *Handler) UpdateMe(c *gin.Context) {
 	userID, authed := middleware.UserIDFromContext(c)
 	if !authed {
-		fail(c, http.StatusUnauthorized, "missing or invalid token")
+		failCode(c, http.StatusUnauthorized, codeAccessInvalid, "missing or invalid token")
 		return
 	}
 	var req updateProfileRequest
@@ -134,6 +158,37 @@ func toProfileResponse(p *appaccount.Profile) profileResponse {
 	}
 }
 
+// toSessionResponse 将会话视图转换为传输层响应；includeReused 仅在刷新接口为 true。
+func toSessionResponse(s *appaccount.Session, includeReused bool) sessionResponse {
+	resp := sessionResponse{
+		AccessToken:      s.AccessToken,
+		RefreshToken:     s.RefreshToken,
+		TokenType:        "Bearer",
+		ExpiresIn:        s.ExpiresIn,
+		RefreshExpiresIn: s.RefreshExpiresIn,
+		UserID:           s.UserID,
+		Account:          s.Account,
+	}
+	if includeReused {
+		reused := s.Reused
+		resp.Reused = &reused
+	}
+	return resp
+}
+
+// deviceLabel 取 User-Agent 作为设备标签，截断到 128 个字符；缺失时写 unknown。
+func deviceLabel(c *gin.Context) string {
+	ua := strings.TrimSpace(c.GetHeader("User-Agent"))
+	if ua == "" {
+		return "unknown"
+	}
+	runes := []rune(ua)
+	if len(runes) > 128 {
+		ua = string(runes[:128])
+	}
+	return ua
+}
+
 // mapError 将领域错误映射为 HTTP 状态码：400 参数非法、401 凭证错误、404 不存在、409 冲突。
 func mapError(c *gin.Context, err error) {
 	switch {
@@ -154,6 +209,18 @@ func mapError(c *gin.Context, err error) {
 	}
 }
 
+// mapSessionError 将会话接口错误映射为业务码：40103 会话失效、429 限流、其余 500。
+func mapSessionError(c *gin.Context, err error) {
+	switch {
+	case errors.Is(err, domainaccount.ErrSessionInvalid):
+		failCode(c, http.StatusUnauthorized, codeSessionInvalid, err.Error())
+	case errors.Is(err, domainaccount.ErrRefreshLimited):
+		failCode(c, http.StatusTooManyRequests, http.StatusTooManyRequests, err.Error())
+	default:
+		fail(c, http.StatusInternalServerError, "内部错误")
+	}
+}
+
 // ok 以统一信封返回成功响应。
 func ok(c *gin.Context, status int, data any) {
 	c.JSON(status, gin.H{"code": 0, "message": "ok", "data": data})
@@ -161,5 +228,10 @@ func ok(c *gin.Context, status int, data any) {
 
 // fail 以统一信封返回错误响应，code 与 HTTP 状态码保持一致。
 func fail(c *gin.Context, status int, message string) {
-	c.JSON(status, gin.H{"code": status, "message": message})
+	failCode(c, status, status, message)
+}
+
+// failCode 以统一信封返回错误响应，code 可与 HTTP 状态码不同（会话接口的 401xx）。
+func failCode(c *gin.Context, status, code int, message string) {
+	c.JSON(status, gin.H{"code": code, "message": message})
 }
