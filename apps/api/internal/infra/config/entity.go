@@ -5,12 +5,15 @@ import "time"
 
 // Config 是配置文件的根结构。
 type Config struct {
-	Port     int            `yaml:"port"`
-	JWT      JWTConfig      `yaml:"jwt"`
-	Internal InternalConfig `yaml:"internal"`
-	Database DatabaseConfig `yaml:"database"`
-	Redis    RedisConfig    `yaml:"redis"`
-	RabbitMQ RabbitMQConfig `yaml:"rabbitmq"`
+	Port int `yaml:"port"`
+	// TrustedProxies 是可信反向代理的 IP/CIDR 列表；只有来自这些地址的
+	// X-Forwarded-For / X-Real-IP 才会被采信，为空表示直连部署不信任任何代理头。
+	TrustedProxies []string       `yaml:"trusted_proxies"`
+	JWT            JWTConfig      `yaml:"jwt"`
+	Internal       InternalConfig `yaml:"internal"`
+	Database       DatabaseConfig `yaml:"database"`
+	Redis          RedisConfig    `yaml:"redis"`
+	RabbitMQ       RabbitMQConfig `yaml:"rabbitmq"`
 }
 
 // JWTConfig 描述令牌签发参数：访问令牌有效期、刷新令牌有效期、宽限窗口与时钟容差。

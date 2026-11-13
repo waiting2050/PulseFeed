@@ -1,5 +1,11 @@
 port: 8090
 
+# 可信反向代理：只有来自这些地址的 X-Forwarded-For / X-Real-IP 才会被用于解析客户端 IP；
+# 为空表示直连部署，仅使用 TCP 对端地址。登录/刷新限流依赖真实 IP，不要放行任意来源。
+trusted_proxies:
+  - 127.0.0.1
+  - ::1
+
 jwt:
   secret: pulsefeed-local-dev-secret-4f8c2b7e9a1d
   access_ttl: 30m

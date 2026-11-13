@@ -21,6 +21,8 @@ const (
 	codeAccessInvalid = 40102
 	// codeSessionInvalid 表示 refresh token 失效，需要重新登录。
 	codeSessionInvalid = 40103
+	// loginRetryAfterSeconds 是登录限流触发后建议的退避秒数，与限流窗口一致。
+	loginRetryAfterSeconds = "60"
 )
 
 // Handler 聚合账号相关端点。
@@ -55,7 +57,7 @@ func (h *Handler) Login(c *gin.Context) {
 		fail(c, http.StatusBadRequest, "请求体非法")
 		return
 	}
-	session, err := h.service.Login(c.Request.Context(), req.Account, req.Password, deviceLabel(c))
+	session, err := h.service.Login(c.Request.Context(), req.Account, req.Password, deviceLabel(c), c.ClientIP())
 	if err != nil {
 		mapError(c, err)
 		return
@@ -189,7 +191,7 @@ func deviceLabel(c *gin.Context) string {
 	return ua
 }
 
-// mapError 将领域错误映射为 HTTP 状态码：400 参数非法、401 凭证错误、404 不存在、409 冲突。
+// mapError 将领域错误映射为 HTTP 状态码：400 参数非法、401 凭证错误、404 不存在、409 冲突、429 限流。
 func mapError(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, domainaccount.ErrInvalidAccountName),
@@ -204,6 +206,10 @@ func mapError(c *gin.Context, err error) {
 		fail(c, http.StatusNotFound, err.Error())
 	case errors.Is(err, domainaccount.ErrAccountExists):
 		fail(c, http.StatusConflict, err.Error())
+	case errors.Is(err, domainaccount.ErrLoginLimited):
+		// 登录限流按固定 60 秒窗口计数，显式告知客户端退避时长。
+		c.Header("Retry-After", loginRetryAfterSeconds)
+		fail(c, http.StatusTooManyRequests, err.Error())
 	default:
 		fail(c, http.StatusInternalServerError, "内部错误")
 	}

@@ -1,6 +1,11 @@
 # Docker Compose 专用配置：服务名即主机名（mysql/redis/rabbitmq），账号与 compose 环境变量保持一致。
 port: 8090
 
+# 可信反向代理：compose 内 nginx 容器反代 /api，容器地址落在默认 bridge 网段。
+# 仅信任该网段，公网来源伪造的 X-Forwarded-For 不会被采信。
+trusted_proxies:
+  - 172.16.0.0/12
+
 jwt:
   secret: pulsefeed-compose-dev-secret-9c3a8b1d2e6f
   access_ttl: 30m

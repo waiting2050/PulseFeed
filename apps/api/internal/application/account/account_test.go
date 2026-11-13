@@ -112,7 +112,8 @@ func (f *accountFakeIssuer) AccessTTL() time.Duration {
 
 // accountFakeSessions 是内存版刷新令牌仓储，登录用例只需要 Create 生效。
 type accountFakeSessions struct {
-	created []*domainaccount.RefreshToken
+	created           []*domainaccount.RefreshToken
+	revokeFamilyCalls int
 }
 
 func (f *accountFakeSessions) Create(_ context.Context, token *domainaccount.RefreshToken) error {
@@ -134,11 +135,88 @@ func (f *accountFakeSessions) FindActiveByHash(_ context.Context, _ string) (*do
 }
 
 func (f *accountFakeSessions) RevokeFamily(_ context.Context, _ int64, _ string, _ string) (int64, error) {
-	return 0, nil
+	f.revokeFamilyCalls++
+	return 1, nil
 }
 
 func (f *accountFakeSessions) RevokeAll(_ context.Context, _ int64, _ string) (int64, error) {
 	return 0, nil
+}
+
+// accountFakeLoginLimiter 按配置放行或报错，并记录各维度调用次数。
+type accountFakeLoginLimiter struct {
+	ipAllowed   bool
+	acctAllowed bool
+	err         error
+	ipCalls     int
+	acctCalls   int
+}
+
+func (f *accountFakeLoginLimiter) AllowIP(_ context.Context, _ string) (bool, error) {
+	f.ipCalls++
+	if f.err != nil {
+		return true, f.err
+	}
+	return f.ipAllowed, nil
+}
+
+func (f *accountFakeLoginLimiter) AllowAccount(_ context.Context, _ string) (bool, error) {
+	f.acctCalls++
+	if f.err != nil {
+		return true, f.err
+	}
+	return f.acctAllowed, nil
+}
+
+// accountFakeDenylist 记录写入的 jti/family 与 TTL，并可按需返回错误。
+type accountFakeDenylist struct {
+	tokens   map[string]time.Duration
+	families map[string]time.Duration
+	err      error
+}
+
+func newAccountFakeDenylist() *accountFakeDenylist {
+	return &accountFakeDenylist{
+		tokens:   make(map[string]time.Duration),
+		families: make(map[string]time.Duration),
+	}
+}
+
+func (f *accountFakeDenylist) Blocked(_ context.Context, _, _ string) (bool, error) {
+	return false, nil
+}
+
+func (f *accountFakeDenylist) AddToken(_ context.Context, jti string, ttl time.Duration) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.tokens[jti] = ttl
+	return nil
+}
+
+func (f *accountFakeDenylist) AddFamily(_ context.Context, familyID string, ttl time.Duration) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.families[familyID] = ttl
+	return nil
+}
+
+// accountFakeMetrics 记录拒绝名单与登录限流降级。
+type accountFakeMetrics struct {
+	denylistErrors     []string
+	loginLimiterErrors []string
+}
+
+func (f *accountFakeMetrics) ObserveRefresh(string)    {}
+func (f *accountFakeMetrics) ObserveRevocations(int64) {}
+
+func (f *accountFakeMetrics) ObserveDenylistError(result string) {
+	f.denylistErrors = append(f.denylistErrors, result)
+}
+
+func (f *accountFakeMetrics) ObserveLoginLimiterError(scope string) {
+	f.loginLimiterErrors = append(f.loginLimiterErrors, scope)
 }
 
 // newAccountService 装配内存仓储、固定令牌签发器与刷新令牌仓储。
@@ -276,7 +354,7 @@ func TestAccountLoginIssuesToken(t *testing.T) {
 	if _, err := svc.Register(ctx, "BobChen", "secret-123", ""); err != nil {
 		t.Fatalf("注册不应失败: %v", err)
 	}
-	session, err := svc.Login(ctx, "  BOBCHEN  ", "secret-123", "test-agent")
+	session, err := svc.Login(ctx, "  BOBCHEN  ", "secret-123", "test-agent", "203.0.113.9")
 	if err != nil {
 		t.Fatalf("正确凭证登录不应失败: %v", err)
 	}
@@ -302,7 +380,7 @@ func TestAccountLoginRejectsWrongPassword(t *testing.T) {
 	if _, err := svc.Register(ctx, "alice", "secret-123", ""); err != nil {
 		t.Fatalf("注册不应失败: %v", err)
 	}
-	session, err := svc.Login(ctx, "alice", "wrong-secret", "test-agent")
+	session, err := svc.Login(ctx, "alice", "wrong-secret", "test-agent", "203.0.113.9")
 	if !errors.Is(err, domainaccount.ErrInvalidCredentials) {
 		t.Fatalf("错误密码期望 ErrInvalidCredentials，实际 %v", err)
 	}
@@ -322,7 +400,7 @@ func TestAccountLoginRejectsDisabledAccount(t *testing.T) {
 	// 模拟运营侧将账号状态改为禁用（非 StatusNormal）。
 	repo.accounts["alice"].Status = 2
 
-	session, err := svc.Login(ctx, "alice", "secret-123", "test-agent")
+	session, err := svc.Login(ctx, "alice", "secret-123", "test-agent", "203.0.113.9")
 	if !errors.Is(err, domainaccount.ErrAccountDisabled) {
 		t.Fatalf("禁用账号期望 ErrAccountDisabled，实际 %v", err)
 	}
@@ -339,7 +417,7 @@ func TestAccountLoginHidesUnknownAccount(t *testing.T) {
 	ctx := context.Background()
 	svc, repo, _ := newAccountService()
 
-	_, err := svc.Login(ctx, "nobody", "secret-123", "test-agent")
+	_, err := svc.Login(ctx, "nobody", "secret-123", "test-agent", "203.0.113.9")
 	if !errors.Is(err, domainaccount.ErrInvalidCredentials) {
 		t.Fatalf("不存在账号期望 ErrInvalidCredentials，实际 %v", err)
 	}
@@ -356,7 +434,7 @@ func TestAccountLoginRequiresIssuer(t *testing.T) {
 	ctx := context.Background()
 	svc := appaccount.New(newAccountFakeRepo())
 
-	session, err := svc.Login(ctx, "alice", "secret-123", "test-agent")
+	session, err := svc.Login(ctx, "alice", "secret-123", "test-agent", "203.0.113.9")
 	if err == nil {
 		t.Fatalf("未注入 issuer 时登录应失败")
 	}
@@ -438,5 +516,158 @@ func TestAccountUpdateMeAppliesPartialFields(t *testing.T) {
 
 	if _, err := svc.UpdateMe(ctx, 99, &nickname, nil, nil); !errors.Is(err, domainaccount.ErrAccountNotFound) {
 		t.Fatalf("不存在用户期望 ErrAccountNotFound，实际 %v", err)
+	}
+}
+
+// TestAccountLoginRejectsLimitedRequest 验证限流命中在查库与密码校验之前返回，避免消耗数据库与 bcrypt。
+func TestAccountLoginRejectsLimitedRequest(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		name    string
+		limiter *accountFakeLoginLimiter
+	}{
+		{name: "IP 维度超限", limiter: &accountFakeLoginLimiter{ipAllowed: false, acctAllowed: true}},
+		{name: "账号维度超限", limiter: &accountFakeLoginLimiter{ipAllowed: true, acctAllowed: false}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := newAccountFakeRepo()
+			svc := appaccount.New(repo,
+				appaccount.WithTokenIssuer(&accountFakeIssuer{token: "token-abc", ttl: time.Minute}),
+				appaccount.WithSessionRepository(&accountFakeSessions{}),
+				appaccount.WithLoginLimiter(tt.limiter),
+			)
+			_, err := svc.Login(ctx, "alice", "secret-123", "test-agent", "203.0.113.9")
+			if !errors.Is(err, domainaccount.ErrLoginLimited) {
+				t.Fatalf("期望 ErrLoginLimited，实际 %v", err)
+			}
+			if repo.findCalls != 0 {
+				t.Fatalf("限流命中不应查询账号，实际 %d 次", repo.findCalls)
+			}
+			wantAcctCalls := 0
+			if tt.limiter.ipAllowed {
+				wantAcctCalls = 1
+			}
+			if tt.limiter.acctCalls != wantAcctCalls {
+				t.Fatalf("账号维度调用次数期望 %d，实际 %d", wantAcctCalls, tt.limiter.acctCalls)
+			}
+		})
+	}
+}
+
+// TestAccountLoginLimiterFailsOpen 验证 Redis 故障时按放行处理，并记录降级指标。
+func TestAccountLoginLimiterFailsOpen(t *testing.T) {
+	ctx := context.Background()
+	repo := newAccountFakeRepo()
+	issuer := &accountFakeIssuer{token: "token-abc", ttl: time.Minute}
+	limiter := &accountFakeLoginLimiter{err: errors.New("redis down")}
+	metrics := &accountFakeMetrics{}
+	svc := appaccount.New(repo,
+		appaccount.WithTokenIssuer(issuer),
+		appaccount.WithSessionRepository(&accountFakeSessions{}),
+		appaccount.WithLoginLimiter(limiter),
+		appaccount.WithMetrics(metrics),
+	)
+
+	if _, err := svc.Register(ctx, "alice", "secret-123", ""); err != nil {
+		t.Fatalf("注册不应失败: %v", err)
+	}
+	session, err := svc.Login(ctx, "alice", "secret-123", "test-agent", "203.0.113.9")
+	if err != nil {
+		t.Fatalf("Redis 故障时登录应 fail-open，实际 %v", err)
+	}
+	if session == nil || session.AccessToken != "token-abc" {
+		t.Fatalf("fail-open 后应正常签发会话: %+v", session)
+	}
+	if len(metrics.loginLimiterErrors) != 2 ||
+		metrics.loginLimiterErrors[0] != "ip" || metrics.loginLimiterErrors[1] != "account" {
+		t.Fatalf("应记录 ip/account 两次降级指标，实际 %v", metrics.loginLimiterErrors)
+	}
+}
+
+// TestAccountLogoutDeniesWholeFamily 验证登出同时写 jti 与会话链，TTL 覆盖 access 有效期和容差。
+func TestAccountLogoutDeniesWholeFamily(t *testing.T) {
+	ctx := context.Background()
+	issuer := &accountFakeIssuer{ttl: 15 * time.Minute}
+	sessions := &accountFakeSessions{}
+	denylist := newAccountFakeDenylist()
+	svc := appaccount.New(newAccountFakeRepo(),
+		appaccount.WithTokenIssuer(issuer),
+		appaccount.WithSessionRepository(sessions),
+		appaccount.WithAccessDenylist(denylist),
+		appaccount.WithAccessPolicy(30*time.Second),
+	)
+
+	if err := svc.Logout(ctx, 1, "family-1", "jti-1", time.Now().Add(10*time.Minute)); err != nil {
+		t.Fatalf("登出不应失败: %v", err)
+	}
+	if sessions.revokeFamilyCalls != 1 {
+		t.Fatalf("应吊销一次会话链，实际 %d 次", sessions.revokeFamilyCalls)
+	}
+	tokenTTL, ok := denylist.tokens["jti-1"]
+	if !ok {
+		t.Fatalf("jti 未写入拒绝名单")
+	}
+	if tokenTTL < 10*time.Minute || tokenTTL > 11*time.Minute {
+		t.Fatalf("jti TTL 应约为剩余有效期加 30s 容差，实际 %v", tokenTTL)
+	}
+	if familyTTL := denylist.families["family-1"]; familyTTL != 15*time.Minute+30*time.Second {
+		t.Fatalf("family TTL 应为 access TTL 加容差，实际 %v", familyTTL)
+	}
+}
+
+// TestAccountLogoutWithExpiredTokenStillBlocks 验证宽限期内已过期令牌登出仍会写拒绝名单（TTL<=0 不跳过）。
+func TestAccountLogoutWithExpiredTokenStillBlocks(t *testing.T) {
+	ctx := context.Background()
+	sessions := &accountFakeSessions{}
+	denylist := newAccountFakeDenylist()
+	svc := appaccount.New(newAccountFakeRepo(),
+		appaccount.WithTokenIssuer(&accountFakeIssuer{ttl: 15 * time.Minute}),
+		appaccount.WithSessionRepository(sessions),
+		appaccount.WithAccessDenylist(denylist),
+		appaccount.WithAccessPolicy(30*time.Second),
+	)
+
+	if err := svc.Logout(ctx, 1, "family-expired", "jti-expired", time.Now().Add(-time.Minute)); err != nil {
+		t.Fatalf("过期令牌登出不应失败: %v", err)
+	}
+	tokenTTL, ok := denylist.tokens["jti-expired"]
+	if !ok {
+		t.Fatalf("TTL<=0 的 jti 也必须写入拒绝名单")
+	}
+	if tokenTTL >= 0 {
+		t.Fatalf("该用例期望 TTL 为负以验证缓存层钳制，实际 %v", tokenTTL)
+	}
+	if _, ok := denylist.families["family-expired"]; !ok {
+		t.Fatalf("会话链拒绝键缺失")
+	}
+}
+
+// TestAccountLogoutReportsDenylistWriteFailure 验证拒绝名单写失败不阻塞登出，但记录 write_error 指标。
+func TestAccountLogoutReportsDenylistWriteFailure(t *testing.T) {
+	ctx := context.Background()
+	metrics := &accountFakeMetrics{}
+	denylist := newAccountFakeDenylist()
+	denylist.err = errors.New("redis down")
+	svc := appaccount.New(newAccountFakeRepo(),
+		appaccount.WithTokenIssuer(&accountFakeIssuer{ttl: 15 * time.Minute}),
+		appaccount.WithSessionRepository(&accountFakeSessions{}),
+		appaccount.WithAccessDenylist(denylist),
+		appaccount.WithAccessPolicy(30*time.Second),
+		appaccount.WithMetrics(metrics),
+	)
+
+	if err := svc.Logout(ctx, 1, "family-1", "jti-1", time.Now().Add(10*time.Minute)); err != nil {
+		t.Fatalf("拒绝名单写失败不应阻塞登出: %v", err)
+	}
+	if len(metrics.denylistErrors) != 2 {
+		t.Fatalf("jti 与 family 写失败应各记一次指标，实际 %v", metrics.denylistErrors)
+	}
+	for _, result := range metrics.denylistErrors {
+		if result != "write_error" {
+			t.Fatalf("指标 label 期望 write_error，实际 %q", result)
+		}
 	}
 }

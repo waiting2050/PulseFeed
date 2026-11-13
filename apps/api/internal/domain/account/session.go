@@ -88,10 +88,19 @@ type RefreshLimiter interface {
 	AllowUser(ctx context.Context, userID int64) (bool, error)
 }
 
+// LoginLimiter 是登录接口的双层限流端口：IP 维度防撞库，账号维度防单账号爆破。
+// Redis 不可用时实现方应 fail-open，由调用方记录告警与指标。
+type LoginLimiter interface {
+	AllowIP(ctx context.Context, clientIP string) (bool, error)
+	AllowAccount(ctx context.Context, account string) (bool, error)
+}
+
 // AccessDenylist 是登出后拒绝名单的读取与写入端口。
 type AccessDenylist interface {
-	// Blocked 判断 jti 是否已被拒绝；Redis 不可用时返回 (false, nil) 实现 fail-open。
-	Blocked(ctx context.Context, jti string) (bool, error)
-	// Add 将 jti 写入拒绝名单并设置剩余有效期。
-	Add(ctx context.Context, jti string, ttl time.Duration) error
+	// Blocked 判断 jti 或会话链是否已被拒绝；任一命中即视为已吊销，Redis 不可用时返回 (false, nil) 实现 fail-open。
+	Blocked(ctx context.Context, jti, familyID string) (bool, error)
+	// AddToken 将单枚 access token 写入拒绝名单；TTL 必须覆盖其剩余有效期与中间件容差。
+	AddToken(ctx context.Context, jti string, ttl time.Duration) error
+	// AddFamily 将整条会话链写入拒绝名单，使该链此前轮换出的全部 access token 同时失效。
+	AddFamily(ctx context.Context, familyID string, ttl time.Duration) error
 }

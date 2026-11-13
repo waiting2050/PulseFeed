@@ -30,6 +30,7 @@ type Metrics struct {
 
 	authRefresh     *prometheus.CounterVec
 	authDenylistErr *prometheus.CounterVec
+	authLoginErr    *prometheus.CounterVec
 	authRevocations prometheus.Counter
 }
 
@@ -96,8 +97,12 @@ func New(component string) *Metrics {
 	}, []string{"result"})
 	authDenylistErr := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "pulsefeed_auth_denylist_errors_total",
-		Help: "拒绝名单访问失败次数，按结果区分。",
+		Help: "拒绝名单访问失败次数，按读写（read_error/write_error）区分。",
 	}, []string{"result"})
+	authLoginErr := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "pulsefeed_auth_login_limiter_errors_total",
+		Help: "登录限流降级次数（Redis 不可用 fail-open），按 IP/账号维度区分。",
+	}, []string{"scope"})
 	authRevocations := prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "pulsefeed_auth_revocations_total",
 		Help: "因登出或重放被吊销的刷新令牌行数。",
@@ -117,6 +122,7 @@ func New(component string) *Metrics {
 		qosCompleted,
 		authRefresh,
 		authDenylistErr,
+		authLoginErr,
 		authRevocations,
 	)
 
@@ -135,6 +141,7 @@ func New(component string) *Metrics {
 		qosCompleted:    qosCompleted,
 		authRefresh:     authRefresh,
 		authDenylistErr: authDenylistErr,
+		authLoginErr:    authLoginErr,
 		authRevocations: authRevocations,
 	}
 }
@@ -206,6 +213,14 @@ func (m *Metrics) ObserveDenylistError(result string) {
 		return
 	}
 	m.authDenylistErr.WithLabelValues(result).Inc()
+}
+
+// ObserveLoginLimiterError 记录一次登录限流降级（Redis 不可用时 fail-open）。
+func (m *Metrics) ObserveLoginLimiterError(scope string) {
+	if m == nil {
+		return
+	}
+	m.authLoginErr.WithLabelValues(scope).Inc()
 }
 
 // ObserveRevocations 累加被吊销的刷新令牌行数。

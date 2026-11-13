@@ -91,8 +91,10 @@ func newSessionServer(t *testing.T) *sessionServer {
 		appaccount.WithSessionRepository(sessions),
 		appaccount.WithRotationCache(infracache.NewRotationCache(client)),
 		appaccount.WithRefreshLimiter(infracache.NewRefreshGuard(client)),
+		appaccount.WithLoginLimiter(infracache.NewLoginGuard(client)),
 		appaccount.WithAccessDenylist(denylist),
 		appaccount.WithRefreshPolicy(14*24*time.Hour, 30*time.Second),
+		appaccount.WithAccessPolicy(30*time.Second),
 	)
 	handler := httpaccount.New(service)
 
@@ -518,14 +520,138 @@ func TestRefreshRateLimit(t *testing.T) {
 	}
 }
 
+// TestLoginRateLimitByIP 验证登录按来源 IP 限流：窗口内第 31 次返回 429 并带 Retry-After。
+func TestLoginRateLimitByIP(t *testing.T) {
+	s := newSessionServer(t)
+
+	for i := 1; i <= 30; i++ {
+		rec, env := postJSON(s.engine, "/api/sessions", map[string]any{
+			"account":  fmt.Sprintf("spray-%02d", i),
+			"password": "wrong-password",
+		}, "")
+		assertEnvelope(t, rec, env, http.StatusUnauthorized, http.StatusUnauthorized)
+	}
+
+	rec, env := postJSON(s.engine, "/api/sessions", map[string]any{
+		"account":  "spray-31",
+		"password": "wrong-password",
+	}, "")
+	assertEnvelope(t, rec, env, http.StatusTooManyRequests, http.StatusTooManyRequests)
+	if got := rec.Header().Get("Retry-After"); got != "60" {
+		t.Fatalf("Retry-After 期望 60，实际 %q", got)
+	}
+
+	keys, err := s.redis.Keys(context.Background(), "pf:v1:auth:login_ip:*").Result()
+	if err != nil || len(keys) == 0 {
+		t.Fatalf("IP 限流计数键缺失: %v", err)
+	}
+}
+
+// TestLoginRateLimitByAccount 验证登录按账号限流：窗口内第 11 次返回 429 并带 Retry-After。
+func TestLoginRateLimitByAccount(t *testing.T) {
+	s := newSessionServer(t)
+	account := uniqueKey("login-limit-account")
+	s.registerUser(t, account)
+
+	for i := 1; i <= 10; i++ {
+		rec, env := postJSON(s.engine, "/api/sessions", map[string]any{
+			"account":  account,
+			"password": "wrong-password",
+		}, "")
+		assertEnvelope(t, rec, env, http.StatusUnauthorized, http.StatusUnauthorized)
+	}
+
+	rec, env := postJSON(s.engine, "/api/sessions", map[string]any{
+		"account":  account,
+		"password": "wrong-password",
+	}, "")
+	assertEnvelope(t, rec, env, http.StatusTooManyRequests, http.StatusTooManyRequests)
+	if got := rec.Header().Get("Retry-After"); got != "60" {
+		t.Fatalf("Retry-After 期望 60，实际 %q", got)
+	}
+
+	keys, err := s.redis.Keys(context.Background(), "pf:v1:auth:login_acct:*").Result()
+	if err != nil || len(keys) == 0 {
+		t.Fatalf("账号限流计数键缺失: %v", err)
+	}
+}
+
+// TestLogoutDeniesAllFamilyAccessTokens 验证登出后同一 family 内此前轮换出的 access token 全部失效。
+func TestLogoutDeniesAllFamilyAccessTokens(t *testing.T) {
+	s := newSessionServer(t)
+	account := uniqueKey("logout-family")
+	s.registerUser(t, account)
+	first := s.login(t, account)
+
+	rec, env := s.refresh(first.RefreshToken)
+	assertEnvelope(t, rec, env, http.StatusOK, 0)
+	second := decodeSession(t, env.Data)
+	if second.AccessToken == first.AccessToken {
+		t.Fatalf("轮换后应签发新的 access token")
+	}
+
+	// 用轮换后的新令牌登出，登录时签发的旧令牌也必须一并失效。
+	rec, _ = send(s.engine, http.MethodDelete, "/api/sessions/current", second.AccessToken)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("登出期望 204，实际 %d，body=%s", rec.Code, rec.Body.String())
+	}
+
+	for _, token := range []string{first.AccessToken, second.AccessToken} {
+		rec, env = send(s.engine, http.MethodGet, "/api/users/me", token)
+		assertEnvelope(t, rec, env, http.StatusUnauthorized, 40102)
+	}
+
+	claims, err := s.issuer.Parse(second.AccessToken)
+	if err != nil {
+		t.Fatalf("解析已登出令牌失败: %v", err)
+	}
+	familyTTL, err := s.redis.TTL(context.Background(), "pf:v1:auth:denylist_family:"+claims.FamilyID).Result()
+	if err != nil || familyTTL < 29*time.Minute {
+		t.Fatalf("family 拒绝键 TTL 应覆盖 access 有效期，实际 %v err=%v", familyTTL, err)
+	}
+	jtiTTL, err := s.redis.TTL(context.Background(), "pf:v1:auth:denylist:"+claims.JTI).Result()
+	if err != nil || jtiTTL <= 0 {
+		t.Fatalf("jti 拒绝键 TTL 应为正，实际 %v err=%v", jtiTTL, err)
+	}
+}
+
+// TestLogoutWithExpiredAccessToken 验证容差内已过期令牌登出仍写拒绝名单，且随后请求被拒。
+func TestLogoutWithExpiredAccessToken(t *testing.T) {
+	s := newSessionServer(t)
+	userID := s.registerUser(t, uniqueKey("logout-expired"))
+	// 19 秒前过期，仍处于 30 秒中间件容差内，可以进入登出流程。
+	token, jti := manualAccessTokenWithJTI(t, userID, "family-expired-logout", 19*time.Second)
+
+	rec, _ := send(s.engine, http.MethodDelete, "/api/sessions/current", token)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("过期令牌登出期望 204，实际 %d，body=%s", rec.Code, rec.Body.String())
+	}
+
+	ttl, err := s.redis.TTL(context.Background(), "pf:v1:auth:denylist:"+jti).Result()
+	if err != nil || ttl <= 0 {
+		t.Fatalf("过期令牌登出后 jti 键 TTL 应为正，实际 %v err=%v", ttl, err)
+	}
+
+	rec, env := send(s.engine, http.MethodGet, "/api/users/me", token)
+	assertEnvelope(t, rec, env, http.StatusUnauthorized, 40102)
+}
+
 // manualAccessToken 用与运行时相同的密钥构造指定过期时长的 access token。
 func manualAccessToken(t *testing.T, userID int64, familyID string, expiredSince time.Duration) string {
 	t.Helper()
+	token, _ := manualAccessTokenWithJTI(t, userID, familyID, expiredSince)
+	return token
+}
+
+// manualAccessTokenWithJTI 额外返回 jti，便于断言拒绝名单键。
+func manualAccessTokenWithJTI(t *testing.T, userID int64, familyID string, expiredSince time.Duration) (string, string) {
+	t.Helper()
+	jti := fmt.Sprintf("manual-%d", time.Now().UnixNano())
 	issuedAt := time.Now().Add(-expiredSince)
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
 		"sub":  strconv.FormatInt(userID, 10),
 		"role": domainaccount.RoleUser,
-		"jti":  fmt.Sprintf("manual-%d", time.Now().UnixNano()),
+		"jti":  jti,
 		"fid":  familyID,
 		"iat":  issuedAt.Unix(),
 		"exp":  issuedAt.Unix(),
@@ -534,5 +660,5 @@ func manualAccessToken(t *testing.T, userID int64, familyID string, expiredSince
 	if err != nil {
 		t.Fatalf("签发手工令牌失败: %v", err)
 	}
-	return signed
+	return signed, jti
 }

@@ -41,6 +41,8 @@ type TokenIssuer interface {
 type AuthMetrics interface {
 	ObserveRefresh(result string)
 	ObserveRevocations(count int64)
+	ObserveDenylistError(result string)
+	ObserveLoginLimiterError(scope string)
 }
 
 // Profile 是面向传输层的资料视图。
@@ -93,6 +95,13 @@ func WithRefreshLimiter(limiter domainaccount.RefreshLimiter) Option {
 	}
 }
 
+// WithLoginLimiter 注入登录限流器（IP + 账号双层）；未注入时不做限流。
+func WithLoginLimiter(limiter domainaccount.LoginLimiter) Option {
+	return func(s *Service) {
+		s.loginLimiter = limiter
+	}
+}
+
 // WithAccessDenylist 注入登出拒绝名单；未注入时登出只吊销刷新令牌链。
 func WithAccessDenylist(denylist domainaccount.AccessDenylist) Option {
 	return func(s *Service) {
@@ -115,19 +124,29 @@ func WithRefreshPolicy(ttl, grace time.Duration) Option {
 	}
 }
 
+// WithAccessPolicy 注入 access token 的中间件时钟容差；
+// 登出拒绝名单的 TTL 必须覆盖该窗口，否则容差内的令牌会在键过期后复活。
+func WithAccessPolicy(leeway time.Duration) Option {
+	return func(s *Service) {
+		s.leeway = leeway
+	}
+}
+
 // Service 提供账号相关用例。
 type Service struct {
 	repo   domainaccount.Repository
 	issuer TokenIssuer
 
-	sessions domainaccount.SessionRepository
-	rotation domainaccount.RotationCache
-	limiter  domainaccount.RefreshLimiter
-	denylist domainaccount.AccessDenylist
-	metrics  AuthMetrics
+	sessions     domainaccount.SessionRepository
+	rotation     domainaccount.RotationCache
+	limiter      domainaccount.RefreshLimiter
+	loginLimiter domainaccount.LoginLimiter
+	denylist     domainaccount.AccessDenylist
+	metrics      AuthMetrics
 
 	refreshTTL time.Duration
 	grace      time.Duration
+	leeway     time.Duration
 }
 
 // New 创建账号应用服务。
@@ -174,12 +193,26 @@ func (s *Service) Register(ctx context.Context, account, password, nickname stri
 }
 
 // Login 校验账号密码，签发访问令牌并为本次登录开一条新会话链。
-func (s *Service) Login(ctx context.Context, account, password, deviceLabel string) (*Session, error) {
+// 限流在查库与密码校验之前完成，避免爆破流量消耗数据库与 bcrypt 资源。
+func (s *Service) Login(ctx context.Context, account, password, deviceLabel, clientIP string) (*Session, error) {
 	if s.issuer == nil {
 		return nil, errors.New("token issuer 未注入")
 	}
 	if s.sessions == nil {
 		return nil, errors.New("session repository 未注入")
+	}
+	if s.loginLimiter != nil {
+		if clientIP != "" {
+			if ok := s.allowLogin("ip", func() (bool, error) { return s.loginLimiter.AllowIP(ctx, clientIP) }); !ok {
+				return nil, domainaccount.ErrLoginLimited
+			}
+		}
+		normalized := domainaccount.NormalizeAccountName(account)
+		if ok := s.allowLogin("account", func() (bool, error) {
+			return s.loginLimiter.AllowAccount(ctx, normalized)
+		}); !ok {
+			return nil, domainaccount.ErrLoginLimited
+		}
 	}
 	acc, err := s.repo.FindByAccount(ctx, domainaccount.NormalizeAccountName(account))
 	if err != nil {
@@ -415,10 +448,27 @@ func (s *Service) saveRotation(ctx context.Context, oldHash string, pair *Sessio
 	}
 }
 
-// Logout 吊销当前会话链，并把当前 access token 的 jti 写入拒绝名单。
+// Logout 吊销当前会话链，并把该链的全部 access token 加入拒绝名单。
 func (s *Service) Logout(ctx context.Context, userID int64, familyID, jti string, accessExp time.Time) error {
 	if s.sessions == nil {
 		return errors.New("session repository 未注入")
+	}
+	// 先写拒绝名单：即使后续数据库吊销失败，当前链的 access token 也已立即失效。
+	// jti 键的 TTL 取剩余有效期加容差；宽限期内已过期令牌 ttl<=0，由缓存层钳制为最小值而不是跳过。
+	if s.denylist != nil {
+		if jti != "" {
+			if err := s.denylist.AddToken(ctx, jti, time.Until(accessExp)+s.leeway); err != nil {
+				log.Printf("warning: 写入 jti 拒绝名单失败 (user_id=%d): %v", userID, err)
+				s.observeDenylistError("write_error")
+			}
+		}
+		// family 键覆盖该链此前轮换出的所有 access token，链内令牌最长剩余有效期即 access TTL。
+		if familyID != "" {
+			if err := s.denylist.AddFamily(ctx, familyID, s.familyDenyTTL()); err != nil {
+				log.Printf("warning: 写入 family 拒绝名单失败 (user_id=%d family=%s): %v", userID, familyID, err)
+				s.observeDenylistError("write_error")
+			}
+		}
 	}
 	if familyID != "" {
 		revoked, err := s.sessions.RevokeFamily(ctx, userID, familyID, "logout")
@@ -427,13 +477,17 @@ func (s *Service) Logout(ctx context.Context, userID int64, familyID, jti string
 		}
 		s.observeRevocations(revoked)
 	}
-	if s.denylist != nil && jti != "" {
-		if err := s.denylist.Add(ctx, jti, time.Until(accessExp)); err != nil {
-			// 拒绝名单是加固手段：写失败不阻塞登出，只记录告警。
-			log.Printf("warning: 写入拒绝名单失败 (user_id=%d): %v", userID, err)
-		}
-	}
 	return nil
+}
+
+// familyDenyTTL 返回会话链拒绝键的存活时间：access 有效期加中间件容差，
+// 确保链内最早签发（也最早过期）的令牌在容差窗口内始终被拦截。
+func (s *Service) familyDenyTTL() time.Duration {
+	ttl := s.leeway
+	if s.issuer != nil {
+		ttl += s.issuer.AccessTTL()
+	}
+	return ttl
 }
 
 // Me 读取指定用户的展示资料。
@@ -478,6 +532,31 @@ func (s *Service) allow(scope string, check func() (bool, error)) bool {
 		return true
 	}
 	return allowed
+}
+
+// allowLogin 执行一层登录限流；限流器报错时 fail-open，并记录告警与指标便于发现 Redis 故障。
+func (s *Service) allowLogin(scope string, check func() (bool, error)) bool {
+	allowed, err := check()
+	if err != nil {
+		log.Printf("warning: 登录限流 Redis 不可用，按放行处理 (scope=%s): %v", scope, err)
+		s.observeLoginLimiterError(scope)
+		return true
+	}
+	return allowed
+}
+
+// observeLoginLimiterError 记录一次登录限流降级。
+func (s *Service) observeLoginLimiterError(scope string) {
+	if s.metrics != nil {
+		s.metrics.ObserveLoginLimiterError(scope)
+	}
+}
+
+// observeDenylistError 记录一次拒绝名单读写失败。
+func (s *Service) observeDenylistError(result string) {
+	if s.metrics != nil {
+		s.metrics.ObserveDenylistError(result)
+	}
 }
 
 // invalid 记录失效并返回统一会话错误。

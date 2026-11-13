@@ -28,12 +28,13 @@ const (
 const (
 	codeAccessExpired   = 40101
 	codeAccessInvalid   = 40102
-	denylistErrorMetric = "redis_error"
+	denylistErrorMetric = "read_error"
 )
 
 // Denylist 是拒绝名单读取端口，Redis 实现未注入时传 nil 即跳过该检查。
 type Denylist interface {
-	Blocked(ctx context.Context, jti string) (bool, error)
+	// Blocked 同时检查 jti 与会话链，任一命中即视为已吊销。
+	Blocked(ctx context.Context, jti, familyID string) (bool, error)
 }
 
 // AuthMetrics 是鉴权链路的指标端口，未注入时为空操作。
@@ -60,7 +61,7 @@ func NewJWTAuth(issuer *infrajwt.Issuer, denylist Denylist, metrics AuthMetrics)
 			}
 			return
 		}
-		if blocked, err := isBlocked(c.Request.Context(), denylist, claims.JTI, metrics); err != nil {
+		if blocked, err := isBlocked(c.Request.Context(), denylist, claims.JTI, claims.FamilyID, metrics); err != nil {
 			log.Printf("warning: 查询拒绝名单失败，按放行处理 (path=%s): %v", c.Request.URL.Path, err)
 		} else if blocked {
 			abortUnauthorized(c, codeAccessInvalid, "access token revoked")
@@ -92,7 +93,7 @@ func NewOptionalJWTAuth(issuer *infrajwt.Issuer, denylist Denylist, metrics Auth
 			c.Next()
 			return
 		}
-		if blocked, err := isBlocked(c.Request.Context(), denylist, claims.JTI, metrics); err != nil {
+		if blocked, err := isBlocked(c.Request.Context(), denylist, claims.JTI, claims.FamilyID, metrics); err != nil {
 			log.Printf("warning: 查询拒绝名单失败，按放行处理 (path=%s): %v", c.Request.URL.Path, err)
 		} else if blocked {
 			log.Printf("optional auth: 令牌命中拒绝名单，按匿名访问继续 (path=%s)", c.Request.URL.Path)
@@ -155,12 +156,12 @@ func storeClaims(c *gin.Context, claims *infrajwt.Claims) {
 	c.Set(ContextExpKey, claims.ExpiresAt)
 }
 
-// isBlocked 查询拒绝名单；denylist 为 nil 或 jti 为空时直接放行。
-func isBlocked(ctx context.Context, denylist Denylist, jti string, metrics AuthMetrics) (bool, error) {
-	if denylist == nil || jti == "" {
+// isBlocked 查询拒绝名单；denylist 为 nil、jti 与 family 均为空时直接放行。
+func isBlocked(ctx context.Context, denylist Denylist, jti, familyID string, metrics AuthMetrics) (bool, error) {
+	if denylist == nil || (jti == "" && familyID == "") {
 		return false, nil
 	}
-	blocked, err := denylist.Blocked(ctx, jti)
+	blocked, err := denylist.Blocked(ctx, jti, familyID)
 	if err != nil {
 		if metrics != nil {
 			metrics.ObserveDenylistError(denylistErrorMetric)

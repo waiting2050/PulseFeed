@@ -55,6 +55,12 @@ import (
 
 // Register 完成迁移与依赖装配，并将健康检查、指标与业务路由挂载到给定的 Gin 引擎上。
 func Register(engine *gin.Engine, cfg *config.Config, db *sql.DB) error {
+	// 可信代理必须在注册路由前设置：只有来自配置地址的 X-Forwarded-For / X-Real-IP
+	// 才会被 ClientIP 采信，避免客户端伪造来源 IP 绕过登录/刷新限流。
+	if err := engine.SetTrustedProxies(cfg.TrustedProxies); err != nil {
+		return fmt.Errorf("设置可信代理失败: %w", err)
+	}
+
 	// 复用连接池打开 GORM，避免重复建连；SkipInitializeWithVersion 兼容更多 MySQL 版本。
 	gormDB, err := gorm.Open(gormmysql.New(gormmysql.Config{Conn: db}), &gorm.Config{})
 	if err != nil {
@@ -108,15 +114,18 @@ func Register(engine *gin.Engine, cfg *config.Config, db *sql.DB) error {
 	sessionRepo := infraaccount.NewSession(gormDB)
 	rotationCache := infracache.NewRotationCache(redisClient)
 	refreshGuard := infracache.NewRefreshGuard(redisClient)
+	loginGuard := infracache.NewLoginGuard(redisClient)
 	denylist := infracache.NewDenylist(redisClient)
 	accountService := appaccount.New(accountRepo,
 		appaccount.WithTokenIssuer(issuer),
 		appaccount.WithSessionRepository(sessionRepo),
 		appaccount.WithRotationCache(rotationCache),
 		appaccount.WithRefreshLimiter(refreshGuard),
+		appaccount.WithLoginLimiter(loginGuard),
 		appaccount.WithAccessDenylist(denylist),
 		appaccount.WithMetrics(apiMetrics),
 		appaccount.WithRefreshPolicy(cfg.JWT.RefreshTTL, cfg.JWT.RefreshGrace),
+		appaccount.WithAccessPolicy(cfg.JWT.Leeway),
 	)
 	accountHandler := httpaccount.New(accountService)
 	// clip 链路：仓储 → 应用服务 → 处理器；MQ 可用时启用事务性 outbox，
