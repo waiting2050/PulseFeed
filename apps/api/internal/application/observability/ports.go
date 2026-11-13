@@ -9,7 +9,7 @@ type Metrics interface {
 	ObserveHTTP(method, status string, duration time.Duration)
 	// ObserveFeed 记录一次 Feed 读取的场景、结果（ok/error）与耗时。
 	ObserveFeed(scene, result string, duration time.Duration)
-	// ObserveCache 记录一次 Feed 页缓存访问结果（hit/miss/disabled）。
+	// ObserveCache 记录一次缓存访问结果（hit/miss/disabled/error/card_error/stats_error/hot_error/hot_empty）。
 	ObserveCache(result string)
 	// ObserveWorker 记录一次 Worker 消息处理结果（ok/error）。
 	ObserveWorker(worker, result string)

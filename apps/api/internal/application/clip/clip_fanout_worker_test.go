@@ -167,14 +167,14 @@ func (f *fanoutWFakeCache) ListOutbox(_ context.Context, creatorID int64) ([]dom
 	return f.outbox[creatorID], nil
 }
 
-func (f *fanoutWFakeCache) GetCards(_ context.Context, clipIDs []int64) map[int64]*domfeed.FeedEntry {
+func (f *fanoutWFakeCache) GetCards(_ context.Context, clipIDs []int64) (map[int64]*domfeed.FeedEntry, error) {
 	result := make(map[int64]*domfeed.FeedEntry, len(clipIDs))
 	for _, id := range clipIDs {
 		if entry, ok := f.cards[id]; ok {
 			result[id] = entry
 		}
 	}
-	return result
+	return result, nil
 }
 
 func (f *fanoutWFakeCache) SetCards(_ context.Context, entries []*domfeed.FeedEntry) {
@@ -184,14 +184,14 @@ func (f *fanoutWFakeCache) SetCards(_ context.Context, entries []*domfeed.FeedEn
 	}
 }
 
-func (f *fanoutWFakeCache) GetStats(_ context.Context, clipIDs []int64) map[int64]*domfeed.EntryStats {
+func (f *fanoutWFakeCache) GetStats(_ context.Context, clipIDs []int64) (map[int64]*domfeed.EntryStats, error) {
 	result := make(map[int64]*domfeed.EntryStats, len(clipIDs))
 	for _, id := range clipIDs {
 		if stats, ok := f.stats[id]; ok {
 			result[id] = stats
 		}
 	}
-	return result
+	return result, nil
 }
 
 func (f *fanoutWFakeCache) SetStats(_ context.Context, stats map[int64]*domfeed.EntryStats) {

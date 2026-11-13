@@ -160,6 +160,9 @@ type feedFakeCache struct {
 	hitCalls      int
 	setCalls      int
 	lastFirstPage bool
+	// getErr / versionErr 模拟 Redis 故障，用于验证故障与未命中的区分。
+	getErr     error
+	versionErr error
 }
 
 // newFeedFakeCache 构造指定启用状态的页缓存。
@@ -182,18 +185,21 @@ func feedFakeCloneEntries(entries []*domfeed.FeedEntry) []*domfeed.FeedEntry {
 
 func (f *feedFakeCache) Enabled() bool { return f.enabled }
 
-func (f *feedFakeCache) GetPage(_ context.Context, digest string) ([]*domfeed.FeedEntry, bool) {
+func (f *feedFakeCache) GetPage(_ context.Context, digest string) ([]*domfeed.FeedEntry, bool, error) {
 	f.getCalls++
+	if f.getErr != nil {
+		return nil, false, f.getErr
+	}
 	if f.preset != nil {
 		f.hitCalls++
-		return feedFakeCloneEntries(f.preset), true
+		return feedFakeCloneEntries(f.preset), true, nil
 	}
 	entries, ok := f.pages[digest]
 	if !ok {
-		return nil, false
+		return nil, false, nil
 	}
 	f.hitCalls++
-	return feedFakeCloneEntries(entries), true
+	return feedFakeCloneEntries(entries), true, nil
 }
 
 func (f *feedFakeCache) SetPage(_ context.Context, digest string, entries []*domfeed.FeedEntry, firstPage bool) {
@@ -203,8 +209,8 @@ func (f *feedFakeCache) SetPage(_ context.Context, digest string, entries []*dom
 }
 
 // FeedVersion 返回固定版本号；本测试不验证删除失效。
-func (f *feedFakeCache) FeedVersion(_ context.Context) string {
-	return ""
+func (f *feedFakeCache) FeedVersion(_ context.Context) (string, error) {
+	return "", f.versionErr
 }
 
 // TestFeedLatestPaginationIsStableAcrossPages 验证 5 条数据按 2 条/页翻页不重不漏且游标正确收尾。

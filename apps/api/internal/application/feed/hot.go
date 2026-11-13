@@ -6,6 +6,7 @@ import (
 	"context"
 	"log"
 
+	appobservability "pulsefeed/internal/application/observability"
 	domfeed "pulsefeed/internal/domain/feed"
 )
 
@@ -22,11 +23,25 @@ type HotCache interface {
 type HotStrategy struct {
 	repo  domfeed.Repository
 	cache HotCache
+	// metrics 记录热度窗口读取故障；未注入时静默跳过。
+	metrics appobservability.Metrics
 }
 
 // NewHotStrategy 创建 hot 场景策略；cache 为 nil 时恒走 DB 回源。
 func NewHotStrategy(repo domfeed.Repository, cache HotCache) *HotStrategy {
 	return &HotStrategy{repo: repo, cache: cache}
+}
+
+// setMetrics 注入可观测性端口，用于记录热度窗口读取故障。
+func (s *HotStrategy) setMetrics(metrics appobservability.Metrics) {
+	s.metrics = metrics
+}
+
+// observeCache 记录一次缓存访问结果；未注入指标时静默跳过。
+func (s *HotStrategy) observeCache(result string) {
+	if s.metrics != nil {
+		s.metrics.ObserveCache(result)
+	}
 }
 
 // Scene 返回 hot 场景标识。
@@ -48,10 +63,13 @@ func (s *HotStrategy) Load(ctx context.Context, _ *FeedRequest, cursor *domfeed.
 
 	items, err := s.cache.ListHotWindow(ctx)
 	if err != nil {
+		// 缓存层已区分故障与空窗口：故障一律回源 DB，并记 error 指标而不是 empty_window。
 		log.Printf("feed hot=fallback_db reason=cache_error err=%v", err)
+		s.observeCache("hot_error")
 		return s.loadFromDB(ctx, cursor, count, "")
 	}
 	if len(items) == 0 {
+		s.observeCache("hot_empty")
 		return s.loadFromDB(ctx, cursor, count, "empty_window")
 	}
 

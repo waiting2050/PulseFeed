@@ -4,8 +4,10 @@ package appfeed
 
 import (
 	"context"
+	"log"
 	"sort"
 
+	appobservability "pulsefeed/internal/application/observability"
 	domfeed "pulsefeed/internal/domain/feed"
 )
 
@@ -25,12 +27,12 @@ type FollowingCache interface {
 	AddOutboxEntries(ctx context.Context, creatorID int64, entries []domfeed.InboxEntry) error
 	// ListOutbox 读取创作者 outbox 全部条目（≤裁剪上限）。
 	ListOutbox(ctx context.Context, creatorID int64) ([]domfeed.InboxEntry, error)
-	// GetCards 批量读取卡片缓存，未命中 ID 由调用方回源。
-	GetCards(ctx context.Context, clipIDs []int64) map[int64]*domfeed.FeedEntry
+	// GetCards 批量读取卡片缓存，返回命中部分；err 非 nil 表示缓存故障，调用方须整批回源。
+	GetCards(ctx context.Context, clipIDs []int64) (map[int64]*domfeed.FeedEntry, error)
 	// SetCards 批量回填卡片缓存。
 	SetCards(ctx context.Context, entries []*domfeed.FeedEntry)
-	// GetStats 批量读取计数缓存，未命中 ID 由调用方回源。
-	GetStats(ctx context.Context, clipIDs []int64) map[int64]*domfeed.EntryStats
+	// GetStats 批量读取计数缓存，返回命中部分；err 非 nil 表示缓存故障，调用方须整批回源。
+	GetStats(ctx context.Context, clipIDs []int64) (map[int64]*domfeed.EntryStats, error)
 	// SetStats 批量回填计数缓存。
 	SetStats(ctx context.Context, stats map[int64]*domfeed.EntryStats)
 }
@@ -41,11 +43,25 @@ type FollowingCache interface {
 type FollowingStrategy struct {
 	repo  domfeed.Repository
 	cache FollowingCache
+	// metrics 记录卡片/计数缓存故障；未注入时静默跳过。
+	metrics appobservability.Metrics
 }
 
 // NewFollowingStrategy 创建 following 场景策略；cache 为 nil 时恒走 DB 回源。
 func NewFollowingStrategy(repo domfeed.Repository, cache FollowingCache) *FollowingStrategy {
 	return &FollowingStrategy{repo: repo, cache: cache}
+}
+
+// setMetrics 注入可观测性端口，用于记录卡片/计数缓存故障。
+func (s *FollowingStrategy) setMetrics(metrics appobservability.Metrics) {
+	s.metrics = metrics
+}
+
+// observeCache 记录一次缓存访问结果；未注入指标时静默跳过。
+func (s *FollowingStrategy) observeCache(result string) {
+	if s.metrics != nil {
+		s.metrics.ObserveCache(result)
+	}
 }
 
 // Scene 返回 following 场景标识。
@@ -179,7 +195,17 @@ func (s *FollowingStrategy) hydrate(ctx context.Context, page []domfeed.InboxEnt
 		ids = append(ids, entry.ClipID)
 	}
 
-	cards := s.cache.GetCards(ctx, ids)
+	cards, err := s.cache.GetCards(ctx, ids)
+	cardsCached := err == nil
+	if err != nil {
+		// 卡片缓存故障按整批未命中处理：全部回源 DB，且本次不回填。
+		log.Printf("warning: 读取卡片缓存失败，整批回源 DB: %v", err)
+		s.observeCache("card_error")
+		cards = make(map[int64]*domfeed.FeedEntry, len(ids))
+	}
+	if cards == nil {
+		cards = make(map[int64]*domfeed.FeedEntry, len(ids))
+	}
 	missing := make([]int64, 0, len(ids))
 	for _, id := range ids {
 		if _, ok := cards[id]; !ok {
@@ -197,10 +223,21 @@ func (s *FollowingStrategy) hydrate(ctx context.Context, page []domfeed.InboxEnt
 			cards[entry.ClipID] = entry
 			fresh = append(fresh, entry)
 		}
-		s.cache.SetCards(ctx, fresh)
+		if cardsCached {
+			s.cache.SetCards(ctx, fresh)
+		}
 	}
 
-	stats := s.cache.GetStats(ctx, ids)
+	stats, err := s.cache.GetStats(ctx, ids)
+	statsCached := err == nil
+	if err != nil {
+		log.Printf("warning: 读取计数缓存失败，整批回源 DB: %v", err)
+		s.observeCache("stats_error")
+		stats = make(map[int64]*domfeed.EntryStats, len(ids))
+	}
+	if stats == nil {
+		stats = make(map[int64]*domfeed.EntryStats, len(ids))
+	}
 	missing = missing[:0]
 	for _, id := range ids {
 		if _, ok := stats[id]; !ok {
@@ -215,7 +252,9 @@ func (s *FollowingStrategy) hydrate(ctx context.Context, page []domfeed.InboxEnt
 		for id, value := range loaded {
 			stats[id] = value
 		}
-		s.cache.SetStats(ctx, loaded)
+		if statsCached {
+			s.cache.SetStats(ctx, loaded)
+		}
 	}
 
 	entries := make([]*domfeed.FeedEntry, 0, len(page))

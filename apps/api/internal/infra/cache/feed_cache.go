@@ -117,21 +117,27 @@ func (c *FeedCache) clock() time.Time {
 	return c.now()
 }
 
-// GetPage 读取一页 Feed 条目缓存；未命中或缓存不可用时返回 ok=false。
-func (c *FeedCache) GetPage(ctx context.Context, digest string) ([]*domfeed.FeedEntry, bool) {
+// GetPage 读取一页 Feed 条目缓存；ok=false 表示未命中，err 非 nil 表示缓存故障。
+// 故障与未命中必须区分：调用方据此决定回源后是否回填，避免把故障当成「没有数据」。
+func (c *FeedCache) GetPage(ctx context.Context, digest string) ([]*domfeed.FeedEntry, bool, error) {
 	if !c.Enabled() {
-		return nil, false
+		return nil, false, nil
 	}
 	raw, err := c.client.Get(ctx, pageKey(digest)).Bytes()
 	if err != nil {
-		return nil, false
+		if errors.Is(err, redis.Nil) {
+			return nil, false, nil
+		}
+		log.Printf("warning: 读取 feed 页缓存失败 (digest=%s): %v", digest, err)
+		return nil, false, err
 	}
 	var entries []*domfeed.FeedEntry
 	if err := json.Unmarshal(raw, &entries); err != nil {
 		// 缓存内容损坏按未命中处理，回源后覆盖回填。
-		return nil, false
+		log.Printf("warning: feed 页缓存内容损坏，按未命中处理 (digest=%s): %v", digest, err)
+		return nil, false, nil
 	}
-	return entries, true
+	return entries, true, nil
 }
 
 // SetPage 回填一页 Feed 条目；firstPage 决定使用首页还是翻页 TTL，失败仅记日志不阻塞主链路。
@@ -153,17 +159,25 @@ func (c *FeedCache) SetPage(ctx context.Context, digest string, entries []*domfe
 	}
 }
 
-// FeedVersion 返回当前 Feed 页缓存版本；缓存禁用或读取失败时按 "0" 处理。
+// FeedVersion 返回当前 Feed 页缓存版本；缓存禁用或版本键尚未创建时返回默认值。
+// 读取故障返回错误而不是退化为默认版本：否则摘要会落到版本 0，可能命中删除前的旧页。
 // 版本号参与页缓存 digest，BumpFeedVersion 后旧页缓存不再命中，无需按 key 枚举删除。
-func (c *FeedCache) FeedVersion(ctx context.Context) string {
+func (c *FeedCache) FeedVersion(ctx context.Context) (string, error) {
 	if !c.Enabled() {
-		return feedVersionDefault
+		return feedVersionDefault, nil
 	}
 	version, err := c.client.Get(ctx, feedVersionKey()).Result()
-	if err != nil || version == "" {
-		return feedVersionDefault
+	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			return feedVersionDefault, nil
+		}
+		log.Printf("warning: 读取 feed 页缓存版本失败: %v", err)
+		return "", err
 	}
-	return version
+	if version == "" {
+		return feedVersionDefault, nil
+	}
+	return version, nil
 }
 
 // BumpFeedVersion 递增 Feed 页缓存版本，使既有页缓存整体失效；失败仅记日志不阻塞主链路。
@@ -186,11 +200,12 @@ func (c *FeedCache) DeleteClipCache(ctx context.Context, clipID int64) {
 	}
 }
 
-// GetCards 批量读取卡片缓存；返回命中部分，未命中的 ID 由调用方回源（S11 起消费）。
-func (c *FeedCache) GetCards(ctx context.Context, clipIDs []int64) map[int64]*domfeed.FeedEntry {
+// GetCards 批量读取卡片缓存；返回值只含命中的 ID，未命中由调用方回源。
+// err 非 nil 表示缓存故障，调用方必须把整批 ID 回源，不能按「未命中」处理。
+func (c *FeedCache) GetCards(ctx context.Context, clipIDs []int64) (map[int64]*domfeed.FeedEntry, error) {
 	found := make(map[int64]*domfeed.FeedEntry, len(clipIDs))
 	if !c.Enabled() || len(clipIDs) == 0 {
-		return found
+		return found, nil
 	}
 	keys := make([]string, 0, len(clipIDs))
 	for _, id := range clipIDs {
@@ -198,7 +213,8 @@ func (c *FeedCache) GetCards(ctx context.Context, clipIDs []int64) map[int64]*do
 	}
 	values, err := c.client.MGet(ctx, keys...).Result()
 	if err != nil {
-		return found
+		log.Printf("warning: 读取卡片缓存失败 (count=%d): %v", len(clipIDs), err)
+		return nil, err
 	}
 	for i, value := range values {
 		raw, ok := value.(string)
@@ -211,7 +227,7 @@ func (c *FeedCache) GetCards(ctx context.Context, clipIDs []int64) map[int64]*do
 		}
 		found[clipIDs[i]] = entry
 	}
-	return found
+	return found, nil
 }
 
 // SetCards 批量回填卡片缓存；失败仅记日志（S11 起消费）。
@@ -232,11 +248,12 @@ func (c *FeedCache) SetCards(ctx context.Context, entries []*domfeed.FeedEntry) 
 	}
 }
 
-// GetStats 批量读取互动计数缓存；返回命中部分（S9 起消费）。
-func (c *FeedCache) GetStats(ctx context.Context, clipIDs []int64) map[int64]*domfeed.EntryStats {
+// GetStats 批量读取互动计数缓存；返回值只含命中的 ID，未命中由调用方回源。
+// err 非 nil 表示缓存故障，调用方必须把整批 ID 回源，不能按「未命中」处理。
+func (c *FeedCache) GetStats(ctx context.Context, clipIDs []int64) (map[int64]*domfeed.EntryStats, error) {
 	found := make(map[int64]*domfeed.EntryStats, len(clipIDs))
 	if !c.Enabled() || len(clipIDs) == 0 {
-		return found
+		return found, nil
 	}
 	keys := make([]string, 0, len(clipIDs))
 	for _, id := range clipIDs {
@@ -244,7 +261,8 @@ func (c *FeedCache) GetStats(ctx context.Context, clipIDs []int64) map[int64]*do
 	}
 	values, err := c.client.MGet(ctx, keys...).Result()
 	if err != nil {
-		return found
+		log.Printf("warning: 读取计数缓存失败 (count=%d): %v", len(clipIDs), err)
+		return nil, err
 	}
 	for i, value := range values {
 		raw, ok := value.(string)
@@ -257,7 +275,7 @@ func (c *FeedCache) GetStats(ctx context.Context, clipIDs []int64) map[int64]*do
 		}
 		found[clipIDs[i]] = stats
 	}
-	return found
+	return found, nil
 }
 
 // SetStats 批量回填互动计数缓存；失败仅记日志（S9 起消费）。
@@ -599,10 +617,12 @@ func (c *FeedCache) ListHotWindow(ctx context.Context) ([]domfeed.HotItem, error
 
 	// 内存合并：逐桶 ZRANGE（分值降序）累计各 clip 增量，之后统一排序并截断。
 	acc := make(map[string]float64, hotWindowLimit)
+	failed := 0
 	for _, key := range keys {
 		values, err := c.client.ZRangeWithScores(ctx, key, 0, -1).Result()
 		if err != nil && !errors.Is(err, redis.Nil) {
 			log.Printf("warning: 热度分钟桶读取失败 (key=%s): %v", key, err)
+			failed++
 			continue
 		}
 		for _, value := range values {
@@ -612,6 +632,11 @@ func (c *FeedCache) ListHotWindow(ctx context.Context) ([]domfeed.HotItem, error
 			}
 			acc[member] += value.Score
 		}
+	}
+	// 全部桶读取失败，或部分失败且没有任何数据时，无法判断窗口是真的为空还是读失败：
+	// 返回错误让上层按缓存故障回源 DB，而不是记成 empty_window。
+	if failed == len(keys) || (failed > 0 && len(acc) == 0) {
+		return nil, fmt.Errorf("%w: %d/%d 个分钟桶读取失败", ErrHotWindowUnavailable, failed, len(keys))
 	}
 
 	items := make([]domfeed.HotItem, 0, len(acc))

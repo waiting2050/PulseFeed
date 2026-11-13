@@ -73,11 +73,17 @@ func TestDeleteInvalidatesFeedCache(t *testing.T) {
 		t.Fatalf("预热缓存键失败: exists=%d err=%v", n, err)
 	}
 
-	versionBefore := cache.FeedVersion(ctx)
+	versionBefore, err := cache.FeedVersion(ctx)
+	if err != nil {
+		t.Fatalf("读取删除前页缓存版本失败: %v", err)
+	}
 	if err := clipService.Delete(ctx, creatorID, clipID, uniqueKey("it-delete")); err != nil {
 		t.Fatalf("删除 clip 失败: %v", err)
 	}
-	versionAfter := cache.FeedVersion(ctx)
+	versionAfter, err := cache.FeedVersion(ctx)
+	if err != nil {
+		t.Fatalf("读取删除后页缓存版本失败: %v", err)
+	}
 	if versionAfter == versionBefore {
 		t.Fatalf("删除后页缓存版本应递增，前后均为 %q", versionBefore)
 	}

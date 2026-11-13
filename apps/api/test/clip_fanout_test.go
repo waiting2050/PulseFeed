@@ -121,16 +121,16 @@ func (f *fanoutFakeCache) ListOutbox(_ context.Context, _ int64) ([]domfeed.Inbo
 	return nil, nil
 }
 
-func (f *fanoutFakeCache) GetCards(_ context.Context, _ []int64) map[int64]*domfeed.FeedEntry {
-	return map[int64]*domfeed.FeedEntry{}
+func (f *fanoutFakeCache) GetCards(_ context.Context, _ []int64) (map[int64]*domfeed.FeedEntry, error) {
+	return map[int64]*domfeed.FeedEntry{}, nil
 }
 
 func (f *fanoutFakeCache) SetCards(_ context.Context, entries []*domfeed.FeedEntry) {
 	f.cardsSet += len(entries)
 }
 
-func (f *fanoutFakeCache) GetStats(_ context.Context, _ []int64) map[int64]*domfeed.EntryStats {
-	return map[int64]*domfeed.EntryStats{}
+func (f *fanoutFakeCache) GetStats(_ context.Context, _ []int64) (map[int64]*domfeed.EntryStats, error) {
+	return map[int64]*domfeed.EntryStats{}, nil
 }
 
 func (f *fanoutFakeCache) SetStats(_ context.Context, stats map[int64]*domfeed.EntryStats) {

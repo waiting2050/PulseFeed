@@ -85,21 +85,21 @@ func newConcurrentPageCache(shared bool, preset ...*domfeed.FeedEntry) *concurre
 func (c *concurrentPageCache) Enabled() bool { return true }
 
 // GetPage 按模式返回缓存页：shared 模式共享条目对象，普通模式返回独立副本。
-func (c *concurrentPageCache) GetPage(_ context.Context, digest string) ([]*domfeed.FeedEntry, bool) {
+func (c *concurrentPageCache) GetPage(_ context.Context, digest string) ([]*domfeed.FeedEntry, bool, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.getCalls++
 	if c.shared {
 		c.hitCalls++
 		// 新切片、共享条目对象：只有按条目拷贝才能隔离不同读者的状态。
-		return append([]*domfeed.FeedEntry(nil), c.preset...), true
+		return append([]*domfeed.FeedEntry(nil), c.preset...), true, nil
 	}
 	entries, ok := c.pages[digest]
 	if !ok {
-		return nil, false
+		return nil, false, nil
 	}
 	c.hitCalls++
-	return feedFakeCloneEntries(entries), true
+	return feedFakeCloneEntries(entries), true, nil
 }
 
 // SetPage 回填页缓存并统计次数。
@@ -111,8 +111,8 @@ func (c *concurrentPageCache) SetPage(_ context.Context, digest string, entries 
 }
 
 // FeedVersion 返回固定版本号，保证并发用例共享同一摘要。
-func (c *concurrentPageCache) FeedVersion(_ context.Context) string {
-	return ""
+func (c *concurrentPageCache) FeedVersion(_ context.Context) (string, error) {
+	return "", nil
 }
 
 // feedConcurrentOutcome 汇总一次并发请求的结果。

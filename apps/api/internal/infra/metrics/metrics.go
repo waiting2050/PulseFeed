@@ -68,7 +68,7 @@ func New(component string) *Metrics {
 	}, []string{"scene"})
 	cacheEvents := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "pulsefeed_feed_cache_events_total",
-		Help: "Feed 页缓存访问次数，按 hit/miss/disabled 区分。",
+		Help: "Feed 缓存访问次数，按 hit/miss/disabled/error/card_error/stats_error/hot_error/hot_empty 区分。",
 	}, []string{"result"})
 	workerEvents := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "pulsefeed_worker_events_total",
