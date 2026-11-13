@@ -30,6 +30,7 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 
+	infraaccount "pulsefeed/internal/infra/persistence/account"
 	infraclip "pulsefeed/internal/infra/persistence/clip"
 	infraimpression "pulsefeed/internal/infra/persistence/impression"
 	infraplayback "pulsefeed/internal/infra/persistence/playback"
@@ -79,6 +80,7 @@ func TestMain(m *testing.M) {
 	models := []any{
 		&infraclip.ClipModel{},
 		&infraclip.ClipStatsModel{},
+		&infraaccount.UserProfileModel{},
 		&infraimpression.PlayEventModel{},
 		&infraimpression.ImpressionModel{},
 		&infraplayback.QoSReportModel{},

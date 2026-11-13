@@ -110,6 +110,11 @@ func (c *concurrentPageCache) SetPage(_ context.Context, digest string, entries 
 	c.pages[digest] = feedFakeCloneEntries(entries)
 }
 
+// FeedVersion 返回固定版本号，保证并发用例共享同一摘要。
+func (c *concurrentPageCache) FeedVersion(_ context.Context) string {
+	return ""
+}
+
 // feedConcurrentOutcome 汇总一次并发请求的结果。
 type feedConcurrentOutcome struct {
 	viewerID int64

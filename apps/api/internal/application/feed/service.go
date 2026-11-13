@@ -86,6 +86,8 @@ type FeedCache interface {
 	GetPage(ctx context.Context, digest string) (entries []*domfeed.FeedEntry, ok bool)
 	// SetPage 回填页缓存；firstPage 为 true 使用首页短 TTL。
 	SetPage(ctx context.Context, digest string, entries []*domfeed.FeedEntry, firstPage bool)
+	// FeedVersion 返回页缓存版本号；删除内容后递增版本即可整体失效既有页缓存。
+	FeedVersion(ctx context.Context) string
 }
 
 // Option 用于装配可选依赖。
@@ -210,8 +212,9 @@ func (s *Service) loadFeedPage(ctx context.Context, strategy Strategy, req *Feed
 		return strategy.Load(ctx, req, cursor, count)
 	}
 
-	// count 比页大小多 1，key 还原为页大小以符合 C5 的 limit 语义。
-	digest := pageDigest(strategy.Scene(), req.ViewerID, req.Cursor, count-1)
+	// count 比页大小多 1，key 还原为页大小以符合 C5 的 limit 语义；
+	// 版本号参与摘要，删除内容后递增版本即可让旧页缓存不再命中。
+	digest := pageDigest(strategy.Scene(), req.ViewerID, req.Cursor, count-1, s.cache.FeedVersion(ctx))
 	if entries, ok := s.cache.GetPage(ctx, digest); ok {
 		s.observeCache("hit")
 		return &Page{Entries: entries}, nil
@@ -243,9 +246,9 @@ func (s *Service) observeCache(result string) {
 	}
 }
 
-// pageDigest 按 C5 约定计算页缓存键摘要：sha1(scene|viewer|cursor|limit) 取前 16 位 hex。
-func pageDigest(scene domfeed.Scene, viewerID int64, cursor string, limit int) string {
-	sum := sha1.Sum([]byte(fmt.Sprintf("%s|%d|%s|%d", scene, viewerID, cursor, limit)))
+// pageDigest 按 C5 约定计算页缓存键摘要：sha1(scene|viewer|cursor|limit|version) 取前 16 位 hex。
+func pageDigest(scene domfeed.Scene, viewerID int64, cursor string, limit int, version string) string {
+	sum := sha1.Sum([]byte(fmt.Sprintf("%s|%d|%s|%d|%s", scene, viewerID, cursor, limit, version)))
 	return hex.EncodeToString(sum[:])[:16]
 }
 

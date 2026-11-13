@@ -202,6 +202,11 @@ func (f *feedFakeCache) SetPage(_ context.Context, digest string, entries []*dom
 	f.pages[digest] = feedFakeCloneEntries(entries)
 }
 
+// FeedVersion 返回固定版本号；本测试不验证删除失效。
+func (f *feedFakeCache) FeedVersion(_ context.Context) string {
+	return ""
+}
+
 // TestFeedLatestPaginationIsStableAcrossPages 验证 5 条数据按 2 条/页翻页不重不漏且游标正确收尾。
 func TestFeedLatestPaginationIsStableAcrossPages(t *testing.T) {
 	ctx := context.Background()

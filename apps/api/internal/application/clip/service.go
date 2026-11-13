@@ -19,6 +19,15 @@ type ListResult struct {
 // Option 用于装配可选依赖。
 type Option func(*Service)
 
+// FeedCacheInvalidator 描述删除作品后需要失效的 Feed 缓存能力，由 infra/cache 实现。
+// 应用层只依赖该端口，不直接感知 Redis。
+type FeedCacheInvalidator interface {
+	// DeleteClipCache 删除单个 clip 的卡片与计数缓存。
+	DeleteClipCache(ctx context.Context, clipID int64)
+	// BumpFeedVersion 递增页缓存版本，使既有 Feed 页缓存整体失效。
+	BumpFeedVersion(ctx context.Context)
+}
+
 // WithPublisher 注入 clip.published 事件发布器；未注入时发布成功但不投递事件。
 func WithPublisher(p Publisher) Option {
 	return func(s *Service) {
@@ -26,10 +35,18 @@ func WithPublisher(p Publisher) Option {
 	}
 }
 
+// WithFeedCacheInvalidator 注入删除后的 Feed 缓存失效器；未注入时跳过失效（仅靠 TTL）。
+func WithFeedCacheInvalidator(inv FeedCacheInvalidator) Option {
+	return func(s *Service) {
+		s.invalidator = inv
+	}
+}
+
 // Service 提供 clip 相关用例。
 type Service struct {
-	repo      domclip.Repository
-	publisher Publisher
+	repo        domclip.Repository
+	publisher   Publisher
+	invalidator FeedCacheInvalidator
 }
 
 // New 创建 clip 应用服务。
@@ -120,7 +137,8 @@ func (s *Service) ListByCreator(ctx context.Context, creatorID int64, cursorStr 
 	return result, nil
 }
 
-// Delete 删除 clip：仅创作者本人可操作，重复删除幂等。
+// Delete 删除 clip：仅创作者本人可操作，重复删除幂等；
+// 数据库删除成功后失效卡片/计数缓存并递增页缓存版本，避免已删除内容继续出现在 Feed。
 func (s *Service) Delete(ctx context.Context, requesterID, clipID int64, idempotencyKey string) error {
 	clip, err := s.repo.GetByID(ctx, clipID)
 	if err != nil {
@@ -129,5 +147,12 @@ func (s *Service) Delete(ctx context.Context, requesterID, clipID int64, idempot
 	if clip.CreatorID != requesterID {
 		return domclip.ErrNotClipOwner
 	}
-	return s.repo.Delete(ctx, clipID, idempotencyKey)
+	if err := s.repo.Delete(ctx, clipID, idempotencyKey); err != nil {
+		return err
+	}
+	if s.invalidator != nil {
+		s.invalidator.DeleteClipCache(ctx, clipID)
+		s.invalidator.BumpFeedVersion(ctx)
+	}
+	return nil
 }

@@ -89,14 +89,8 @@ func Register(engine *gin.Engine, cfg *config.Config, db *sql.DB) error {
 		log.Printf("rabbitmq.url 为空，MQ 链路已禁用，互动走同步落库")
 	}
 
-	// clip 链路：仓储 → 应用服务 → 处理器；MQ 可用时投递 clip.published 供 S12 扇出消费。
+	// clip 仓储；应用服务在 Feed 缓存装配后创建，以便删除时失效卡片/页缓存。
 	clipRepo := infraclip.New(gormDB)
-	clipOpts := make([]appclip.Option, 0, 1)
-	if mqClient != nil {
-		clipOpts = append(clipOpts, appclip.WithPublisher(mqClient))
-	}
-	clipService := appclip.New(clipRepo, clipOpts...)
-	clipHandler := httpclip.New(clipService)
 
 	// upload 链路：文件落盘 ./uploads 并经静态路由回读，上传端点要求登录。
 	uploadHandler := httpupload.New("./uploads")
@@ -109,6 +103,17 @@ func Register(engine *gin.Engine, cfg *config.Config, db *sql.DB) error {
 	} else {
 		log.Printf("redis.addr 为空，缓存已禁用，Feed 走 DB")
 	}
+	// clip 链路：仓储 → 应用服务 → 处理器；MQ 可用时投递 clip.published 供 S12 扇出消费；
+	// 删除成功后经 FeedCache 失效卡片/计数缓存并递增页缓存版本。
+	clipOpts := make([]appclip.Option, 0, 2)
+	if mqClient != nil {
+		clipOpts = append(clipOpts, appclip.WithPublisher(mqClient))
+	}
+	if feedCache.Enabled() {
+		clipOpts = append(clipOpts, appclip.WithFeedCacheInvalidator(feedCache))
+	}
+	clipService := appclip.New(clipRepo, clipOpts...)
+	clipHandler := httpclip.New(clipService)
 	feedRepo := infrafeed.New(gormDB)
 	// 向量与推荐链路：embedding 仓储同时服务推荐兴趣向量聚合，Worker 侧负责生成向量。
 	embeddingRepo := infraembedding.New(gormDB)

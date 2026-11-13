@@ -49,6 +49,9 @@ const (
 	hotBucketTTL = 65 * time.Minute
 	// hotWindowLimit 是合并窗口后参与排序的 clip 上限，防止超热时段单次读取过大。
 	hotWindowLimit = 500
+
+	// feedVersionDefault 是 Feed 页缓存版本缺失时的默认值。
+	feedVersionDefault = "0"
 )
 
 // ErrActionStateUnavailable 表示 Redis 未启用，异步互动链路应回退同步落库。
@@ -118,6 +121,39 @@ func (c *FeedCache) SetPage(ctx context.Context, digest string, entries []*domfe
 	}
 	if err := c.client.Set(ctx, pageKey(digest), raw, jitter(ttl)).Err(); err != nil {
 		log.Printf("warning: 回填 feed 页缓存失败: %v", err)
+	}
+}
+
+// FeedVersion 返回当前 Feed 页缓存版本；缓存禁用或读取失败时按 "0" 处理。
+// 版本号参与页缓存 digest，BumpFeedVersion 后旧页缓存不再命中，无需按 key 枚举删除。
+func (c *FeedCache) FeedVersion(ctx context.Context) string {
+	if !c.Enabled() {
+		return feedVersionDefault
+	}
+	version, err := c.client.Get(ctx, feedVersionKey()).Result()
+	if err != nil || version == "" {
+		return feedVersionDefault
+	}
+	return version
+}
+
+// BumpFeedVersion 递增 Feed 页缓存版本，使既有页缓存整体失效；失败仅记日志不阻塞主链路。
+func (c *FeedCache) BumpFeedVersion(ctx context.Context) {
+	if !c.Enabled() {
+		return
+	}
+	if err := c.client.Incr(ctx, feedVersionKey()).Err(); err != nil {
+		log.Printf("warning: 递增 feed 页缓存版本失败: %v", err)
+	}
+}
+
+// DeleteClipCache 删除单个 clip 的卡片与计数缓存；失败仅记日志，由 TTL 兜底。
+func (c *FeedCache) DeleteClipCache(ctx context.Context, clipID int64) {
+	if !c.Enabled() || clipID <= 0 {
+		return
+	}
+	if err := c.client.Del(ctx, cardKey(clipID), statsKey(clipID)).Err(); err != nil {
+		log.Printf("warning: 删除 clip 缓存失败 (clip_id=%d): %v", clipID, err)
 	}
 }
 
@@ -526,9 +562,14 @@ func actionShard(userID int64) int {
 	return int(userID % actionShardCount)
 }
 
-// pageKey 返回页缓存键；digest 由应用层按 sha1(scene|viewer|cursor|limit)[:16] 计算（C5）。
+// pageKey 返回页缓存键；digest 由应用层按 sha1(scene|viewer|cursor|limit|version)[:16] 计算。
 func pageKey(digest string) string {
 	return keyPrefix + ":feed:page:" + digest
+}
+
+// feedVersionKey 返回 Feed 页缓存版本键；版本号单调递增，用于整体失效既有页缓存。
+func feedVersionKey() string {
+	return keyPrefix + ":feed:version"
 }
 
 // cardKey 返回卡片缓存键。
