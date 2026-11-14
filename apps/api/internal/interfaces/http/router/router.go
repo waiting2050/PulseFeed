@@ -154,6 +154,8 @@ func Register(engine *gin.Engine, cfg *config.Config, db *sql.DB) error {
 		appfeed.WithForYouStrategy(recommendationService),
 		appfeed.WithHotStrategy(feedCache),
 		appfeed.WithFeedRateLimiter(feedGuard),
+		// 共享回源与请求生命周期解耦后，需要独立的执行上限（配置 feed.shared_load_timeout）。
+		appfeed.WithSharedLoadTimeout(cfg.Feed.SharedLoadTimeout),
 		// 游标统一由服务端 HMAC 签名：只有本服务生成的游标才能通过校验，
 		// 任意伪造游标无法再构造出无限多的页缓存键。
 		appfeed.WithCursorCodec(domfeed.NewCursorCodec(cfg.Feed.CursorSecret)),

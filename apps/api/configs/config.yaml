@@ -20,6 +20,8 @@ internal:
 feed:
   # 翻页游标签名密钥；生产通过 PULSEFEED_FEED_CURSOR_SECRET 注入，至少 32 字节且不能是占位值。
   cursor_secret: pulsefeed-local-cursor-secret-2d7a4c9e5b1f
+  # 页缓存 singleflight 共享执行侧的超时上限；执行侧已与首个请求解耦，需要独立上限。
+  shared_load_timeout: 3s
 
 database:
   host: 127.0.0.1

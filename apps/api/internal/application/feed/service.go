@@ -152,23 +152,40 @@ func WithFeedRateLimiter(limiter FeedRateLimiter) Option {
 	return func(s *Service) { s.limiter = limiter }
 }
 
+// WithSharedLoadTimeout 设置 singleflight 共享执行侧的超时上限。
+// 生产配置由 feed.shared_load_timeout 注入；未设置时使用与配置文件一致的兜底值。
+func WithSharedLoadTimeout(timeout time.Duration) Option {
+	return func(s *Service) {
+		if timeout > 0 {
+			s.sharedLoadTimeout = timeout
+		}
+	}
+}
+
+// defaultSharedLoadTimeout 是未显式配置时的兜底值，与 configs 中的
+// feed.shared_load_timeout 保持一致：足够覆盖一次 DB 页查询，又能在首个请求
+// 已断连时尽快结束共享执行，避免长期占用连接。
+const defaultSharedLoadTimeout = 3 * time.Second
+
 // Service 提供 Feed 读取用例。
 type Service struct {
-	repo       domfeed.Repository
-	strategies map[domfeed.Scene]Strategy
-	cache      FeedCache
-	cursors    *domfeed.CursorCodec
-	limiter    FeedRateLimiter
-	group      singleflight.Group
-	metrics    appobservability.Metrics
+	repo              domfeed.Repository
+	strategies        map[domfeed.Scene]Strategy
+	cache             FeedCache
+	cursors           *domfeed.CursorCodec
+	limiter           FeedRateLimiter
+	sharedLoadTimeout time.Duration
+	group             singleflight.Group
+	metrics           appobservability.Metrics
 }
 
 // New 创建 feed 应用服务，默认注册 latest 策略；其余场景策略随后续阶段接入。
 func New(repo domfeed.Repository, opts ...Option) *Service {
 	latest := NewLatestStrategy(repo)
 	s := &Service{
-		repo:       repo,
-		strategies: map[domfeed.Scene]Strategy{latest.Scene(): latest},
+		repo:              repo,
+		strategies:        map[domfeed.Scene]Strategy{latest.Scene(): latest},
+		sharedLoadTimeout: defaultSharedLoadTimeout,
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -301,16 +318,23 @@ func (s *Service) loadFeedPage(ctx context.Context, strategy Strategy, req *Feed
 	}
 	s.observeCache("miss")
 
-	value, err, _ := s.group.Do(digest, func() (any, error) {
+	// 共享执行绑定在执行侧自有 ctx 上，而不是首个请求的 ctx：首个请求断连时
+	// 不能把 context.Canceled 广播给所有健康等待者。执行上限由 feed.shared_load_timeout
+	// 控制；超时后所有等待者收到同一个错误（通常是 context.DeadlineExceeded），
+	// 下一次请求会重新发起回源。
+	shared := s.group.DoChan(digest, func() (any, error) {
+		execCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.sharedLoadTimeout)
+		defer cancel()
+
 		// 单飞窗口内二次读缓存：等待期间可能已有并发请求回填。
 		cacheFault := false
-		if entries, ok, err := s.cache.GetPage(ctx, digest); err != nil {
+		if entries, ok, err := s.cache.GetPage(execCtx, digest); err != nil {
 			log.Printf("warning: 读取 feed 页缓存失败，回源 DB 且跳过回填: %v", err)
 			cacheFault = true
 		} else if ok {
 			return &Page{Entries: entries}, nil
 		}
-		page, err := strategy.Load(ctx, req, cursor, count)
+		page, err := strategy.Load(execCtx, req, cursor, count)
 		if err != nil {
 			return nil, err
 		}
@@ -318,17 +342,38 @@ func (s *Service) loadFeedPage(ctx context.Context, strategy Strategy, req *Feed
 			// 空页写短 TTL 负标记而不是普通页：既吸收同一 key 的连续重放，
 			// 又避免空结论按翻页 TTL 挡住之后发布的新内容。
 			if len(page.Entries) == 0 {
-				s.cache.SetPageEmpty(ctx, digest)
+				s.cache.SetPageEmpty(execCtx, digest)
 			} else {
-				s.cache.SetPage(ctx, digest, page.Entries, cursor == nil)
+				s.cache.SetPage(execCtx, digest, page.Entries, cursor == nil)
 			}
 		}
 		return page, nil
 	})
-	if err != nil {
-		return nil, err
+
+	select {
+	case <-ctx.Done():
+		// 等待者自己断连：立即退出，不阻塞在共享执行上；其他等待者不受影响。
+		return nil, ctx.Err()
+	case result := <-shared:
+		if result.Err != nil {
+			return nil, result.Err
+		}
+		return clonePage(result.Val.(*Page)), nil
 	}
-	return value.(*Page), nil
+}
+
+// clonePage 让每个等待者拿到独立的条目切片：singleflight 的所有等待者共享同一个 Page，
+// 后续 assembleFeedEntries 会就地替换 entries[i]，共享同一底层数组会并发写同一槽位。
+// 条目结构体本身只读（assembler 会按请求克隆），因此浅拷贝切片即可。
+func clonePage(page *Page) *Page {
+	if page == nil {
+		return nil
+	}
+	entries := make([]*domfeed.FeedEntry, len(page.Entries))
+	copy(entries, page.Entries)
+	cloned := *page
+	cloned.Entries = entries
+	return &cloned
 }
 
 // decodeCursor 按装配情况解析游标：注入签名器时校验签名并识别无签名旧游标；

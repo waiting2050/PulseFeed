@@ -22,6 +22,9 @@ type FeedConfig struct {
 	// CursorSecret 是翻页游标的 HMAC 签名密钥：游标由服务端生成、对前端不透明，
 	// 签名用于阻止任意伪造游标构造出无限多的页缓存键。
 	CursorSecret string `yaml:"cursor_secret"`
+	// SharedLoadTimeout 是页缓存 singleflight 共享执行侧的超时上限（建议 2-3s）：
+	// 执行侧与首个请求解耦后，需要一个独立上限避免共享回源长期占用连接。
+	SharedLoadTimeout time.Duration `yaml:"shared_load_timeout"`
 }
 
 // JWTConfig 描述令牌签发参数：访问令牌有效期、刷新令牌有效期、宽限窗口与时钟容差。
