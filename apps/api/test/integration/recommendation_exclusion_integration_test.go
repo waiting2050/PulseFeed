@@ -11,13 +11,15 @@ import (
 
 	domclip "pulsefeed/internal/domain/clip"
 	dominteraction "pulsefeed/internal/domain/interaction"
+	infraclip "pulsefeed/internal/infra/persistence/clip"
 	infraaction "pulsefeed/internal/infra/persistence/interaction"
 	infrarecommendation "pulsefeed/internal/infra/persistence/recommendation"
 )
 
 // TestListCandidatesExcludesOwnAndInteractedClips 验证三类候选排除：
 // 本人作品、已点赞、已收藏均不进入候选；已取消的点赞不参与排除。
-// 用例把数据发布时间放到快照前的高位，保证候选排序不受其他用例残留数据干扰。
+// 用例把发布时间放到快照前的高位并给有效候选较高互动计数，
+// 保证候选排序不受其他用例残留数据（发布时间与既有热度）干扰。
 func TestListCandidatesExcludesOwnAndInteractedClips(t *testing.T) {
 	viewerID := int64(990001)
 	otherCreatorID := int64(990002)
@@ -34,6 +36,11 @@ func TestListCandidatesExcludesOwnAndInteractedClips(t *testing.T) {
 	seedCandidateAction(t, viewerID, likedClip, dominteraction.ActionLike, dominteraction.StatusActive)
 	seedCandidateAction(t, viewerID, savedClip, dominteraction.ActionSave, dominteraction.StatusActive)
 	seedCandidateAction(t, viewerID, canceledClip, dominteraction.ActionLike, dominteraction.StatusCanceled)
+
+	// 给两条有效候选较高的互动计数：热度排序下把它们稳定放到候选池最前，
+	// 避免其他用例中已有互动的 clip 抢占限量名额（排序列是 hot_score DESC）。
+	seedCandidateStats(t, canceledClip, 100)
+	seedCandidateStats(t, cleanClip, 50)
 
 	repo := infrarecommendation.New(testDB)
 	candidates, err := repo.ListCandidates(context.Background(), viewerID, snapshotAt, 50)
@@ -74,6 +81,15 @@ func TestListCandidatesExcludesOwnAndInteractedClips(t *testing.T) {
 	}
 	if limited[0].ClipID != canceledClip || limited[1].ClipID != cleanClip {
 		t.Fatalf("限量候选 = [%d %d], 期望 [%d %d]", limited[0].ClipID, limited[1].ClipID, canceledClip, cleanClip)
+	}
+}
+
+// seedCandidateStats 写入一条 clip 计数，用于把本用例候选稳定排在候选池前列。
+func seedCandidateStats(t *testing.T, clipID, likeCount int64) {
+	t.Helper()
+	model := &infraclip.ClipStatsModel{ClipID: clipID, LikeCount: likeCount}
+	if err := testDB.Create(model).Error; err != nil {
+		t.Fatalf("写入 clip 计数失败: %v", err)
 	}
 }
 
