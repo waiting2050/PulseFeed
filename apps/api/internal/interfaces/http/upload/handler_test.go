@@ -76,13 +76,9 @@ func (f *fakeProber) ExtractCover(_ context.Context, _, _ string) error {
 	return f.coverErr
 }
 
-// doUploadWith 使用指定 Handler 构造 multipart 表单并请求上传端点；kind 为空串时不写 kind 字段。
-func doUploadWith(t *testing.T, handler *Handler, kind, filename string, content []byte) *httptest.ResponseRecorder {
+// newUploadRequest 构造上传请求；chunked 为 true 时把 ContentLength 置为未知，模拟分块传输。
+func newUploadRequest(t *testing.T, kind, filename string, content []byte, chunked bool) *http.Request {
 	t.Helper()
-	gin.SetMode(gin.TestMode)
-	engine := gin.New()
-	engine.POST("/api/uploads", handler.Upload)
-
 	body := &bytes.Buffer{}
 	writer := multipart.NewWriter(body)
 	if kind != "" {
@@ -102,9 +98,22 @@ func doUploadWith(t *testing.T, handler *Handler, kind, filename string, content
 	}
 
 	req := httptest.NewRequest(http.MethodPost, "/api/uploads", body)
+	if chunked {
+		req.ContentLength = -1
+	}
 	req.Header.Set("Content-Type", writer.FormDataContentType())
+	return req
+}
+
+// doUploadWith 使用指定 Handler 构造 multipart 表单并请求上传端点；kind 为空串时不写 kind 字段。
+func doUploadWith(t *testing.T, handler *Handler, kind, filename string, content []byte) *httptest.ResponseRecorder {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	engine := gin.New()
+	engine.POST("/api/uploads", handler.Upload)
+
 	recorder := httptest.NewRecorder()
-	engine.ServeHTTP(recorder, req)
+	engine.ServeHTTP(recorder, newUploadRequest(t, kind, filename, content, false))
 	return recorder
 }
 
@@ -179,7 +188,7 @@ func TestUploadRejectsOversizeVideo(t *testing.T) {
 	}
 }
 
-// TestUploadRejectsOversizeImage 用缩小后的上限验证超大小图片被 400 拒绝。
+// TestUploadRejectsOversizedImage 用缩小后的上限验证超大小图片被 400 拒绝。
 func TestUploadRejectsOversizeImage(t *testing.T) {
 	dir := t.TempDir()
 	handler := New(dir)
@@ -190,6 +199,48 @@ func TestUploadRejectsOversizeImage(t *testing.T) {
 	}
 	if !strings.Contains(recorder.Body.String(), "大小上限") {
 		t.Fatalf("错误信息应说明大小上限，body=%s", recorder.Body.String())
+	}
+}
+
+// TestUploadRejectsOversizedRequestBody 验证入口体积保护：请求体超过上限时快速返回 413，
+// 且不会进入落盘流程。
+func TestUploadRejectsOversizedRequestBody(t *testing.T) {
+	dir := t.TempDir()
+	handler := New(dir)
+	handler.limits.requestBytes = 1024
+	recorder := doUploadWith(t, handler, "video", "clip.mp4", bytes.Repeat([]byte("a"), 4096))
+	if recorder.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("期望 413，实际 %d，body=%s", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "大小上限") {
+		t.Fatalf("错误信息应说明大小上限，body=%s", recorder.Body.String())
+	}
+	if entries, err := os.ReadDir(filepath.Join(dir, "video")); err == nil && len(entries) > 0 {
+		t.Fatalf("超限请求不应落盘，实际存在 %d 个文件", len(entries))
+	}
+}
+
+// TestUploadRejectsOversizedChunkedRequestBody 验证无 Content-Length 的分块请求
+// 同样被 MaxBytesReader 拦截并返回 413，而不是先解析完再失败。
+func TestUploadRejectsOversizedChunkedRequestBody(t *testing.T) {
+	dir := t.TempDir()
+	handler := New(dir)
+	handler.limits.requestBytes = 1024
+
+	gin.SetMode(gin.TestMode)
+	engine := gin.New()
+	engine.POST("/api/uploads", handler.Upload)
+	recorder := httptest.NewRecorder()
+	engine.ServeHTTP(recorder, newUploadRequest(t, "video", "clip.mp4", bytes.Repeat([]byte("a"), 4096), true))
+
+	if recorder.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("期望 413，实际 %d，body=%s", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "大小上限") {
+		t.Fatalf("错误信息应说明大小上限，body=%s", recorder.Body.String())
+	}
+	if entries, err := os.ReadDir(filepath.Join(dir, "video")); err == nil && len(entries) > 0 {
+		t.Fatalf("超限请求不应落盘，实际存在 %d 个文件", len(entries))
 	}
 }
 

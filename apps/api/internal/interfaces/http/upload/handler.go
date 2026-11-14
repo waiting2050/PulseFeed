@@ -41,6 +41,14 @@ const (
 	// MaxVideoLongEdge 是视频分辨率上限，按长边判定：允许 2160×3840 竖屏 4K，
 	// 拒绝长边超过 3840 的视频；短边口径会误伤竖屏 4K 内容。
 	MaxVideoLongEdge = 3840
+
+	// multipartOverhead 是 multipart 边界、表单字段与文件名的预留余量。
+	multipartOverhead int64 = 8 << 20
+	// MaxRequestBodyBytes 是上传端点允许的最大请求体：视频上限 + multipart 余量。
+	// 入口只负责挡住明显超限的请求，图片仍由类别校验按 20MB 限制。
+	MaxRequestBodyBytes int64 = MaxVideoBytes + multipartOverhead
+	// multipartMemory 与 gin 默认的 ParseMultipartForm 内存阈值一致。
+	multipartMemory int64 = 32 << 20
 )
 
 // allowedVideoCodecs 是 ffprobe codec_name 白名单；webm 容器常见 VP9 一并放行。
@@ -65,6 +73,8 @@ type uploadLimits struct {
 	imageBytes      int64
 	videoDurationMS int64
 	videoLongEdge   int
+	// requestBytes 是入口请求体上限，未设置时回退到 MaxRequestBodyBytes。
+	requestBytes int64
 }
 
 // defaultUploadLimits 返回生产环境使用的默认上限。
@@ -74,6 +84,7 @@ func defaultUploadLimits() uploadLimits {
 		imageBytes:      MaxImageBytes,
 		videoDurationMS: MaxVideoDurationMS,
 		videoLongEdge:   MaxVideoLongEdge,
+		requestBytes:    MaxRequestBodyBytes,
 	}
 }
 
@@ -98,9 +109,33 @@ type uploadResponse struct {
 }
 
 // Upload 处理 POST /api/uploads：multipart 表单字段 file（文件）与 kind（video|cover|avatar，缺省 video）。
-// 校验顺序为大小 → 扩展名 → ffprobe/图片解码，避免对大文件白跑探测；所有失败均返回 400 与可读原因。
+// 入口先用请求体上限做快速失败（Content-Length 预检 + MaxBytesReader 兜底），
+// 再按大小 → 扩展名 → ffprobe/图片解码的顺序校验，避免大文件白跑探测；所有失败均返回可读原因。
 func (h *Handler) Upload(c *gin.Context) {
-	kind := c.PostForm("kind")
+	// 入口体积保护：超限请求在解析 multipart 之前直接失败，不会进入落盘流程。
+	requestLimit := h.limits.requestBytes
+	if requestLimit <= 0 {
+		requestLimit = MaxRequestBodyBytes
+	}
+	if c.Request.ContentLength > requestLimit {
+		failOversizedBody(c, h.limits.videoBytes)
+		return
+	}
+	// 兜住分块传输或伪造 Content-Length 的请求：读取到上限即中断。
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, requestLimit)
+
+	// 显式解析一次 multipart，确保超限错误能被识别；后续 c.FormFile 复用解析结果。
+	if err := c.Request.ParseMultipartForm(multipartMemory); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			failOversizedBody(c, h.limits.videoBytes)
+			return
+		}
+		fail(c, http.StatusBadRequest, "缺少上传文件")
+		return
+	}
+
+	kind := c.Request.FormValue("kind")
 	if kind == "" {
 		kind = defaultKind
 	}
@@ -305,4 +340,10 @@ func ok(c *gin.Context, status int, data any) {
 // fail 以统一信封返回错误响应，code 与 HTTP 状态码保持一致。
 func fail(c *gin.Context, status int, message string) {
 	c.JSON(status, gin.H{"code": status, "message": message})
+}
+
+// failOversizedBody 返回入口请求体超限错误：状态码用 413 便于客户端与“文件本身超限”区分，
+// 文案沿用既有“超过大小上限（NMB）”口径。
+func failOversizedBody(c *gin.Context, videoBytes int64) {
+	fail(c, http.StatusRequestEntityTooLarge, fmt.Sprintf("上传内容超过大小上限（%dMB）", videoBytes>>20))
 }

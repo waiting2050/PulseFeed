@@ -20,6 +20,18 @@ const TITLE_HTML_MAX = 128
 // 不设 HTML maxLength，避免 emoji 被按 UTF-16 单元截断，超限时提交前给出明确错误。
 const DESCRIPTION_MAX_CHARS = 1000
 
+// 与后端 upload handler 的硬上限保持一致：视频 512MB、图片 20MB。
+// 选中文件即校验，避免等整个请求发出后才由后端拒绝。
+const VIDEO_MAX_BYTES = 512 * 1024 * 1024
+const IMAGE_MAX_BYTES = 20 * 1024 * 1024
+
+// oversizeMessage 返回超出上限时的提示；未超限或未选文件时返回空串。
+function oversizeMessage(picked, maxBytes, label) {
+  if (!picked || picked.size <= maxBytes) return ''
+  const limitMB = Math.round(maxBytes / (1024 * 1024))
+  return `${label}文件超过大小上限（${limitMB}MB），当前 ${formatFileSize(picked.size)}`
+}
+
 export default function PublishPage({ onPublished }) {
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
@@ -43,6 +55,33 @@ export default function PublishPage({ onPublished }) {
   const submitting = Boolean(stage)
   const titleLength = [...title.trim()].length
   const descriptionLength = [...description.trim()].length
+
+  // 选文件后立即做大小校验：超限直接清空选择并提示，不进入上传流程。
+  function handleVideoChange(event) {
+    const picked = event.target.files?.[0] || null
+    const message = oversizeMessage(picked, VIDEO_MAX_BYTES, '视频')
+    if (message) {
+      setFile(null)
+      setError(message)
+      event.target.value = ''
+      return
+    }
+    setError('')
+    setFile(picked)
+  }
+
+  function handleCoverChange(event) {
+    const picked = event.target.files?.[0] || null
+    const message = oversizeMessage(picked, IMAGE_MAX_BYTES, '封面')
+    if (message) {
+      setCover(null)
+      setError(message)
+      event.target.value = ''
+      return
+    }
+    setError('')
+    setCover(picked)
+  }
 
   async function handleSubmit(event) {
     event.preventDefault()
@@ -157,7 +196,7 @@ export default function PublishPage({ onPublished }) {
               id="pf-publish-file"
               type="file"
               accept=".mp4,.mov,.webm"
-              onChange={(event) => setFile(event.target.files?.[0] || null)}
+              onChange={handleVideoChange}
               disabled={submitting}
             />
             <span className="pf-file-icon" aria-hidden="true">
@@ -165,7 +204,7 @@ export default function PublishPage({ onPublished }) {
             </span>
             <span className="pf-file-text">
               {file ? file.name : '选择素材文件'}
-              <span className="pf-file-meta">{file ? formatFileSize(file.size) : 'mp4 / mov / webm'}</span>
+              <span className="pf-file-meta">{file ? formatFileSize(file.size) : 'mp4 / mov / webm · 最大 512MB'}</span>
             </span>
           </label>
         </div>
@@ -177,12 +216,12 @@ export default function PublishPage({ onPublished }) {
               id="pf-publish-cover"
               type="file"
               accept=".jpg,.jpeg,.png,.webp"
-              onChange={(event) => setCover(event.target.files?.[0] || null)}
+              onChange={handleCoverChange}
               disabled={submitting}
             />
             <span className="pf-file-text">
               {cover ? cover.name : '选择封面图片'}
-              <span className="pf-file-meta">{cover ? formatFileSize(cover.size) : 'jpg / png / webp'}</span>
+              <span className="pf-file-meta">{cover ? formatFileSize(cover.size) : 'jpg / png / webp · 最大 20MB'}</span>
             </span>
           </label>
           {coverPreview ? (
