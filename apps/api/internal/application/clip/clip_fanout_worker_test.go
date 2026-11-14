@@ -149,7 +149,7 @@ func (f *fanoutWFakeCache) AddInboxEntries(_ context.Context, userID int64, entr
 	return nil
 }
 
-func (f *fanoutWFakeCache) ListInbox(_ context.Context, userID int64) ([]domfeed.InboxEntry, error) {
+func (f *fanoutWFakeCache) ListInbox(_ context.Context, userID int64, _ *domfeed.Cursor, _ int) ([]domfeed.InboxEntry, error) {
 	return f.inbox[userID], nil
 }
 
@@ -163,7 +163,7 @@ func (f *fanoutWFakeCache) AddOutboxEntries(_ context.Context, creatorID int64, 
 	return nil
 }
 
-func (f *fanoutWFakeCache) ListOutbox(_ context.Context, creatorID int64) ([]domfeed.InboxEntry, error) {
+func (f *fanoutWFakeCache) ListOutbox(_ context.Context, creatorID int64, _ *domfeed.Cursor, _ int) ([]domfeed.InboxEntry, error) {
 	return f.outbox[creatorID], nil
 }
 

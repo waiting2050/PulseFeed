@@ -669,9 +669,10 @@ func (c *FeedCache) AddInboxEntries(ctx context.Context, userID int64, entries [
 	return c.addFeedBoxEntries(ctx, inboxKey(userID), entries)
 }
 
-// ListInbox 读取读者 inbox 全部条目（≤1000）；缓存未启用返回 ErrFeedBoxUnavailable，由策略回源 DB。
-func (c *FeedCache) ListInbox(ctx context.Context, userID int64) ([]domfeed.InboxEntry, error) {
-	return c.listFeedBox(ctx, inboxKey(userID))
+// ListInbox 读取读者 inbox 中游标之后的至多 limit 条条目；cursor 为 nil 表示首屏。
+// 只按需取一页，避免把整个键（≤1000 条）读回内存；缓存未启用返回 ErrFeedBoxUnavailable。
+func (c *FeedCache) ListInbox(ctx context.Context, userID int64, cursor *domfeed.Cursor, limit int) ([]domfeed.InboxEntry, error) {
+	return c.listFeedBox(ctx, inboxKey(userID), cursor, limit)
 }
 
 // AddOutboxEntries 将条目推入创作者 outbox（大 V 拉取模型），裁剪上限与 inbox 一致。
@@ -679,9 +680,9 @@ func (c *FeedCache) AddOutboxEntries(ctx context.Context, creatorID int64, entri
 	return c.addFeedBoxEntries(ctx, outboxKey(creatorID), entries)
 }
 
-// ListOutbox 读取创作者 outbox 全部条目（≤1000）；缓存未启用返回 ErrFeedBoxUnavailable。
-func (c *FeedCache) ListOutbox(ctx context.Context, creatorID int64) ([]domfeed.InboxEntry, error) {
-	return c.listFeedBox(ctx, outboxKey(creatorID))
+// ListOutbox 读取创作者 outbox 中游标之后的至多 limit 条条目；分页语义与 ListInbox 相同。
+func (c *FeedCache) ListOutbox(ctx context.Context, creatorID int64, cursor *domfeed.Cursor, limit int) ([]domfeed.InboxEntry, error) {
+	return c.listFeedBox(ctx, outboxKey(creatorID), cursor, limit)
 }
 
 // addFeedBoxEntries 是 inbox/outbox 写入的公共实现：ZADD 批量推入后按排名裁剪到最新 N 条。
@@ -706,15 +707,40 @@ func (c *FeedCache) addFeedBoxEntries(ctx context.Context, key string, entries [
 	return nil
 }
 
-// listFeedBox 是 inbox/outbox 读取的公共实现：整表读出（上限 N 条），合并排序由调用方完成。
-func (c *FeedCache) listFeedBox(ctx context.Context, key string) ([]domfeed.InboxEntry, error) {
+// listFeedBox 是 inbox/outbox 读取的公共实现：首屏取最新 limit 条，
+// 翻页按游标发布时间（ZSET score）用 ZREVRANGEBYSCORE 只取该分数及更旧的条目，
+// 再在内存里按 (published_at, clip_id) 复合边界过滤，保持与数据库分页一致的游标语义。
+func (c *FeedCache) listFeedBox(ctx context.Context, key string, cursor *domfeed.Cursor, limit int) ([]domfeed.InboxEntry, error) {
 	if !c.Enabled() {
 		return nil, ErrFeedBoxUnavailable
 	}
-	values, err := c.client.ZRevRangeWithScores(ctx, key, 0, -1).Result()
+	if limit <= 0 {
+		limit = 1
+	}
+
+	var values []redis.Z
+	var err error
+	if cursor == nil {
+		values, err = c.client.ZRevRangeWithScores(ctx, key, 0, int64(limit-1)).Result()
+	} else {
+		maxScore := strconv.FormatInt(cursor.PublishedAt.Unix(), 10)
+		// 分数边界取闭区间，游标自身与同秒已读条目也会占用返回配额；
+		// 先补上该秒的总条数，保证过滤后仍能取满 limit 条而不漏读更旧条目。
+		count := int64(limit) + 1
+		if sameSecond, countErr := c.client.ZCount(ctx, key, maxScore, maxScore).Result(); countErr == nil {
+			count += sameSecond
+		}
+		values, err = c.client.ZRevRangeByScoreWithScores(ctx, key, &redis.ZRangeBy{
+			Max:    maxScore,
+			Min:    "-inf",
+			Offset: 0,
+			Count:  count,
+		}).Result()
+	}
 	if err != nil {
 		return nil, fmt.Errorf("读取关注流缓存失败: %w", err)
 	}
+
 	entries := make([]domfeed.InboxEntry, 0, len(values))
 	for _, value := range values {
 		member, ok := value.Member.(string)
@@ -725,11 +751,21 @@ func (c *FeedCache) listFeedBox(ctx context.Context, key string) ([]domfeed.Inbo
 		if !ok {
 			continue
 		}
+		publishedAt := time.Unix(int64(value.Score), 0)
+		// ZSET 分数只到秒，同一秒内可能有多条；用 clip_id 复合边界排除游标本身及已读条目。
+		if cursor != nil && !publishedAt.Before(cursor.PublishedAt) {
+			if publishedAt.After(cursor.PublishedAt) || clipID >= cursor.ClipID {
+				continue
+			}
+		}
 		entries = append(entries, domfeed.InboxEntry{
 			ClipID:      clipID,
 			CreatorID:   creatorID,
-			PublishedAt: time.Unix(int64(value.Score), 0),
+			PublishedAt: publishedAt,
 		})
+	}
+	if len(entries) > limit {
+		entries = entries[:limit]
 	}
 	return entries, nil
 }

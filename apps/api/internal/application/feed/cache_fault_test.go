@@ -151,7 +151,7 @@ func (c *followingFaultCache) AddInboxEntries(context.Context, int64, []domfeed.
 	return nil
 }
 
-func (c *followingFaultCache) ListInbox(context.Context, int64) ([]domfeed.InboxEntry, error) {
+func (c *followingFaultCache) ListInbox(_ context.Context, _ int64, _ *domfeed.Cursor, _ int) ([]domfeed.InboxEntry, error) {
 	return c.inbox, nil
 }
 
@@ -159,7 +159,7 @@ func (c *followingFaultCache) AddOutboxEntries(context.Context, int64, []domfeed
 	return nil
 }
 
-func (c *followingFaultCache) ListOutbox(context.Context, int64) ([]domfeed.InboxEntry, error) {
+func (c *followingFaultCache) ListOutbox(_ context.Context, _ int64, _ *domfeed.Cursor, _ int) ([]domfeed.InboxEntry, error) {
 	return nil, nil
 }
 
