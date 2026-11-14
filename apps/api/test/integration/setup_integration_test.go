@@ -37,6 +37,7 @@ import (
 	infraaction "pulsefeed/internal/infra/persistence/interaction"
 	infraoutbox "pulsefeed/internal/infra/persistence/outbox"
 	infraplayback "pulsefeed/internal/infra/persistence/playback"
+	infrarelation "pulsefeed/internal/infra/persistence/relation"
 )
 
 const (
@@ -92,6 +93,8 @@ func TestMain(m *testing.M) {
 		&infraaction.ActionModel{},
 		&infraplayback.QoSReportModel{},
 		&infraoutbox.EventModel{},
+		&infrarelation.FollowModel{},
+		&infrarelation.UserStatsModel{},
 	}
 	if err := db.AutoMigrate(models...); err != nil {
 		fmt.Fprintf(os.Stderr, "独立 schema 建表失败: %v\n", err)

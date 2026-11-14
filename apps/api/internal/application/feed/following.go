@@ -107,7 +107,43 @@ func (s *FollowingStrategy) Load(ctx context.Context, req *FeedRequest, cursor *
 	if err != nil {
 		return nil, err
 	}
+	entries, err = s.fallbackFollowingPage(ctx, req.ViewerID, cursor, page, entries, count)
+	if err != nil {
+		return nil, err
+	}
 	return &Page{Entries: entries}, nil
+}
+
+// fallbackFollowingPage 在 inbox/outbox 候选不足一页时按游标回源数据库补齐：
+// 覆盖“超过 1000 条被裁剪”导致的漏读，也覆盖缓存为空但 DB 仍有更早内容的情况。
+// 回源查询按当前关注关系联查，取关立即生效；HasMore 由补齐后的真实条数决定，
+// 因此缓存空不会直接返回空页。
+func (s *FollowingStrategy) fallbackFollowingPage(ctx context.Context, viewerID int64, cursor *domfeed.Cursor, page []domfeed.InboxEntry, entries []*domfeed.FeedEntry, count int) ([]*domfeed.FeedEntry, error) {
+	if len(entries) >= count {
+		return entries, nil
+	}
+	fallbackCursor := cursor
+	if len(page) > 0 {
+		last := page[len(page)-1]
+		fallbackCursor = &domfeed.Cursor{PublishedAt: last.PublishedAt, ClipID: last.ClipID}
+	}
+
+	loaded, err := s.repo.ListFollowingPage(ctx, viewerID, fallbackCursor, count-len(entries))
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[int64]bool, len(entries))
+	for _, entry := range entries {
+		seen[entry.ClipID] = true
+	}
+	for _, entry := range loaded {
+		if seen[entry.ClipID] {
+			continue
+		}
+		seen[entry.ClipID] = true
+		entries = append(entries, entry)
+	}
+	return entries, nil
 }
 
 // loadMergedInbox 读取读者 inbox 与关注中大 V 的 outbox 并合并：
