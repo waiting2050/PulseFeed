@@ -67,6 +67,22 @@ func (s *Service) setFollow(ctx context.Context, userID, targetUserID int64, fol
 	if _, err := domrelation.NewFollow(userID, targetUserID); err != nil {
 		return nil, err
 	}
+	if follow {
+		// 重复关注是幂等重放，不占新增配额；仅对真正的新关注做上限判断。
+		already, err := s.repo.IsFollowing(ctx, userID, targetUserID)
+		if err != nil {
+			return nil, err
+		}
+		if !already {
+			stats, err := s.repo.GetUserStats(ctx, userID)
+			if err != nil {
+				return nil, err
+			}
+			if stats.FollowingCount >= domrelation.MaxFollowingCount {
+				return nil, domrelation.ErrFollowingLimit
+			}
+		}
+	}
 	result, err := s.repo.SetFollow(ctx, userID, targetUserID, follow, strings.TrimSpace(idempotencyKey))
 	if err != nil {
 		return nil, err

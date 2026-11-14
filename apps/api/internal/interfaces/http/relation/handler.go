@@ -202,6 +202,8 @@ func mapError(c *gin.Context, err error) {
 		fail(c, http.StatusBadRequest, err.Error())
 	case errors.Is(err, domrelation.ErrTargetNotFound):
 		fail(c, http.StatusNotFound, err.Error())
+	case errors.Is(err, domrelation.ErrFollowingLimit):
+		fail(c, http.StatusConflict, err.Error())
 	default:
 		fail(c, http.StatusInternalServerError, "内部错误")
 	}

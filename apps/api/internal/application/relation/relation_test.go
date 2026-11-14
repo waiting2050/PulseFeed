@@ -299,6 +299,43 @@ func TestRelationFollowIsIdempotent(t *testing.T) {
 	}
 }
 
+// TestRelationFollowRejectsAtFollowingLimit 验证关注数达到上限后拒绝新增关注，
+// 且不会调用仓储 SetFollow 产生写入。
+func TestRelationFollowRejectsAtFollowingLimit(t *testing.T) {
+	ctx := context.Background()
+	repo := newRelationFakeRepo()
+	repo.followingCounts[1] = domrelation.MaxFollowingCount
+	svc := apprelation.New(repo)
+
+	if _, err := svc.Follow(ctx, 1, 99, ""); !errors.Is(err, domrelation.ErrFollowingLimit) {
+		t.Fatalf("期望 ErrFollowingLimit，实际 %v", err)
+	}
+	if repo.setCalls != 0 {
+		t.Fatalf("达到上限后不应调用 SetFollow，实际 %d 次", repo.setCalls)
+	}
+}
+
+// TestRelationFollowAtLimitAllowsIdempotentReplay 验证已达上限时重复关注既有对象幂等成功，
+// 不会被上限拦截，也不会改变计数。
+func TestRelationFollowAtLimitAllowsIdempotentReplay(t *testing.T) {
+	ctx := context.Background()
+	repo := newRelationFakeRepo()
+	relationFakeSeed(repo, 1, 2, time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC))
+	repo.followingCounts[1] = domrelation.MaxFollowingCount
+	svc := apprelation.New(repo)
+
+	result, err := svc.Follow(ctx, 1, 2, "")
+	if err != nil {
+		t.Fatalf("重复关注不应被上限拦截: %v", err)
+	}
+	if result.Changed {
+		t.Fatalf("重复关注不应发生状态迁移: %+v", result)
+	}
+	if repo.setCalls != 1 {
+		t.Fatalf("幂等重放应调用一次 SetFollow，实际 %d 次", repo.setCalls)
+	}
+}
+
 // TestRelationUnfollowIsIdempotent 验证取关递减计数一次且重复取关幂等，且不触发回填/通知。
 func TestRelationUnfollowIsIdempotent(t *testing.T) {
 	ctx := context.Background()

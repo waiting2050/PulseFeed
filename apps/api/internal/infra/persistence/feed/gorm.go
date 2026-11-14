@@ -261,6 +261,8 @@ func (r *Repository) ListFollowedCreators(ctx context.Context, viewerID int64) (
 		Select("f.target_user_id AS creator_id, COALESCE(s.follower_count, 0) AS follower_count").
 		Joins("LEFT JOIN pf_user_stats s ON s.user_id = f.target_user_id").
 		Where("f.user_id = ? AND f.status = ?", viewerID, domrelation.StatusFollowing).
+		Order("f.updated_at DESC, f.target_user_id DESC").
+		Limit(domrelation.MaxFollowingCount).
 		Scan(&rows).Error
 	if err != nil {
 		return nil, err
