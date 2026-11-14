@@ -33,14 +33,19 @@ type FollowingCache interface {
 	// ListOutboxes 批量读取多个创作者 outbox 中游标之后的至多 limit 条条目；
 	// 实现应把 N 个源的读取合并为一次（必要时分片）pipeline，避免 O(N) 次往返。
 	ListOutboxes(ctx context.Context, creatorIDs []int64, cursor *domfeed.Cursor, limit int) ([]domfeed.InboxEntry, error)
-	// GetCards 批量读取卡片缓存，返回命中部分；err 非 nil 表示缓存故障，调用方须整批回源。
-	GetCards(ctx context.Context, clipIDs []int64) (map[int64]*domfeed.FeedEntry, error)
+	// GetCards 批量读取卡片缓存，返回命中部分与负占位集（已确认 DB 不存在的 clip）；
+	// err 非 nil 表示缓存故障，调用方须整批回源。
+	GetCards(ctx context.Context, clipIDs []int64) (map[int64]*domfeed.FeedEntry, map[int64]bool, error)
 	// SetCards 批量回填卡片缓存。
 	SetCards(ctx context.Context, entries []*domfeed.FeedEntry)
-	// GetStats 批量读取计数缓存，返回命中部分；err 非 nil 表示缓存故障，调用方须整批回源。
-	GetStats(ctx context.Context, clipIDs []int64) (map[int64]*domfeed.EntryStats, error)
+	// MarkCardsMissing 为回源确认不存在的 clip 写短 TTL 负占位，避免僵尸条目反复回源。
+	MarkCardsMissing(ctx context.Context, clipIDs []int64)
+	// GetStats 批量读取计数缓存，返回命中部分与负占位集；err 非 nil 表示缓存故障，调用方须整批回源。
+	GetStats(ctx context.Context, clipIDs []int64) (map[int64]*domfeed.EntryStats, map[int64]bool, error)
 	// SetStats 批量回填计数缓存。
 	SetStats(ctx context.Context, stats map[int64]*domfeed.EntryStats)
+	// MarkStatsMissing 为回源确认不存在的计数写短 TTL 负占位。
+	MarkStatsMissing(ctx context.Context, clipIDs []int64)
 }
 
 // FollowingStrategy 是 following 场景策略：
@@ -271,22 +276,28 @@ func (s *FollowingStrategy) hydrate(ctx context.Context, page []domfeed.InboxEnt
 		ids = append(ids, entry.ClipID)
 	}
 
-	cards, err := s.cache.GetCards(ctx, ids)
+	cards, negativeCards, err := s.cache.GetCards(ctx, ids)
 	cardsCached := err == nil
 	if err != nil {
 		// 卡片缓存故障按整批未命中处理：全部回源 DB，且本次不回填。
 		log.Printf("warning: 读取卡片缓存失败，整批回源 DB: %v", err)
 		s.observeCache("card_error")
 		cards = make(map[int64]*domfeed.FeedEntry, len(ids))
+		negativeCards = nil
 	}
 	if cards == nil {
 		cards = make(map[int64]*domfeed.FeedEntry, len(ids))
 	}
 	missing := make([]int64, 0, len(ids))
 	for _, id := range ids {
-		if _, ok := cards[id]; !ok {
-			missing = append(missing, id)
+		if _, ok := cards[id]; ok {
+			continue
 		}
+		if negativeCards[id] {
+			// 负占位：此前回源已确认该 clip 不存在，本次直接跳过，不再重复回源。
+			continue
+		}
+		missing = append(missing, id)
 	}
 	if len(missing) > 0 {
 		loaded, err := s.repo.BatchGetEntries(ctx, missing)
@@ -301,24 +312,41 @@ func (s *FollowingStrategy) hydrate(ctx context.Context, page []domfeed.InboxEnt
 		}
 		if cardsCached {
 			s.cache.SetCards(ctx, fresh)
+			if absent := missingCardIDs(missing, loaded); len(absent) > 0 {
+				// inbox/outbox 里已删作品留下的成员：写短 TTL 负占位，消除每次读取的重复回源。
+				s.cache.MarkCardsMissing(ctx, absent)
+			}
 		}
 	}
 
-	stats, err := s.cache.GetStats(ctx, ids)
+	// 计数只为真正拿到卡片的 clip 回源：僵尸条目已在卡片阶段被负占位拦下，不再触发计数查询。
+	visibleIDs := make([]int64, 0, len(page))
+	for _, entry := range page {
+		if _, ok := cards[entry.ClipID]; ok {
+			visibleIDs = append(visibleIDs, entry.ClipID)
+		}
+	}
+
+	stats, negativeStats, err := s.cache.GetStats(ctx, visibleIDs)
 	statsCached := err == nil
 	if err != nil {
 		log.Printf("warning: 读取计数缓存失败，整批回源 DB: %v", err)
 		s.observeCache("stats_error")
-		stats = make(map[int64]*domfeed.EntryStats, len(ids))
+		stats = make(map[int64]*domfeed.EntryStats, len(visibleIDs))
+		negativeStats = nil
 	}
 	if stats == nil {
-		stats = make(map[int64]*domfeed.EntryStats, len(ids))
+		stats = make(map[int64]*domfeed.EntryStats, len(visibleIDs))
 	}
 	missing = missing[:0]
-	for _, id := range ids {
-		if _, ok := stats[id]; !ok {
-			missing = append(missing, id)
+	for _, id := range visibleIDs {
+		if _, ok := stats[id]; ok {
+			continue
 		}
+		if negativeStats[id] {
+			continue
+		}
+		missing = append(missing, id)
 	}
 	if len(missing) > 0 {
 		loaded, err := s.repo.BatchGetStats(ctx, missing)
@@ -330,6 +358,9 @@ func (s *FollowingStrategy) hydrate(ctx context.Context, page []domfeed.InboxEnt
 		}
 		if statsCached {
 			s.cache.SetStats(ctx, loaded)
+			if absent := missingStatsIDs(missing, loaded); len(absent) > 0 {
+				s.cache.MarkStatsMissing(ctx, absent)
+			}
 		}
 	}
 
@@ -349,4 +380,26 @@ func (s *FollowingStrategy) hydrate(ctx context.Context, page []domfeed.InboxEnt
 		entries = append(entries, &entry)
 	}
 	return entries, nil
+}
+
+// missingCardIDs 返回请求了但 DB 未返回的 clip ID，供写卡片负占位使用。
+func missingCardIDs(ids []int64, loaded map[int64]*domfeed.FeedEntry) []int64 {
+	absent := make([]int64, 0, len(ids)-len(loaded))
+	for _, id := range ids {
+		if _, ok := loaded[id]; !ok {
+			absent = append(absent, id)
+		}
+	}
+	return absent
+}
+
+// missingStatsIDs 返回请求了但 DB 未返回的计数 ID，供写计数负占位使用。
+func missingStatsIDs(ids []int64, loaded map[int64]*domfeed.EntryStats) []int64 {
+	absent := make([]int64, 0, len(ids)-len(loaded))
+	for _, id := range ids {
+		if _, ok := loaded[id]; !ok {
+			absent = append(absent, id)
+		}
+	}
+	return absent
 }

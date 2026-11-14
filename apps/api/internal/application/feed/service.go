@@ -15,10 +15,12 @@ import (
 	"golang.org/x/sync/singleflight"
 )
 
-// FeedRequest 是一次 Feed 读取请求；ViewerID 为 0 表示未登录读者。
+// FeedRequest 是一次 Feed 读取请求；ViewerID 为 0 表示未登录读者，
+// ClientIP 取自 HTTP 层（已按可信代理规则解析），供匿名请求限流使用。
 type FeedRequest struct {
 	Scene    string
 	ViewerID int64
+	ClientIP string
 	Cursor   string
 	Limit    int
 }
@@ -94,6 +96,15 @@ type FeedCache interface {
 	FeedVersion(ctx context.Context) (string, error)
 }
 
+// FeedRateLimiter 是 following/hot 的请求级限流端口，由 infra/cache 的 Redis 固定窗口实现。
+// 返回 (allowed, retryAfter, err)：err 非 nil 表示限流后端故障，调用方必须 fail-open。
+type FeedRateLimiter interface {
+	// AllowUser 按读者维度计数。
+	AllowUser(ctx context.Context, viewerID int64) (bool, time.Duration, error)
+	// AllowIP 按来源 IP 维度计数（匿名请求）。
+	AllowIP(ctx context.Context, clientIP string) (bool, time.Duration, error)
+}
+
 // Option 用于装配可选依赖。
 type Option func(*Service)
 
@@ -136,12 +147,18 @@ func WithCursorCodec(codec *domfeed.CursorCodec) Option {
 	return func(s *Service) { s.cursors = codec }
 }
 
+// WithFeedRateLimiter 注入 following/hot 的请求级限流器；未注入时不做限流。
+func WithFeedRateLimiter(limiter FeedRateLimiter) Option {
+	return func(s *Service) { s.limiter = limiter }
+}
+
 // Service 提供 Feed 读取用例。
 type Service struct {
 	repo       domfeed.Repository
 	strategies map[domfeed.Scene]Strategy
 	cache      FeedCache
 	cursors    *domfeed.CursorCodec
+	limiter    FeedRateLimiter
 	group      singleflight.Group
 	metrics    appobservability.Metrics
 }
@@ -209,6 +226,11 @@ func (s *Service) getFeed(ctx context.Context, req *FeedRequest) (*FeedResult, e
 		// 保证旧游标不会触发 500；客户端会回到第一页重新开始翻页。
 		log.Printf("info: following 游标版本过旧，重置为首屏 (version=%d)", cursor.Version)
 		cursor = nil
+	}
+
+	// following/hot 不走页缓存，每请求恒定多次回源 DB，必须在入口做请求级保护。
+	if err := s.enforceRateLimit(ctx, req, scene); err != nil {
+		return nil, err
 	}
 
 	strategy := s.strategies[scene]
@@ -342,6 +364,48 @@ func (s *Service) observeCache(result string) {
 	if s.metrics != nil {
 		s.metrics.ObserveCache(result)
 	}
+}
+
+// needsFeedRateLimit 报告场景是否需要请求级限流：
+// following 与 hot 均不走页缓存，每请求会有多次 DB 查询，是唯一需要入口保护的场景。
+func needsFeedRateLimit(scene domfeed.Scene) bool {
+	return scene == domfeed.SceneFollowing || scene == domfeed.SceneHot
+}
+
+// enforceRateLimit 对 following/hot 做请求级限流：登录读者按用户计数，匿名请求按 IP 计数。
+// 与登录限流一致，Redis 故障时 fail-open 放行并记录日志与指标，避免限流成为可用性单点。
+func (s *Service) enforceRateLimit(ctx context.Context, req *FeedRequest, scene domfeed.Scene) error {
+	if s.limiter == nil || !needsFeedRateLimit(scene) {
+		return nil
+	}
+	// following 未登录会在策略层返回 401，这里不计数，避免把匿名请求当作已授权流量。
+	if scene == domfeed.SceneFollowing && req.ViewerID <= 0 {
+		return nil
+	}
+
+	scope := "ip"
+	var (
+		allowed    bool
+		retryAfter time.Duration
+		err        error
+	)
+	if req.ViewerID > 0 {
+		scope = "user"
+		allowed, retryAfter, err = s.limiter.AllowUser(ctx, req.ViewerID)
+	} else {
+		allowed, retryAfter, err = s.limiter.AllowIP(ctx, req.ClientIP)
+	}
+	if err != nil {
+		log.Printf("warning: feed 限流降级（Redis 故障，fail-open, scope=%s）: %v", scope, err)
+		if s.metrics != nil {
+			s.metrics.ObserveFeedLimiterError(scope)
+		}
+		return nil
+	}
+	if !allowed {
+		return &domfeed.ErrFeedRateLimited{RetryAfter: retryAfter}
+	}
+	return nil
 }
 
 // pageDigest 按 C5 约定计算页缓存键摘要：sha1(scene|viewer|cursor|limit|version) 取前 16 位 hex。

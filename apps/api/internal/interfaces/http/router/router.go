@@ -144,6 +144,8 @@ func Register(engine *gin.Engine, cfg *config.Config, db *sql.DB) error {
 	embeddingRepo := infraembedding.New(gormDB)
 	recommendationRepo := infrarecommendation.New(gormDB)
 	recommendationService := apprecommendation.New(recommendationRepo, embeddingRepo)
+	// following/hot 的请求级限流：Redis 固定窗口，Redis 不可用时 fail-open。
+	feedGuard := infracache.NewFeedGuard(redisClient)
 	// following 场景策略：合并读者 inbox 与大 V outbox，Redis 缺失/禁用自动回源 DB；
 	// hot 场景策略：合并最近 60 个分钟桶的互动增量，窗口为空/不可用自动回源 DB。
 	feedService := appfeed.New(feedRepo,
@@ -151,6 +153,7 @@ func Register(engine *gin.Engine, cfg *config.Config, db *sql.DB) error {
 		appfeed.WithFollowingStrategy(feedCache),
 		appfeed.WithForYouStrategy(recommendationService),
 		appfeed.WithHotStrategy(feedCache),
+		appfeed.WithFeedRateLimiter(feedGuard),
 		// 游标统一由服务端 HMAC 签名：只有本服务生成的游标才能通过校验，
 		// 任意伪造游标无法再构造出无限多的页缓存键。
 		appfeed.WithCursorCodec(domfeed.NewCursorCodec(cfg.Feed.CursorSecret)),

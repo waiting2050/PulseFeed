@@ -121,21 +121,27 @@ func (f *fanoutFakeCache) ListOutboxes(_ context.Context, _ []int64, _ *domfeed.
 	return nil, nil
 }
 
-func (f *fanoutFakeCache) GetCards(_ context.Context, _ []int64) (map[int64]*domfeed.FeedEntry, error) {
-	return map[int64]*domfeed.FeedEntry{}, nil
+func (f *fanoutFakeCache) GetCards(_ context.Context, _ []int64) (map[int64]*domfeed.FeedEntry, map[int64]bool, error) {
+	return map[int64]*domfeed.FeedEntry{}, map[int64]bool{}, nil
 }
 
 func (f *fanoutFakeCache) SetCards(_ context.Context, entries []*domfeed.FeedEntry) {
 	f.cardsSet += len(entries)
 }
 
-func (f *fanoutFakeCache) GetStats(_ context.Context, _ []int64) (map[int64]*domfeed.EntryStats, error) {
-	return map[int64]*domfeed.EntryStats{}, nil
+// MarkCardsMissing 在扇出测试中无意义，仅满足接口。
+func (f *fanoutFakeCache) MarkCardsMissing(context.Context, []int64) {}
+
+func (f *fanoutFakeCache) GetStats(_ context.Context, _ []int64) (map[int64]*domfeed.EntryStats, map[int64]bool, error) {
+	return map[int64]*domfeed.EntryStats{}, map[int64]bool{}, nil
 }
 
 func (f *fanoutFakeCache) SetStats(_ context.Context, stats map[int64]*domfeed.EntryStats) {
 	f.statsSet += len(stats)
 }
+
+// MarkStatsMissing 在扇出测试中无意义，仅满足接口。
+func (f *fanoutFakeCache) MarkStatsMissing(context.Context, []int64) {}
 
 // newFanoutFixture 构造 clip_id=42、creator_id=7 的扇出测试夹具。
 func newFanoutFixture() (*fanoutFakeRepository, *fanoutFakeCache, []byte) {

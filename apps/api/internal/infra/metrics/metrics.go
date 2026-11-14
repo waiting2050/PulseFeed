@@ -33,6 +33,8 @@ type Metrics struct {
 	authDenylistErr *prometheus.CounterVec
 	authLoginErr    *prometheus.CounterVec
 	authRevocations prometheus.Counter
+
+	feedLimiterErr *prometheus.CounterVec
 }
 
 // New 按进程组件名创建指标集合并注册到独立注册表；component 取 api 或 worker。
@@ -112,6 +114,10 @@ func New(component string) *Metrics {
 		Name: "pulsefeed_auth_revocations_total",
 		Help: "因登出或重放被吊销的刷新令牌行数。",
 	})
+	feedLimiterErr := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "pulsefeed_feed_limiter_errors_total",
+		Help: "Feed 限流降级次数（Redis 不可用时 fail-open），按 user/ip 维度区分。",
+	}, []string{"scope"})
 
 	registry.MustRegister(
 		up,
@@ -130,6 +136,7 @@ func New(component string) *Metrics {
 		authDenylistErr,
 		authLoginErr,
 		authRevocations,
+		feedLimiterErr,
 	)
 
 	return &Metrics{
@@ -150,6 +157,7 @@ func New(component string) *Metrics {
 		authDenylistErr: authDenylistErr,
 		authLoginErr:    authLoginErr,
 		authRevocations: authRevocations,
+		feedLimiterErr:  feedLimiterErr,
 	}
 }
 
@@ -236,6 +244,14 @@ func (m *Metrics) ObserveLoginLimiterError(scope string) {
 		return
 	}
 	m.authLoginErr.WithLabelValues(scope).Inc()
+}
+
+// ObserveFeedLimiterError 记录一次 Feed 限流降级（Redis 不可用时 fail-open）。
+func (m *Metrics) ObserveFeedLimiterError(scope string) {
+	if m == nil {
+		return
+	}
+	m.feedLimiterErr.WithLabelValues(scope).Inc()
 }
 
 // ObserveRevocations 累加被吊销的刷新令牌行数。

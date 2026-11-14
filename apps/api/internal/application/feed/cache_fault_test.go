@@ -14,13 +14,17 @@ import (
 
 // recordingMetrics 记录缓存访问结果标签，供故障用例断言指标。
 type recordingMetrics struct {
-	cacheResults []string
+	cacheResults  []string
+	limiterScopes []string
 }
 
 func (m *recordingMetrics) ObserveHTTP(string, string, time.Duration) {}
 func (m *recordingMetrics) ObserveFeed(string, string, time.Duration) {}
 func (m *recordingMetrics) ObserveCache(result string) {
 	m.cacheResults = append(m.cacheResults, result)
+}
+func (m *recordingMetrics) ObserveFeedLimiterError(scope string) {
+	m.limiterScopes = append(m.limiterScopes, scope)
 }
 func (m *recordingMetrics) ObserveWorker(string, string)      {}
 func (m *recordingMetrics) ObserveQoS(string, int, int, bool) {}
@@ -112,6 +116,9 @@ func TestFeedPageMissStillWritesBack(t *testing.T) {
 type followingFaultRepo struct {
 	*feedFakeRepo
 	entry *domfeed.FeedEntry
+	// cardIDs / statsIDs 记录最近一次批量回源的请求 ID，供负占位用例断言僵尸条目不再被查询。
+	cardIDs  []int64
+	statsIDs []int64
 }
 
 func (r *followingFaultRepo) ListFollowedCreators(_ context.Context, _ int64) ([]*domfeed.FollowedCreator, error) {
@@ -119,6 +126,7 @@ func (r *followingFaultRepo) ListFollowedCreators(_ context.Context, _ int64) ([
 }
 
 func (r *followingFaultRepo) BatchGetEntries(_ context.Context, clipIDs []int64) (map[int64]*domfeed.FeedEntry, error) {
+	r.cardIDs = append([]int64(nil), clipIDs...)
 	result := make(map[int64]*domfeed.FeedEntry, len(clipIDs))
 	for _, id := range clipIDs {
 		if id == r.entry.ClipID {
@@ -129,6 +137,7 @@ func (r *followingFaultRepo) BatchGetEntries(_ context.Context, clipIDs []int64)
 }
 
 func (r *followingFaultRepo) BatchGetStats(_ context.Context, clipIDs []int64) (map[int64]*domfeed.EntryStats, error) {
+	r.statsIDs = append([]int64(nil), clipIDs...)
 	result := make(map[int64]*domfeed.EntryStats, len(clipIDs))
 	for _, id := range clipIDs {
 		result[id] = &domfeed.EntryStats{}
@@ -138,14 +147,16 @@ func (r *followingFaultRepo) BatchGetStats(_ context.Context, clipIDs []int64) (
 
 // followingFaultCache 是可注入卡片/计数读取故障的 following 缓存。
 type followingFaultCache struct {
-	inbox       []domfeed.InboxEntry
-	outboxes    map[int64][]domfeed.InboxEntry
-	outboxCalls int
-	outboxIDs   []int64
-	cardsErr    error
-	statsErr    error
-	setCards    int
-	setStats    int
+	inbox         []domfeed.InboxEntry
+	outboxes      map[int64][]domfeed.InboxEntry
+	outboxCalls   int
+	outboxIDs     []int64
+	cardsErr      error
+	statsErr      error
+	setCards      int
+	setStats      int
+	negativeCards map[int64]bool
+	negativeStats map[int64]bool
 }
 
 func (c *followingFaultCache) Enabled() bool { return true }
@@ -172,17 +183,49 @@ func (c *followingFaultCache) ListOutboxes(_ context.Context, creatorIDs []int64
 	return entries, nil
 }
 
-func (c *followingFaultCache) GetCards(context.Context, []int64) (map[int64]*domfeed.FeedEntry, error) {
-	return nil, c.cardsErr
+func (c *followingFaultCache) GetCards(_ context.Context, clipIDs []int64) (map[int64]*domfeed.FeedEntry, map[int64]bool, error) {
+	return nil, filterNegative(clipIDs, c.negativeCards), c.cardsErr
 }
 
 func (c *followingFaultCache) SetCards(context.Context, []*domfeed.FeedEntry) { c.setCards++ }
 
-func (c *followingFaultCache) GetStats(context.Context, []int64) (map[int64]*domfeed.EntryStats, error) {
-	return nil, c.statsErr
+// MarkCardsMissing 记录负占位，模拟 Redis 侧写入。
+func (c *followingFaultCache) MarkCardsMissing(_ context.Context, clipIDs []int64) {
+	c.negativeCards = rememberNegative(c.negativeCards, clipIDs)
+}
+
+func (c *followingFaultCache) GetStats(_ context.Context, clipIDs []int64) (map[int64]*domfeed.EntryStats, map[int64]bool, error) {
+	return nil, filterNegative(clipIDs, c.negativeStats), c.statsErr
 }
 
 func (c *followingFaultCache) SetStats(context.Context, map[int64]*domfeed.EntryStats) { c.setStats++ }
+
+// MarkStatsMissing 记录计数负占位。
+func (c *followingFaultCache) MarkStatsMissing(_ context.Context, clipIDs []int64) {
+	c.negativeStats = rememberNegative(c.negativeStats, clipIDs)
+}
+
+// filterNegative 从请求 ID 中筛出命中的负占位集合。
+func filterNegative(clipIDs []int64, negative map[int64]bool) map[int64]bool {
+	result := make(map[int64]bool, len(clipIDs))
+	for _, id := range clipIDs {
+		if negative[id] {
+			result[id] = true
+		}
+	}
+	return result
+}
+
+// rememberNegative 把 clipIDs 并入负占位集合，返回新集合。
+func rememberNegative(negative map[int64]bool, clipIDs []int64) map[int64]bool {
+	if negative == nil {
+		negative = make(map[int64]bool, len(clipIDs))
+	}
+	for _, id := range clipIDs {
+		negative[id] = true
+	}
+	return negative
+}
 
 // newFollowingFaultFixture 构造一条 inbox 条目与可故障注入的缓存。
 func newFollowingFaultFixture() (*followingFaultRepo, *followingFaultCache) {

@@ -47,11 +47,11 @@ func TestFeedCacheMissKeepsNilError(t *testing.T) {
 	if err != nil || version != feedVersionDefault {
 		t.Fatalf("版本键缺失应返回默认版本且无错误: version=%q err=%v", version, err)
 	}
-	if cards, err := cache.GetCards(ctx, []int64{1, 2}); err != nil || len(cards) != 0 {
-		t.Fatalf("卡片未命中应返回空集且无错误: cards=%d err=%v", len(cards), err)
+	if cards, negative, err := cache.GetCards(ctx, []int64{1, 2}); err != nil || len(cards) != 0 || len(negative) != 0 {
+		t.Fatalf("卡片未命中应返回空集且无错误: cards=%d negative=%d err=%v", len(cards), len(negative), err)
 	}
-	if stats, err := cache.GetStats(ctx, []int64{1, 2}); err != nil || len(stats) != 0 {
-		t.Fatalf("计数未命中应返回空集且无错误: stats=%d err=%v", len(stats), err)
+	if stats, negative, err := cache.GetStats(ctx, []int64{1, 2}); err != nil || len(stats) != 0 || len(negative) != 0 {
+		t.Fatalf("计数未命中应返回空集且无错误: stats=%d negative=%d err=%v", len(stats), len(negative), err)
 	}
 	if items, err := cache.ListHotWindow(ctx); err != nil || len(items) != 0 {
 		t.Fatalf("空窗口应返回空列表且无错误: items=%d err=%v", len(items), err)
@@ -70,10 +70,10 @@ func TestFeedCacheFaultReturnsError(t *testing.T) {
 	if _, err := cache.FeedVersion(ctx); err == nil {
 		t.Fatal("Redis 故障时 FeedVersion 必须返回错误，不能退化为默认版本")
 	}
-	if _, err := cache.GetCards(ctx, []int64{1}); err == nil {
+	if _, _, err := cache.GetCards(ctx, []int64{1}); err == nil {
 		t.Fatal("Redis 故障时 GetCards 必须返回错误而不是空集")
 	}
-	if _, err := cache.GetStats(ctx, []int64{1}); err == nil {
+	if _, _, err := cache.GetStats(ctx, []int64{1}); err == nil {
 		t.Fatal("Redis 故障时 GetStats 必须返回错误而不是空集")
 	}
 	if _, err := cache.ListHotWindow(ctx); !errors.Is(err, ErrHotWindowUnavailable) {

@@ -41,6 +41,13 @@ const (
 	cardTTL = 15 * time.Minute
 	// statsTTL 是互动计数缓存基础 TTL：计数变化频繁，短 TTL 控制偏差。
 	statsTTL = 15 * time.Second
+	// missingCardTTL 是卡片/计数负占位的 TTL：回源确认 clip 不存在后，短时间内不再重复回源。
+	// 取 30s 的依据：略长于 statsTTL(15s)，可覆盖连续翻页/客户端重试造成的重复读取；
+	// 又远短于 cardTTL(15min)，误判最多 30s 自愈。发布/互动路径会用真实数据覆盖同键，
+	// 且 clip ID 不复用，因此负占位不会挡住正常新发布内容的可见性。
+	missingCardTTL = 30 * time.Second
+	// missingMarker 是卡片/计数负占位的存储内容，与 JSON 结构区分。
+	missingMarker = "__missing__"
 
 	// actionShardCount 是互动计数分片数：按用户 ID 散列到分片，降低单键写入热点。
 	actionShardCount = 16
@@ -238,11 +245,13 @@ func (c *FeedCache) DeleteClipCache(ctx context.Context, clipID int64) {
 }
 
 // GetCards 批量读取卡片缓存；返回值只含命中的 ID，未命中由调用方回源。
+// negative 是带负占位的 ID（此前回源确认 DB 不存在），调用方应直接跳过而不是再次回源。
 // err 非 nil 表示缓存故障，调用方必须把整批 ID 回源，不能按「未命中」处理。
-func (c *FeedCache) GetCards(ctx context.Context, clipIDs []int64) (map[int64]*domfeed.FeedEntry, error) {
+func (c *FeedCache) GetCards(ctx context.Context, clipIDs []int64) (map[int64]*domfeed.FeedEntry, map[int64]bool, error) {
 	found := make(map[int64]*domfeed.FeedEntry, len(clipIDs))
+	negative := make(map[int64]bool, len(clipIDs))
 	if !c.Enabled() || len(clipIDs) == 0 {
-		return found, nil
+		return found, negative, nil
 	}
 	keys := make([]string, 0, len(clipIDs))
 	for _, id := range clipIDs {
@@ -251,11 +260,15 @@ func (c *FeedCache) GetCards(ctx context.Context, clipIDs []int64) (map[int64]*d
 	values, err := c.client.MGet(ctx, keys...).Result()
 	if err != nil {
 		log.Printf("warning: 读取卡片缓存失败 (count=%d): %v", len(clipIDs), err)
-		return nil, err
+		return nil, nil, err
 	}
 	for i, value := range values {
 		raw, ok := value.(string)
 		if !ok {
+			continue
+		}
+		if raw == missingMarker {
+			negative[clipIDs[i]] = true
 			continue
 		}
 		entry := &domfeed.FeedEntry{}
@@ -264,7 +277,7 @@ func (c *FeedCache) GetCards(ctx context.Context, clipIDs []int64) (map[int64]*d
 		}
 		found[clipIDs[i]] = entry
 	}
-	return found, nil
+	return found, negative, nil
 }
 
 // SetCards 批量回填卡片缓存；失败仅记日志（S11 起消费）。
@@ -285,12 +298,20 @@ func (c *FeedCache) SetCards(ctx context.Context, entries []*domfeed.FeedEntry) 
 	}
 }
 
+// MarkCardsMissing 为回源确认不存在的 clip 写短 TTL 负占位，避免 inbox/outbox 残留的僵尸条目
+// 每次读取都重复回源；写入失败仅记日志，由下次回源兜底。
+func (c *FeedCache) MarkCardsMissing(ctx context.Context, clipIDs []int64) {
+	c.markMissing(ctx, clipIDs, cardKey)
+}
+
 // GetStats 批量读取互动计数缓存；返回值只含命中的 ID，未命中由调用方回源。
+// negative 是带负占位的 ID（此前回源确认 DB 不存在），调用方应直接跳过而不是再次回源。
 // err 非 nil 表示缓存故障，调用方必须把整批 ID 回源，不能按「未命中」处理。
-func (c *FeedCache) GetStats(ctx context.Context, clipIDs []int64) (map[int64]*domfeed.EntryStats, error) {
+func (c *FeedCache) GetStats(ctx context.Context, clipIDs []int64) (map[int64]*domfeed.EntryStats, map[int64]bool, error) {
 	found := make(map[int64]*domfeed.EntryStats, len(clipIDs))
+	negative := make(map[int64]bool, len(clipIDs))
 	if !c.Enabled() || len(clipIDs) == 0 {
-		return found, nil
+		return found, negative, nil
 	}
 	keys := make([]string, 0, len(clipIDs))
 	for _, id := range clipIDs {
@@ -299,11 +320,15 @@ func (c *FeedCache) GetStats(ctx context.Context, clipIDs []int64) (map[int64]*d
 	values, err := c.client.MGet(ctx, keys...).Result()
 	if err != nil {
 		log.Printf("warning: 读取计数缓存失败 (count=%d): %v", len(clipIDs), err)
-		return nil, err
+		return nil, nil, err
 	}
 	for i, value := range values {
 		raw, ok := value.(string)
 		if !ok {
+			continue
+		}
+		if raw == missingMarker {
+			negative[clipIDs[i]] = true
 			continue
 		}
 		stats := &domfeed.EntryStats{}
@@ -312,7 +337,26 @@ func (c *FeedCache) GetStats(ctx context.Context, clipIDs []int64) (map[int64]*d
 		}
 		found[clipIDs[i]] = stats
 	}
-	return found, nil
+	return found, negative, nil
+}
+
+// MarkStatsMissing 为回源确认不存在的计数写短 TTL 负占位；写入失败仅记日志。
+func (c *FeedCache) MarkStatsMissing(ctx context.Context, clipIDs []int64) {
+	c.markMissing(ctx, clipIDs, statsKey)
+}
+
+// markMissing 用 pipeline 批量写入负占位，键名由 keyFn 决定（卡片或计数）。
+func (c *FeedCache) markMissing(ctx context.Context, clipIDs []int64, keyFn func(int64) string) {
+	if !c.Enabled() || len(clipIDs) == 0 {
+		return
+	}
+	pipe := c.client.Pipeline()
+	for _, clipID := range clipIDs {
+		pipe.Set(ctx, keyFn(clipID), missingMarker, jitter(missingCardTTL))
+	}
+	if _, err := pipe.Exec(ctx); err != nil {
+		log.Printf("warning: 回填负占位失败 (count=%d): %v", len(clipIDs), err)
+	}
 }
 
 // SetStats 批量回填互动计数缓存；失败仅记日志（S9 起消费）。

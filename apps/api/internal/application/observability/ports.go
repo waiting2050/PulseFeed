@@ -11,6 +11,8 @@ type Metrics interface {
 	ObserveFeed(scene, result string, duration time.Duration)
 	// ObserveCache 记录一次缓存访问结果（hit/miss/disabled/error/card_error/stats_error/hot_error/hot_empty）。
 	ObserveCache(result string)
+	// ObserveFeedLimiterError 记录一次 Feed 限流降级（Redis 不可用时 fail-open），按 user/ip 区分。
+	ObserveFeedLimiterError(scope string)
 	// ObserveWorker 记录一次 Worker 消息处理结果（ok/error）。
 	ObserveWorker(worker, result string)
 	// ObserveQoS 记录一次 QoS 上报结果（inserted/duplicate/error）；

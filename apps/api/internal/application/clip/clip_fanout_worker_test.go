@@ -171,14 +171,14 @@ func (f *fanoutWFakeCache) ListOutboxes(_ context.Context, creatorIDs []int64, _
 	return entries, nil
 }
 
-func (f *fanoutWFakeCache) GetCards(_ context.Context, clipIDs []int64) (map[int64]*domfeed.FeedEntry, error) {
+func (f *fanoutWFakeCache) GetCards(_ context.Context, clipIDs []int64) (map[int64]*domfeed.FeedEntry, map[int64]bool, error) {
 	result := make(map[int64]*domfeed.FeedEntry, len(clipIDs))
 	for _, id := range clipIDs {
 		if entry, ok := f.cards[id]; ok {
 			result[id] = entry
 		}
 	}
-	return result, nil
+	return result, map[int64]bool{}, nil
 }
 
 func (f *fanoutWFakeCache) SetCards(_ context.Context, entries []*domfeed.FeedEntry) {
@@ -188,14 +188,17 @@ func (f *fanoutWFakeCache) SetCards(_ context.Context, entries []*domfeed.FeedEn
 	}
 }
 
-func (f *fanoutWFakeCache) GetStats(_ context.Context, clipIDs []int64) (map[int64]*domfeed.EntryStats, error) {
+// MarkCardsMissing 在扇出测试中无意义，仅满足接口。
+func (f *fanoutWFakeCache) MarkCardsMissing(context.Context, []int64) {}
+
+func (f *fanoutWFakeCache) GetStats(_ context.Context, clipIDs []int64) (map[int64]*domfeed.EntryStats, map[int64]bool, error) {
 	result := make(map[int64]*domfeed.EntryStats, len(clipIDs))
 	for _, id := range clipIDs {
 		if stats, ok := f.stats[id]; ok {
 			result[id] = stats
 		}
 	}
-	return result, nil
+	return result, map[int64]bool{}, nil
 }
 
 func (f *fanoutWFakeCache) SetStats(_ context.Context, stats map[int64]*domfeed.EntryStats) {
@@ -204,6 +207,9 @@ func (f *fanoutWFakeCache) SetStats(_ context.Context, stats map[int64]*domfeed.
 		f.stats[id] = value
 	}
 }
+
+// MarkStatsMissing 在扇出测试中无意义，仅满足接口。
+func (f *fanoutWFakeCache) MarkStatsMissing(context.Context, []int64) {}
 
 // fanoutWNewFixture 构造 clip_id=42、creator_id=7 的 Worker 测试夹具。
 func fanoutWNewFixture() (*fanoutWFakeRepo, *fanoutWFakeCache, []byte, time.Time) {
