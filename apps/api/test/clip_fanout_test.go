@@ -117,7 +117,7 @@ func (f *fanoutFakeCache) AddOutboxEntries(_ context.Context, creatorID int64, _
 	return nil
 }
 
-func (f *fanoutFakeCache) ListOutbox(_ context.Context, _ int64, _ *domfeed.Cursor, _ int) ([]domfeed.InboxEntry, error) {
+func (f *fanoutFakeCache) ListOutboxes(_ context.Context, _ []int64, _ *domfeed.Cursor, _ int) ([]domfeed.InboxEntry, error) {
 	return nil, nil
 }
 

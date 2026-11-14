@@ -184,6 +184,29 @@ func TestFollowingVersionedCursorKeepsPaging(t *testing.T) {
 	}
 }
 
+// TestFollowingReadsAllOutboxesInOneBatch 验证一次关注流读取把所有大 V outbox 合并为一次批量读取，
+// 而不是每个创作者一次 Redis 往返。
+func TestFollowingReadsAllOutboxesInOneBatch(t *testing.T) {
+	ctx := context.Background()
+	repo := newFallbackFollowingRepo(0)
+	repo.creators = []*domfeed.FollowedCreator{
+		{CreatorID: 7, FollowerCount: appfeed.BigVFollowerThreshold},
+		{CreatorID: 8, FollowerCount: appfeed.BigVFollowerThreshold},
+	}
+	cache := &followingFaultCache{}
+	svc := appfeed.New(repo, appfeed.WithFollowingStrategy(cache))
+
+	if _, err := svc.GetFeed(ctx, &appfeed.FeedRequest{Scene: "following", ViewerID: 5, Limit: 5}); err != nil {
+		t.Fatalf("关注流读取失败: %v", err)
+	}
+	if cache.outboxCalls != 1 {
+		t.Fatalf("大 V outbox 应合并为一次批量读取，实际调用 %d 次", cache.outboxCalls)
+	}
+	if len(cache.outboxIDs) != 2 || cache.outboxIDs[0] != 7 || cache.outboxIDs[1] != 8 {
+		t.Fatalf("批量读取应一次带上全部大 V，实际 %v", cache.outboxIDs)
+	}
+}
+
 // TestFollowingFallbackUsesLastCacheEntryCursor 验证缓存与 DB 混合时，
 // 回源游标取缓存页最后一条，避免重复返回已读内容。
 func TestFollowingFallbackUsesLastCacheEntryCursor(t *testing.T) {

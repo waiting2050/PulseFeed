@@ -163,8 +163,12 @@ func (f *fanoutWFakeCache) AddOutboxEntries(_ context.Context, creatorID int64, 
 	return nil
 }
 
-func (f *fanoutWFakeCache) ListOutbox(_ context.Context, creatorID int64, _ *domfeed.Cursor, _ int) ([]domfeed.InboxEntry, error) {
-	return f.outbox[creatorID], nil
+func (f *fanoutWFakeCache) ListOutboxes(_ context.Context, creatorIDs []int64, _ *domfeed.Cursor, _ int) ([]domfeed.InboxEntry, error) {
+	var entries []domfeed.InboxEntry
+	for _, creatorID := range creatorIDs {
+		entries = append(entries, f.outbox[creatorID]...)
+	}
+	return entries, nil
 }
 
 func (f *fanoutWFakeCache) GetCards(_ context.Context, clipIDs []int64) (map[int64]*domfeed.FeedEntry, error) {

@@ -262,6 +262,74 @@ func TestAddFeedBoxRenewsTTL(t *testing.T) {
 	}
 }
 
+// TestListOutboxesBatchesAcrossPipelineChunks 验证 outbox 批量读取跨 pipeline 分片仍正确：
+// 150 个源超过单批命令数上限，全部源都能读到，且每个源仍受 limit 限制。
+func TestListOutboxesBatchesAcrossPipelineChunks(t *testing.T) {
+	ctx := context.Background()
+	cache, _ := newBoxTestCache(t)
+	base := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
+	const creatorCount = 150
+	creatorIDs := make([]int64, 0, creatorCount)
+	for i := 1; i <= creatorCount; i++ {
+		creatorID := int64(1000 + i)
+		creatorIDs = append(creatorIDs, creatorID)
+		entries := []domfeed.InboxEntry{
+			{ClipID: int64(i*2 - 1), CreatorID: creatorID, PublishedAt: base.Add(time.Duration(i) * time.Second)},
+			{ClipID: int64(i * 2), CreatorID: creatorID, PublishedAt: base.Add(time.Duration(i) * time.Second).Add(time.Millisecond)},
+		}
+		if err := cache.AddOutboxEntries(ctx, creatorID, entries); err != nil {
+			t.Fatalf("写入 outbox 失败: %v", err)
+		}
+	}
+
+	page, err := cache.ListOutboxes(ctx, creatorIDs, nil, 1)
+	if err != nil {
+		t.Fatalf("批量读取 outbox 失败: %v", err)
+	}
+	if len(page) != creatorCount {
+		t.Fatalf("每个源应各返回 1 条，期望 %d 条，实际 %d 条", creatorCount, len(page))
+	}
+	seen := make(map[int64]bool, creatorCount)
+	for _, entry := range page {
+		if seen[entry.CreatorID] {
+			t.Fatalf("同一源不应重复返回: creator=%d", entry.CreatorID)
+		}
+		seen[entry.CreatorID] = true
+		if entry.ClipID%2 != 0 {
+			t.Fatalf("limit=1 应返回每个源最新的一条，实际 clip=%d", entry.ClipID)
+		}
+	}
+
+	newest := page[0]
+	for _, entry := range page[1:] {
+		if entry.PublishedAt.After(newest.PublishedAt) {
+			newest = entry
+		}
+	}
+	cursor := &domfeed.Cursor{PublishedAt: newest.PublishedAt, ClipID: newest.ClipID}
+	older, err := cache.ListOutboxes(ctx, creatorIDs, cursor, 1)
+	if err != nil {
+		t.Fatalf("批量翻页失败: %v", err)
+	}
+	// 其余 149 个源各返回最新一条，游标所属源返回它更旧的一条，合计仍为 150 条。
+	if len(older) != creatorCount {
+		t.Fatalf("游标之后应返回 %d 条（其余源各 1 条 + 游标源更旧 1 条），实际 %d 条", creatorCount, len(older))
+	}
+	for _, entry := range older {
+		if !entry.PublishedAt.Before(cursor.PublishedAt) {
+			t.Fatalf("批量翻页不应返回游标及更新条目: %+v", entry)
+		}
+	}
+}
+
+// TestListOutboxesDisabledReturnsUnavailable 验证缓存未启用时批量读取返回 ErrFeedBoxUnavailable。
+func TestListOutboxesDisabledReturnsUnavailable(t *testing.T) {
+	cache := &FeedCache{}
+	if _, err := cache.ListOutboxes(context.Background(), []int64{7}, nil, 10); err != ErrFeedBoxUnavailable {
+		t.Fatalf("期望 ErrFeedBoxUnavailable，实际 %v", err)
+	}
+}
+
 // TestListOutboxPaginatesByScore 验证 outbox 与 inbox 共用按需分页语义。
 func TestListOutboxPaginatesByScore(t *testing.T) {
 	ctx := context.Background()
@@ -279,7 +347,7 @@ func TestListOutboxPaginatesByScore(t *testing.T) {
 		t.Fatalf("写入 outbox 失败: %v", err)
 	}
 
-	first, err := cache.ListOutbox(ctx, 7, nil, 2)
+	first, err := cache.ListOutboxes(ctx, []int64{7}, nil, 2)
 	if err != nil {
 		t.Fatalf("outbox 首屏读取失败: %v", err)
 	}
@@ -287,7 +355,7 @@ func TestListOutboxPaginatesByScore(t *testing.T) {
 		t.Fatalf("outbox 首屏异常: %+v", first)
 	}
 	cursor := &domfeed.Cursor{PublishedAt: first[1].PublishedAt, ClipID: first[1].ClipID}
-	second, err := cache.ListOutbox(ctx, 7, cursor, 2)
+	second, err := cache.ListOutboxes(ctx, []int64{7}, cursor, 2)
 	if err != nil {
 		t.Fatalf("outbox 翻页读取失败: %v", err)
 	}

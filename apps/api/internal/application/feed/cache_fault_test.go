@@ -138,11 +138,14 @@ func (r *followingFaultRepo) BatchGetStats(_ context.Context, clipIDs []int64) (
 
 // followingFaultCache 是可注入卡片/计数读取故障的 following 缓存。
 type followingFaultCache struct {
-	inbox    []domfeed.InboxEntry
-	cardsErr error
-	statsErr error
-	setCards int
-	setStats int
+	inbox       []domfeed.InboxEntry
+	outboxes    map[int64][]domfeed.InboxEntry
+	outboxCalls int
+	outboxIDs   []int64
+	cardsErr    error
+	statsErr    error
+	setCards    int
+	setStats    int
 }
 
 func (c *followingFaultCache) Enabled() bool { return true }
@@ -159,8 +162,14 @@ func (c *followingFaultCache) AddOutboxEntries(context.Context, int64, []domfeed
 	return nil
 }
 
-func (c *followingFaultCache) ListOutbox(_ context.Context, _ int64, _ *domfeed.Cursor, _ int) ([]domfeed.InboxEntry, error) {
-	return nil, nil
+func (c *followingFaultCache) ListOutboxes(_ context.Context, creatorIDs []int64, _ *domfeed.Cursor, _ int) ([]domfeed.InboxEntry, error) {
+	c.outboxCalls++
+	c.outboxIDs = append(c.outboxIDs, creatorIDs...)
+	var entries []domfeed.InboxEntry
+	for _, creatorID := range creatorIDs {
+		entries = append(entries, c.outboxes[creatorID]...)
+	}
+	return entries, nil
 }
 
 func (c *followingFaultCache) GetCards(context.Context, []int64) (map[int64]*domfeed.FeedEntry, error) {

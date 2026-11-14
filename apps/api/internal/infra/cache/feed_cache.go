@@ -59,6 +59,10 @@ const (
 
 	// inboxMaxEntries 是 inbox/outbox 裁剪上限：只保留按分值（发布时间）最新的 N 条。
 	inboxMaxEntries = 1000
+	// outboxPipelineBatch 是单次 outbox 批量读取的 pipeline 分片命令数上限：
+	// 关注 100 个大 V 时一次往返即可读完全部源；极端关注量下按每批 100 个键分片，
+	// 往返数仍从 O(N) 降到 O(N/100)。
+	outboxPipelineBatch = 100
 	// feedBoxTTL 是 inbox/outbox 的写入侧续期时长：每次 fanout/回填写入都会重新计时，
 	// 长期没有新内容的键自然过期，避免无界增长；选择写入续期而不是定时对账重建，
 	// 是因为键可由数据库重新扇出重建，且回源补齐保证了过期后读侧仍然正确。
@@ -691,9 +695,40 @@ func (c *FeedCache) AddOutboxEntries(ctx context.Context, creatorID int64, entri
 	return c.addFeedBoxEntries(ctx, outboxKey(creatorID), entries)
 }
 
-// ListOutbox 读取创作者 outbox 中游标之后的至多 limit 条条目；分页语义与 ListInbox 相同。
-func (c *FeedCache) ListOutbox(ctx context.Context, creatorID int64, cursor *domfeed.Cursor, limit int) ([]domfeed.InboxEntry, error) {
-	return c.listFeedBox(ctx, outboxKey(creatorID), cursor, limit)
+// ListOutboxes 批量读取多个创作者 outbox 中游标之后的至多 limit 条条目：
+// 所有读取命令合并进一次 pipeline（超过 outboxPipelineBatch 时按批分片），
+// 把 N 个源的往返数从 O(N) 压到 O(N/100)，因此调用方无需再为 outbox 单独限并发。
+func (c *FeedCache) ListOutboxes(ctx context.Context, creatorIDs []int64, cursor *domfeed.Cursor, limit int) ([]domfeed.InboxEntry, error) {
+	if !c.Enabled() {
+		return nil, ErrFeedBoxUnavailable
+	}
+	if limit <= 0 {
+		limit = 1
+	}
+	entries := make([]domfeed.InboxEntry, 0, len(creatorIDs)*limit)
+	for start := 0; start < len(creatorIDs); start += outboxPipelineBatch {
+		end := start + outboxPipelineBatch
+		if end > len(creatorIDs) {
+			end = len(creatorIDs)
+		}
+		batch := creatorIDs[start:end]
+		pipe := c.client.Pipeline()
+		cmds := make([]*redis.ZSliceCmd, 0, len(batch))
+		for _, creatorID := range batch {
+			cmds = append(cmds, queueFeedBoxRead(ctx, pipe, outboxKey(creatorID), cursor, limit))
+		}
+		if _, err := pipe.Exec(ctx); err != nil {
+			return nil, fmt.Errorf("批量读取关注流缓存失败: %w", err)
+		}
+		for _, cmd := range cmds {
+			values, err := cmd.Result()
+			if err != nil {
+				return nil, fmt.Errorf("批量读取关注流缓存失败: %w", err)
+			}
+			entries = append(entries, decodeFeedBoxValues(values, cursor, limit)...)
+		}
+	}
+	return entries, nil
 }
 
 // addFeedBoxEntries 是 inbox/outbox 写入的公共实现：ZADD 批量推入后按排名裁剪到最新 N 条。
@@ -722,9 +757,8 @@ func (c *FeedCache) addFeedBoxEntries(ctx context.Context, key string, entries [
 	return nil
 }
 
-// listFeedBox 是 inbox/outbox 读取的公共实现：首屏取最新 limit 条，
-// 翻页按游标发布时间（毫秒分值的 ZSET score）用 ZREVRANGEBYSCORE 只取该毫秒及更旧的条目，
-// 再在内存里按 (published_at, clip_id) 复合边界过滤，保持与数据库分页一致的游标语义。
+// listFeedBox 是 inbox/outbox 单键读取的实现：与批量读取共用同一命令构造与解码逻辑，
+// 只是把一条命令放进管道执行，保证单键与批量语义完全一致。
 func (c *FeedCache) listFeedBox(ctx context.Context, key string, cursor *domfeed.Cursor, limit int) ([]domfeed.InboxEntry, error) {
 	if !c.Enabled() {
 		return nil, ErrFeedBoxUnavailable
@@ -733,25 +767,38 @@ func (c *FeedCache) listFeedBox(ctx context.Context, key string, cursor *domfeed
 		limit = 1
 	}
 
-	var values []redis.Z
-	var err error
-	if cursor == nil {
-		values, err = c.client.ZRevRangeWithScores(ctx, key, 0, int64(limit-1)).Result()
-	} else {
-		// 分值已到毫秒，同值窗口只剩同一毫秒内的条目，不再需要 ZCOUNT 补同秒配额：
-		// 多取一条留给复合边界过滤（游标自身最多占一条）即可。
-		maxScore := strconv.FormatInt(cursor.PublishedAt.UnixMilli(), 10)
-		values, err = c.client.ZRevRangeByScoreWithScores(ctx, key, &redis.ZRangeBy{
-			Max:    maxScore,
-			Min:    "-inf",
-			Offset: 0,
-			Count:  int64(limit + 1),
-		}).Result()
+	pipe := c.client.Pipeline()
+	cmd := queueFeedBoxRead(ctx, pipe, key, cursor, limit)
+	if _, err := pipe.Exec(ctx); err != nil {
+		return nil, fmt.Errorf("读取关注流缓存失败: %w", err)
 	}
+	values, err := cmd.Result()
 	if err != nil {
 		return nil, fmt.Errorf("读取关注流缓存失败: %w", err)
 	}
+	return decodeFeedBoxValues(values, cursor, limit), nil
+}
 
+// queueFeedBoxRead 把一次 inbox/outbox 读取命令加入管道并返回结果命令：
+// 首屏按排名取最新 limit 条；翻页按毫秒分值用 ZREVRANGEBYSCORE 取游标及更旧的 limit+1 条。
+func queueFeedBoxRead(ctx context.Context, pipe redis.Pipeliner, key string, cursor *domfeed.Cursor, limit int) *redis.ZSliceCmd {
+	if cursor == nil {
+		return pipe.ZRevRangeWithScores(ctx, key, 0, int64(limit-1))
+	}
+	// 分值已到毫秒，同值窗口只剩同一毫秒内的条目，不再需要 ZCOUNT 补同秒配额：
+	// 多取一条留给复合边界过滤（游标自身最多占一条）即可。
+	maxScore := strconv.FormatInt(cursor.PublishedAt.UnixMilli(), 10)
+	return pipe.ZRevRangeByScoreWithScores(ctx, key, &redis.ZRangeBy{
+		Max:    maxScore,
+		Min:    "-inf",
+		Offset: 0,
+		Count:  int64(limit + 1),
+	})
+}
+
+// decodeFeedBoxValues 把 ZSET 结果解码为轻量条目，并按 (published_at, clip_id) 复合边界过滤，
+// 保持与数据库分页一致的游标语义（排除游标本身及同一毫秒内已读条目）。
+func decodeFeedBoxValues(values []redis.Z, cursor *domfeed.Cursor, limit int) []domfeed.InboxEntry {
 	entries := make([]domfeed.InboxEntry, 0, len(values))
 	for _, value := range values {
 		member, ok := value.Member.(string)
@@ -778,7 +825,7 @@ func (c *FeedCache) listFeedBox(ctx context.Context, key string, cursor *domfeed
 	if len(entries) > limit {
 		entries = entries[:limit]
 	}
-	return entries, nil
+	return entries
 }
 
 // inboxKey 返回读者收件箱键。

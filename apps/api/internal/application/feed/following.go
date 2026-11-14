@@ -6,7 +6,6 @@ import (
 	"context"
 	"log"
 	"sort"
-	"sync"
 
 	appobservability "pulsefeed/internal/application/observability"
 	domfeed "pulsefeed/internal/domain/feed"
@@ -15,10 +14,6 @@ import (
 // BigVFollowerThreshold 是大 V 粉丝数阈值：达到该值的创作者走拉模型（读时合并其 outbox），
 // 低于该值的创作者走推模型（关注回填/发布扇出时写入读者 inbox）。
 const BigVFollowerThreshold = 10000
-
-// outboxReadConcurrency 限制一次关注流读取中并行拉取 outbox 的数量，
-// 避免关注大量创作者时把 Redis 往返数一次性放大成不受控的并发洪峰。
-const outboxReadConcurrency = 8
 
 // FollowingCache 描述 following 场景所需的缓存能力，由 infra/cache 的 FeedCache 实现。
 type FollowingCache interface {
@@ -30,8 +25,9 @@ type FollowingCache interface {
 	ListInbox(ctx context.Context, userID int64, cursor *domfeed.Cursor, limit int) ([]domfeed.InboxEntry, error)
 	// AddOutboxEntries 把条目推入创作者 outbox（大 V 拉模型）。
 	AddOutboxEntries(ctx context.Context, creatorID int64, entries []domfeed.InboxEntry) error
-	// ListOutbox 读取创作者 outbox 中游标之后的至多 limit 条条目；cursor 为 nil 表示首屏。
-	ListOutbox(ctx context.Context, creatorID int64, cursor *domfeed.Cursor, limit int) ([]domfeed.InboxEntry, error)
+	// ListOutboxes 批量读取多个创作者 outbox 中游标之后的至多 limit 条条目；
+	// 实现应把 N 个源的读取合并为一次（必要时分片）pipeline，避免 O(N) 次往返。
+	ListOutboxes(ctx context.Context, creatorIDs []int64, cursor *domfeed.Cursor, limit int) ([]domfeed.InboxEntry, error)
 	// GetCards 批量读取卡片缓存，返回命中部分；err 非 nil 表示缓存故障，调用方须整批回源。
 	GetCards(ctx context.Context, clipIDs []int64) (map[int64]*domfeed.FeedEntry, error)
 	// SetCards 批量回填卡片缓存。
@@ -147,7 +143,7 @@ func (s *FollowingStrategy) fallbackFollowingPage(ctx context.Context, viewerID 
 }
 
 // loadMergedInbox 读取读者 inbox 与关注中大 V 的 outbox 并合并：
-// 每次只按游标取一页（首屏 limit+1 条），outbox 以受控并发拉取；
+// 每次只按游标取一页（首屏 limit+1 条），outbox 通过一次批量 pipeline 拉取；
 // inbox 条目按实时关注集过滤（取关即消失），合并后按 (published_at, clip_id) 严格递减排序去重；
 // 关注集或任一缓存读取失败时返回错误，由调用方回源 DB。
 func (s *FollowingStrategy) loadMergedInbox(ctx context.Context, viewerID int64, cursor *domfeed.Cursor, limit int) ([]domfeed.InboxEntry, error) {
@@ -229,40 +225,14 @@ func (s *FollowingStrategy) listInboxPage(ctx context.Context, viewerID int64, c
 	return collected, nil
 }
 
-// listOutboxPages 受控并发读取关注中大 V 的 outbox：并发度由 outboxReadConcurrency 封顶，
+// listOutboxPages 读取关注中大 V 的 outbox：所有源的读取命令合并为一次（必要时分片）pipeline，
+// 往返数从 O(N) 降到 O(N/100)，因此不再需要 outboxReadConcurrency 的并发上限；
 // 结果顺序与创作者顺序无关（调用方统一排序），任一读取失败即返回错误由上层回源 DB。
 func (s *FollowingStrategy) listOutboxPages(ctx context.Context, creatorIDs []int64, cursor *domfeed.Cursor, limit int) ([]domfeed.InboxEntry, error) {
 	if len(creatorIDs) == 0 {
 		return nil, nil
 	}
-
-	type boxResult struct {
-		entries []domfeed.InboxEntry
-		err     error
-	}
-	results := make([]boxResult, len(creatorIDs))
-	sem := make(chan struct{}, outboxReadConcurrency)
-	var wg sync.WaitGroup
-	for index, creatorID := range creatorIDs {
-		wg.Add(1)
-		go func(index int, creatorID int64) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			entries, err := s.cache.ListOutbox(ctx, creatorID, cursor, limit)
-			results[index] = boxResult{entries: entries, err: err}
-		}(index, creatorID)
-	}
-	wg.Wait()
-
-	merged := make([]domfeed.InboxEntry, 0, len(creatorIDs)*limit)
-	for _, result := range results {
-		if result.err != nil {
-			return nil, result.err
-		}
-		merged = append(merged, result.entries...)
-	}
-	return merged, nil
+	return s.cache.ListOutboxes(ctx, creatorIDs, cursor, limit)
 }
 
 // paginateInbox 按复合游标从已排序条目截取至多 count 条。
