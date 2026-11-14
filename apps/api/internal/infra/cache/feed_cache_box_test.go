@@ -169,6 +169,26 @@ func TestListInboxDisabledReturnsUnavailable(t *testing.T) {
 	}
 }
 
+// TestAddFeedBoxRenewsTTL 验证 inbox/outbox 写入时设置并续期 TTL：
+// 活跃键不会无限增长，沉寂键到期后由 DB 回源兜底。
+func TestAddFeedBoxRenewsTTL(t *testing.T) {
+	ctx := context.Background()
+	cache, server := newBoxTestCache(t)
+	seedInbox(t, cache, 5, 2)
+	if err := cache.AddOutboxEntries(ctx, 7, []domfeed.InboxEntry{{
+		ClipID: 9, CreatorID: 7, PublishedAt: time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC),
+	}}); err != nil {
+		t.Fatalf("写入 outbox 失败: %v", err)
+	}
+
+	for _, key := range []string{inboxKey(5), outboxKey(7)} {
+		ttl := server.TTL(key)
+		if ttl < feedBoxTTL || ttl > feedBoxTTL*120/100 {
+			t.Fatalf("键 %s 的 TTL 应在基础值到 +20%% 抖动之间，实际 %v", key, ttl)
+		}
+	}
+}
+
 // TestListOutboxPaginatesByScore 验证 outbox 与 inbox 共用按需分页语义。
 func TestListOutboxPaginatesByScore(t *testing.T) {
 	ctx := context.Background()

@@ -52,6 +52,10 @@ const (
 
 	// inboxMaxEntries 是 inbox/outbox 裁剪上限：只保留按分值（发布时间）最新的 N 条。
 	inboxMaxEntries = 1000
+	// feedBoxTTL 是 inbox/outbox 的写入侧续期时长：每次 fanout/回填写入都会重新计时，
+	// 长期没有新内容的键自然过期，避免无界增长；选择写入续期而不是定时对账重建，
+	// 是因为键可由数据库重新扇出重建，且回源补齐保证了过期后读侧仍然正确。
+	feedBoxTTL = 7 * 24 * time.Hour
 
 	// hotWindowBuckets 是 hot 场景合并的分钟桶数量（最近 60 个桶，即约 1 小时）。
 	hotWindowBuckets = 60
@@ -701,6 +705,8 @@ func (c *FeedCache) addFeedBoxEntries(ctx context.Context, key string, entries [
 	pipe.ZAdd(ctx, key, members...)
 	// 只保留按分值（发布时间）最新的 N 条：排名 0..-(N+1) 的都是较旧条目。
 	pipe.ZRemRangeByRank(ctx, key, 0, -int64(inboxMaxEntries)-1)
+	// 写入即续期：活跃键保持可用，沉寂键到期后由第 3 步的 DB 回源兜住读路径。
+	pipe.Expire(ctx, key, jitter(feedBoxTTL))
 	if _, err := pipe.Exec(ctx); err != nil {
 		return fmt.Errorf("写入关注流缓存失败: %w", err)
 	}
