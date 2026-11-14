@@ -95,7 +95,7 @@ func TestListInboxPaginatesByScore(t *testing.T) {
 	}
 }
 
-// TestListInboxSameSecondUsesClipBoundary 验证同一秒内的条目按 clip_id 复合边界翻页，
+// TestListInboxSameSecondUsesClipBoundary 验证同一毫秒内的条目按 clip_id 复合边界翻页，
 // 不会因为 ZSET 分数相同而重复或遗漏。
 func TestListInboxSameSecondUsesClipBoundary(t *testing.T) {
 	ctx := context.Background()
@@ -116,6 +116,79 @@ func TestListInboxSameSecondUsesClipBoundary(t *testing.T) {
 	}
 	if len(page) != 1 || page[0].ClipID != 1 {
 		t.Fatalf("同秒游标应只返回更小的 clip_id=1，实际 %+v", page)
+	}
+}
+
+// TestAddInboxStoresMillisecondScore 验证写入侧分值使用毫秒：
+// 同一秒内不同毫秒的条目分值不同，游标停在其中一条时只重读该毫秒，而不是整秒。
+func TestAddInboxStoresMillisecondScore(t *testing.T) {
+	ctx := context.Background()
+	cache, server := newBoxTestCache(t)
+	base := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
+	entries := []domfeed.InboxEntry{
+		{ClipID: 1, CreatorID: 9, PublishedAt: base},
+		{ClipID: 2, CreatorID: 9, PublishedAt: base.Add(7 * time.Millisecond)},
+	}
+	if err := cache.AddInboxEntries(ctx, 5, entries); err != nil {
+		t.Fatalf("写入 inbox 失败: %v", err)
+	}
+
+	scores := make(map[string]float64, len(entries))
+	for _, entry := range entries {
+		member := feedBoxMember(entry.ClipID, entry.CreatorID)
+		score, err := server.ZScore(inboxKey(5), member)
+		if err != nil {
+			t.Fatalf("读取成员 %s 分值失败: %v", member, err)
+		}
+		scores[member] = score
+	}
+	for _, entry := range entries {
+		member := feedBoxMember(entry.ClipID, entry.CreatorID)
+		if got := int64(scores[member]); got != entry.PublishedAt.UnixMilli() {
+			t.Fatalf("成员 %s 的分值应为毫秒 %d，实际 %d", member, entry.PublishedAt.UnixMilli(), got)
+		}
+	}
+
+	page, err := cache.ListInbox(ctx, 5, &domfeed.Cursor{PublishedAt: entries[1].PublishedAt, ClipID: 2}, 10)
+	if err != nil {
+		t.Fatalf("按毫秒游标翻页失败: %v", err)
+	}
+	if len(page) != 1 || page[0].ClipID != 1 {
+		t.Fatalf("同秒更早的条目应可继续翻到，实际 %+v", page)
+	}
+	if !page[0].PublishedAt.Equal(base) {
+		t.Fatalf("毫秒分值往返应还原原始发布时间，实际 %v", page[0].PublishedAt)
+	}
+}
+
+// TestListInboxIgnoresLegacySecondKey 验证毫秒改造后读路径只认 pf:v2 键：
+// pf:v1 旧键里按秒存的分值不会被当作毫秒解读，旧键保持原样由既有 TTL 回收。
+func TestListInboxIgnoresLegacySecondKey(t *testing.T) {
+	ctx := context.Background()
+	cache, server := newBoxTestCache(t)
+	at := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
+	legacyKey := "pf:v1:feed:inbox:5"
+	if _, err := server.ZAdd(legacyKey, float64(at.Unix()), feedBoxMember(1, 9)); err != nil {
+		t.Fatalf("写入旧键失败: %v", err)
+	}
+	server.SetTTL(legacyKey, 24*time.Hour)
+
+	page, err := cache.ListInbox(ctx, 5, nil, 10)
+	if err != nil {
+		t.Fatalf("读取 inbox 失败: %v", err)
+	}
+	if len(page) != 0 {
+		t.Fatalf("不应读取 pf:v1 旧键，实际返回 %+v", page)
+	}
+	if _, err := server.ZMembers(legacyKey); err != nil {
+		t.Fatalf("旧键应保持原样由 TTL 回收: %v", err)
+	}
+
+	if err := cache.AddInboxEntries(ctx, 5, []domfeed.InboxEntry{{ClipID: 2, CreatorID: 9, PublishedAt: at}}); err != nil {
+		t.Fatalf("写入新键失败: %v", err)
+	}
+	if members, err := server.ZMembers(inboxKey(5)); err != nil || len(members) != 1 {
+		t.Fatalf("新写入应落到 %s，实际 members=%v err=%v", inboxKey(5), members, err)
 	}
 }
 

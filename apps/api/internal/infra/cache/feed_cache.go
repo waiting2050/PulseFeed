@@ -1,6 +1,6 @@
 // feed_cache.go 实现 Feed 页/卡片/计数三级缓存、互动状态缓存与关注流 inbox/outbox：
-// TTL 加 10%–20% 抖动，key 版本前缀 pf:v1；客户端为 nil 时所有读写静默降级
-// （Get 未命中、Set 跳过），由调用方回源 DB。
+// TTL 加 10%–20% 抖动；页/卡片/计数键版本前缀 pf:v1，inbox/outbox 因分值改为毫秒独立使用 pf:v2；
+// 客户端为 nil 时所有读写静默降级（Get 未命中、Set 跳过），由调用方回源 DB。
 package cache
 
 import (
@@ -49,6 +49,13 @@ const (
 	// actionBaseFieldLike / actionBaseFieldSave 是计数基线 hash 的两个字段。
 	actionBaseFieldLike = "like"
 	actionBaseFieldSave = "save"
+
+	// feedBoxKeyPrefix 是 inbox/outbox 专用的键版本前缀。
+	// 分值从秒改为毫秒后，pf:v1 键里的旧分值按毫秒解读会整体前移约 50 年，
+	// 与毫秒分值的游标边界完全错位；因此只给 inbox/outbox 升到 pf:v2，
+	// 不动物理上无关的页/卡片/计数键。旧键不再被读写，随 7 天 TTL 自然过期；
+	// 过渡期内新键尚未建立，读侧会回源 DB 补齐（fallbackFollowingPage），不会 500。
+	feedBoxKeyPrefix = "pf:v2"
 
 	// inboxMaxEntries 是 inbox/outbox 裁剪上限：只保留按分值（发布时间）最新的 N 条。
 	inboxMaxEntries = 1000
@@ -697,7 +704,9 @@ func (c *FeedCache) addFeedBoxEntries(ctx context.Context, key string, entries [
 	members := make([]redis.Z, 0, len(entries))
 	for _, entry := range entries {
 		members = append(members, redis.Z{
-			Score:  float64(entry.PublishedAt.Unix()),
+			// 毫秒分值：同一秒内的多条内容不再共用一个分值，
+			// 游标推进到某一毫秒后无需重读整秒。
+			Score:  float64(entry.PublishedAt.UnixMilli()),
 			Member: feedBoxMember(entry.ClipID, entry.CreatorID),
 		})
 	}
@@ -714,7 +723,7 @@ func (c *FeedCache) addFeedBoxEntries(ctx context.Context, key string, entries [
 }
 
 // listFeedBox 是 inbox/outbox 读取的公共实现：首屏取最新 limit 条，
-// 翻页按游标发布时间（ZSET score）用 ZREVRANGEBYSCORE 只取该分数及更旧的条目，
+// 翻页按游标发布时间（毫秒分值的 ZSET score）用 ZREVRANGEBYSCORE 只取该毫秒及更旧的条目，
 // 再在内存里按 (published_at, clip_id) 复合边界过滤，保持与数据库分页一致的游标语义。
 func (c *FeedCache) listFeedBox(ctx context.Context, key string, cursor *domfeed.Cursor, limit int) ([]domfeed.InboxEntry, error) {
 	if !c.Enabled() {
@@ -729,18 +738,14 @@ func (c *FeedCache) listFeedBox(ctx context.Context, key string, cursor *domfeed
 	if cursor == nil {
 		values, err = c.client.ZRevRangeWithScores(ctx, key, 0, int64(limit-1)).Result()
 	} else {
-		maxScore := strconv.FormatInt(cursor.PublishedAt.Unix(), 10)
-		// 分数边界取闭区间，游标自身与同秒已读条目也会占用返回配额；
-		// 先补上该秒的总条数，保证过滤后仍能取满 limit 条而不漏读更旧条目。
-		count := int64(limit) + 1
-		if sameSecond, countErr := c.client.ZCount(ctx, key, maxScore, maxScore).Result(); countErr == nil {
-			count += sameSecond
-		}
+		// 分值已到毫秒，同值窗口只剩同一毫秒内的条目，不再需要 ZCOUNT 补同秒配额：
+		// 多取一条留给复合边界过滤（游标自身最多占一条）即可。
+		maxScore := strconv.FormatInt(cursor.PublishedAt.UnixMilli(), 10)
 		values, err = c.client.ZRevRangeByScoreWithScores(ctx, key, &redis.ZRangeBy{
 			Max:    maxScore,
 			Min:    "-inf",
 			Offset: 0,
-			Count:  count,
+			Count:  int64(limit + 1),
 		}).Result()
 	}
 	if err != nil {
@@ -757,8 +762,8 @@ func (c *FeedCache) listFeedBox(ctx context.Context, key string, cursor *domfeed
 		if !ok {
 			continue
 		}
-		publishedAt := time.Unix(int64(value.Score), 0)
-		// ZSET 分数只到秒，同一秒内可能有多条；用 clip_id 复合边界排除游标本身及已读条目。
+		publishedAt := time.UnixMilli(int64(value.Score))
+		// 同一毫秒内仍可能有多条；用 clip_id 复合边界排除游标本身及已读条目。
 		if cursor != nil && !publishedAt.Before(cursor.PublishedAt) {
 			if publishedAt.After(cursor.PublishedAt) || clipID >= cursor.ClipID {
 				continue
@@ -778,12 +783,12 @@ func (c *FeedCache) listFeedBox(ctx context.Context, key string, cursor *domfeed
 
 // inboxKey 返回读者收件箱键。
 func inboxKey(userID int64) string {
-	return fmt.Sprintf("%s:feed:inbox:%d", keyPrefix, userID)
+	return fmt.Sprintf("%s:feed:inbox:%d", feedBoxKeyPrefix, userID)
 }
 
 // outboxKey 返回创作者发件箱键。
 func outboxKey(creatorID int64) string {
-	return fmt.Sprintf("%s:feed:outbox:%d", keyPrefix, creatorID)
+	return fmt.Sprintf("%s:feed:outbox:%d", feedBoxKeyPrefix, creatorID)
 }
 
 // feedBoxMember 编码 inbox/outbox 条目成员：clipID:creatorID 复合串，

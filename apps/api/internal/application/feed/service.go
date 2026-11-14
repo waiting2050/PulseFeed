@@ -190,6 +190,13 @@ func (s *Service) getFeed(ctx context.Context, req *FeedRequest) (*FeedResult, e
 	if err != nil {
 		return nil, err
 	}
+	if scene == domfeed.SceneFollowing && cursor != nil && cursor.Version < domfeed.CursorVersionMilli {
+		// 旧客户端持有毫秒改造前生成的秒级游标：其时间边界无法与新毫秒边界可靠比较，
+		// 继续使用会漏掉同一秒内更早发布的内容。显式降级为首屏而不是返回错误，
+		// 保证旧游标不会触发 500；客户端会回到第一页重新开始翻页。
+		log.Printf("info: following 游标版本过旧，重置为首屏 (version=%d)", cursor.Version)
+		cursor = nil
+	}
 
 	strategy := s.strategies[scene]
 	// 多取一条用于判定是否还有下一页，返回前截断。
@@ -204,7 +211,11 @@ func (s *Service) getFeed(ctx context.Context, req *FeedRequest) (*FeedResult, e
 		result.Items = result.Items[:limit]
 		if result.NextCursor == "" {
 			last := result.Items[len(result.Items)-1]
-			result.NextCursor = domfeed.EncodeCursor(&domfeed.Cursor{PublishedAt: last.PublishedAt, ClipID: last.ClipID})
+			result.NextCursor = domfeed.EncodeCursor(&domfeed.Cursor{
+				PublishedAt: last.PublishedAt,
+				ClipID:      last.ClipID,
+				Version:     domfeed.CursorVersionMilli,
+			})
 		}
 	}
 

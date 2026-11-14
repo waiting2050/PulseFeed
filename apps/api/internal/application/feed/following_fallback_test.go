@@ -4,6 +4,7 @@ package appfeed_test
 
 import (
 	"context"
+	"sort"
 	"testing"
 	"time"
 
@@ -69,6 +70,8 @@ func newFallbackFollowingRepo(count int) *fallbackFollowingRepo {
 			PublishedAt: base.Add(time.Duration(i) * time.Second),
 		})
 	}
+	// 与仓储分页一致：按发布时间递减存放，便于断言首条是最新内容。
+	sort.Slice(page, func(i, j int) bool { return page[i].PublishedAt.After(page[j].PublishedAt) })
 	return &fallbackFollowingRepo{
 		feedFakeRepo: newFeedFakeRepo(0),
 		creators:     []*domfeed.FollowedCreator{{CreatorID: 7}},
@@ -117,6 +120,67 @@ func TestFollowingFallbackReportsNoMoreWhenDBExhausted(t *testing.T) {
 	}
 	if result.HasMore {
 		t.Fatalf("DB 已读到底时 HasMore 应为 false: %+v", result)
+	}
+}
+
+// TestFollowingLegacyCursorResetsToFirstPage 验证旧客户端的秒级游标（无版本字段）不会报错，
+// 而是显式降级为首屏：回源不带游标，响应从最新一条重新开始，后续游标带新版本号。
+func TestFollowingLegacyCursorResetsToFirstPage(t *testing.T) {
+	ctx := context.Background()
+	repo := newFallbackFollowingRepo(40)
+	cache := &followingFaultCache{}
+	svc := appfeed.New(repo, appfeed.WithFollowingStrategy(cache))
+
+	// 模拟毫秒改造前编码的游标：时间只到秒，没有版本字段。
+	legacy := domfeed.EncodeCursor(&domfeed.Cursor{
+		PublishedAt: time.Date(2026, 3, 1, 12, 0, 30, 0, time.UTC),
+		ClipID:      30,
+	})
+	result, err := svc.GetFeed(ctx, &appfeed.FeedRequest{
+		Scene: "following", ViewerID: 5, Cursor: legacy, Limit: 20,
+	})
+	if err != nil {
+		t.Fatalf("旧游标不应导致关注流报错: %v", err)
+	}
+	if repo.lastCursor != nil {
+		t.Fatalf("旧游标应重置为首屏，实际回源游标 %+v", repo.lastCursor)
+	}
+	if len(result.Items) != 20 || result.Items[0].ClipID != 40 {
+		t.Fatalf("重置后应从最新一条开始，实际首条 clip=%d 共 %d 条", result.Items[0].ClipID, len(result.Items))
+	}
+
+	decoded, err := domfeed.DecodeCursor(result.NextCursor)
+	if err != nil {
+		t.Fatalf("新游标应可解析: %v", err)
+	}
+	if decoded.Version != domfeed.CursorVersionMilli {
+		t.Fatalf("新游标应携带毫秒版本 %d，实际 %d", domfeed.CursorVersionMilli, decoded.Version)
+	}
+}
+
+// TestFollowingVersionedCursorKeepsPaging 验证带毫秒版本的新游标正常续翻，不被重置。
+func TestFollowingVersionedCursorKeepsPaging(t *testing.T) {
+	ctx := context.Background()
+	repo := newFallbackFollowingRepo(40)
+	cache := &followingFaultCache{}
+	svc := appfeed.New(repo, appfeed.WithFollowingStrategy(cache))
+
+	cursor := domfeed.EncodeCursor(&domfeed.Cursor{
+		PublishedAt: time.Date(2026, 3, 1, 12, 0, 30, 0, time.UTC),
+		ClipID:      30,
+		Version:     domfeed.CursorVersionMilli,
+	})
+	result, err := svc.GetFeed(ctx, &appfeed.FeedRequest{
+		Scene: "following", ViewerID: 5, Cursor: cursor, Limit: 5,
+	})
+	if err != nil {
+		t.Fatalf("关注流续翻失败: %v", err)
+	}
+	if repo.lastCursor == nil || repo.lastCursor.ClipID != 30 {
+		t.Fatalf("新版本游标应原样传给回源查询，实际 %+v", repo.lastCursor)
+	}
+	if len(result.Items) != 5 || result.Items[0].ClipID != 29 {
+		t.Fatalf("续翻应从游标之后开始，实际首条 clip=%d", result.Items[0].ClipID)
 	}
 }
 

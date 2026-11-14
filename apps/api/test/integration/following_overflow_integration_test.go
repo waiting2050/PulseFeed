@@ -58,7 +58,8 @@ func TestFollowingPagingRecoversTrimmedOverflow(t *testing.T) {
 	if err := feedCache.AddInboxEntries(ctx, viewerID, entries); err != nil {
 		t.Fatalf("写入 inbox 失败: %v", err)
 	}
-	inboxKey := fmt.Sprintf("pf:v1:inbox:%d", viewerID)
+	// inbox/outbox 在毫秒改造后使用 pf:v2 键版本，旧 pf:v1 键不再被读取。
+	inboxKey := fmt.Sprintf("pf:v2:feed:inbox:%d", viewerID)
 	defer client.Del(ctx, inboxKey)
 	if size, err := client.ZCard(ctx, inboxKey).Result(); err != nil || size != 1000 {
 		t.Fatalf("inbox 应被裁剪为 1000 条，实际 %d (err=%v)", size, err)

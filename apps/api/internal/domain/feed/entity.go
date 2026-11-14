@@ -135,7 +135,15 @@ type Cursor struct {
 	Score float64 `json:"s,omitempty"`
 	// SnapshotAt 是推荐场景首屏固定下来的候选池快照时间，仅 for-you 游标携带。
 	SnapshotAt *time.Time `json:"t,omitempty"`
+	// Version 是游标结构版本；0 表示毫秒改造前的旧游标（following 的时间边界只到秒）。
+	// 对外仍是不透明编码，客户端无需理解该字段。
+	Version int `json:"v,omitempty"`
 }
+
+// CursorVersionMilli 是 inbox/outbox 分值改为毫秒后的游标版本。
+// following 读路径据此识别旧客户端的秒级游标：无法与新毫秒边界可靠比较，
+// 降级为首屏（cursor=nil）而不是报错，保证旧客户端不会拿到 500，代价是回到第一页。
+const CursorVersionMilli = 2
 
 // EncodeCursor 将游标编码为 URL 安全字符串；nil 游标编码为空串。
 func EncodeCursor(c *Cursor) string {
