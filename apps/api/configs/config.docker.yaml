@@ -17,6 +17,10 @@ internal:
   # 容器开发令牌；生产通过 PULSEFEED_INTERNAL_TOKEN 注入，至少 32 字节且不能是占位值。
   token: pulsefeed-compose-internal-token-6b9e4d1a
 
+feed:
+  # 翻页游标签名密钥；生产通过 PULSEFEED_FEED_CURSOR_SECRET 注入，至少 32 字节且不能是占位值。
+  cursor_secret: pulsefeed-compose-cursor-secret-7e2b9d4a6c8f
+
 database:
   host: mysql
   port: 3306

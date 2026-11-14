@@ -41,6 +41,9 @@ func applyEnvOverrides(cfg *Config) {
 	if token := os.Getenv("PULSEFEED_INTERNAL_TOKEN"); token != "" {
 		cfg.Internal.Token = token
 	}
+	if secret := os.Getenv("PULSEFEED_FEED_CURSOR_SECRET"); secret != "" {
+		cfg.Feed.CursorSecret = secret
+	}
 }
 
 // minJWTSecretBytes 是 HS256 密钥的最小长度，低于该长度直接拒绝启动。
@@ -83,6 +86,27 @@ func validateInternalToken(token string) error {
 	}
 	if len(token) < minInternalTokenBytes {
 		return fmt.Errorf("internal.token 至少 %d 字节，当前 %d 字节", minInternalTokenBytes, len(token))
+	}
+	return nil
+}
+
+// minCursorSecretBytes 是游标签名密钥的最小长度，低于该长度直接拒绝启动。
+const minCursorSecretBytes = 32
+
+// validateFeedCursorSecret 校验游标签名密钥非空、长度足够且不是占位值；
+// 密钥缺失会让签名退化，因此与 JWT 密钥一样在启动阶段拒绝。
+func validateFeedCursorSecret(secret string) error {
+	if secret == "" {
+		return fmt.Errorf("feed.cursor_secret 不能为空，请通过 PULSEFEED_FEED_CURSOR_SECRET 注入真实密钥")
+	}
+	if len(secret) < minCursorSecretBytes {
+		return fmt.Errorf("feed.cursor_secret 至少 %d 字节，当前 %d 字节", minCursorSecretBytes, len(secret))
+	}
+	lower := strings.ToLower(secret)
+	for _, placeholder := range placeholderSecrets {
+		if lower == placeholder || strings.Contains(lower, "placeholder") {
+			return fmt.Errorf("feed.cursor_secret 仍是占位值，请通过 PULSEFEED_FEED_CURSOR_SECRET 注入真实密钥")
+		}
 	}
 	return nil
 }
@@ -147,6 +171,10 @@ func (c *Config) validate() error {
 	}
 
 	if err := validateInternalToken(c.Internal.Token); err != nil {
+		return err
+	}
+
+	if err := validateFeedCursorSecret(c.Feed.CursorSecret); err != nil {
 		return err
 	}
 

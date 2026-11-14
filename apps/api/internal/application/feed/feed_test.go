@@ -155,10 +155,12 @@ func (f *feedFakeRepo) BatchGetViewerStates(_ context.Context, viewerID int64, c
 type feedFakeCache struct {
 	enabled       bool
 	pages         map[string][]*domfeed.FeedEntry
+	empty         map[string]bool
 	preset        []*domfeed.FeedEntry
 	getCalls      int
 	hitCalls      int
 	setCalls      int
+	emptyCalls    int
 	lastFirstPage bool
 	// getErr / versionErr 模拟 Redis 故障，用于验证故障与未命中的区分。
 	getErr     error
@@ -167,7 +169,11 @@ type feedFakeCache struct {
 
 // newFeedFakeCache 构造指定启用状态的页缓存。
 func newFeedFakeCache(enabled bool) *feedFakeCache {
-	return &feedFakeCache{enabled: enabled, pages: make(map[string][]*domfeed.FeedEntry)}
+	return &feedFakeCache{
+		enabled: enabled,
+		pages:   make(map[string][]*domfeed.FeedEntry),
+		empty:   make(map[string]bool),
+	}
 }
 
 // feedFakeCloneEntries 返回条目副本，模拟缓存序列化后每次读出独立对象。
@@ -194,6 +200,10 @@ func (f *feedFakeCache) GetPage(_ context.Context, digest string) ([]*domfeed.Fe
 		f.hitCalls++
 		return feedFakeCloneEntries(f.preset), true, nil
 	}
+	if f.empty[digest] {
+		f.hitCalls++
+		return nil, true, nil
+	}
 	entries, ok := f.pages[digest]
 	if !ok {
 		return nil, false, nil
@@ -206,6 +216,12 @@ func (f *feedFakeCache) SetPage(_ context.Context, digest string, entries []*dom
 	f.setCalls++
 	f.lastFirstPage = firstPage
 	f.pages[digest] = feedFakeCloneEntries(entries)
+}
+
+// SetPageEmpty 记录空页负标记，使后续相同 digest 直接命中空页。
+func (f *feedFakeCache) SetPageEmpty(_ context.Context, digest string) {
+	f.emptyCalls++
+	f.empty[digest] = true
 }
 
 // FeedVersion 返回固定版本号；本测试不验证删除失效。

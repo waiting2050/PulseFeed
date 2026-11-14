@@ -8,6 +8,8 @@ var (
 	ErrUnsupportedScene = errors.New("unsupported scene")
 	// ErrInvalidCursor 表示分页游标无法解析。
 	ErrInvalidCursor = errors.New("invalid cursor")
+	// ErrInvalidCursorSignature 表示游标签名校验失败（被篡改或伪造），映射为 400。
+	ErrInvalidCursorSignature = errors.New("invalid cursor signature")
 	// ErrInvalidLimit 表示分页条数越界。
 	ErrInvalidLimit = errors.New("invalid limit")
 	// ErrViewerRequired 表示该场景要求登录读者（following 等场景预留，S11 接入）。

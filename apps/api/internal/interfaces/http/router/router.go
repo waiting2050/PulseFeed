@@ -19,6 +19,7 @@ import (
 	appplayback "pulsefeed/internal/application/playback"
 	apprecommendation "pulsefeed/internal/application/recommendation"
 	apprelation "pulsefeed/internal/application/relation"
+	domfeed "pulsefeed/internal/domain/feed"
 	domplayback "pulsefeed/internal/domain/playback"
 	infracache "pulsefeed/internal/infra/cache"
 	"pulsefeed/internal/infra/config"
@@ -150,6 +151,9 @@ func Register(engine *gin.Engine, cfg *config.Config, db *sql.DB) error {
 		appfeed.WithFollowingStrategy(feedCache),
 		appfeed.WithForYouStrategy(recommendationService),
 		appfeed.WithHotStrategy(feedCache),
+		// 游标统一由服务端 HMAC 签名：只有本服务生成的游标才能通过校验，
+		// 任意伪造游标无法再构造出无限多的页缓存键。
+		appfeed.WithCursorCodec(domfeed.NewCursorCodec(cfg.Feed.CursorSecret)),
 		appfeed.WithMetrics(apiMetrics),
 	)
 	feedHandler := httpfeed.New(feedService)

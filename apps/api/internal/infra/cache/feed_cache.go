@@ -30,6 +30,13 @@ const (
 	firstPageTTL = 5 * time.Second
 	// pagedTTL 是翻页缓存基础 TTL：翻页流量低、内容相对稳定，TTL 更长。
 	pagedTTL = 45 * time.Second
+	// emptyPageTTL 是空结果页的负标记 TTL：同一 digest 回源得到空页后，短时间内重复请求
+	// 直接返回空页而不再回源。取 3s 的依据：覆盖单次页面加载内的重复预取/重试窗口，
+	// 又远短于翻页 TTL 45s，让新内容在最坏情况下只被空结论挡住 3s，
+	// 避免「无更多内容」这一短暂结论按长 TTL 固化。
+	emptyPageTTL = 3 * time.Second
+	// emptyPageMarker 是负标记的存储内容；条目页总是 JSON 数组，读到该串即视为命中空页。
+	emptyPageMarker = "__empty__"
 	// cardTTL 是卡片（clip 视图）缓存基础 TTL。
 	cardTTL = 15 * time.Minute
 	// statsTTL 是互动计数缓存基础 TTL：计数变化频繁，短 TTL 控制偏差。
@@ -146,6 +153,10 @@ func (c *FeedCache) GetPage(ctx context.Context, digest string) ([]*domfeed.Feed
 		log.Printf("warning: 读取 feed 页缓存失败 (digest=%s): %v", digest, err)
 		return nil, false, err
 	}
+	// 负标记表示此前回源确认该 digest 没有内容：命中即返回空页，避免重复回源。
+	if string(raw) == emptyPageMarker {
+		return nil, true, nil
+	}
 	var entries []*domfeed.FeedEntry
 	if err := json.Unmarshal(raw, &entries); err != nil {
 		// 缓存内容损坏按未命中处理，回源后覆盖回填。
@@ -171,6 +182,17 @@ func (c *FeedCache) SetPage(ctx context.Context, digest string, entries []*domfe
 	}
 	if err := c.client.Set(ctx, pageKey(digest), raw, jitter(ttl)).Err(); err != nil {
 		log.Printf("warning: 回填 feed 页缓存失败: %v", err)
+	}
+}
+
+// SetPageEmpty 为空结果页写入短 TTL 负标记；失败仅记日志，由下次回源兜底。
+// 负标记不区分首屏/翻页：空结论本身时效性极短，统一用 emptyPageTTL 是最保守的选择。
+func (c *FeedCache) SetPageEmpty(ctx context.Context, digest string) {
+	if !c.Enabled() {
+		return
+	}
+	if err := c.client.Set(ctx, pageKey(digest), emptyPageMarker, jitter(emptyPageTTL)).Err(); err != nil {
+		log.Printf("warning: 回填空页负标记失败 (digest=%s): %v", digest, err)
 	}
 }
 

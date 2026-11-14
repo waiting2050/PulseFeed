@@ -61,6 +61,8 @@ services:
       PULSEFEED_JWT_SECRET: ${PULSEFEED_JWT_SECRET:-}
       # 内部接口令牌：同样优先于 YAML；留空时使用配置文件里的开发令牌。
       PULSEFEED_INTERNAL_TOKEN: ${PULSEFEED_INTERNAL_TOKEN:-}
+      # 游标签名密钥：同样优先于 YAML；留空时使用配置文件里的开发密钥。
+      PULSEFEED_FEED_CURSOR_SECRET: ${PULSEFEED_FEED_CURSOR_SECRET:-}
     depends_on:
       mysql:
         condition: service_healthy
@@ -87,6 +89,7 @@ services:
     environment:
       PULSEFEED_JWT_SECRET: ${PULSEFEED_JWT_SECRET:-}
       PULSEFEED_INTERNAL_TOKEN: ${PULSEFEED_INTERNAL_TOKEN:-}
+      PULSEFEED_FEED_CURSOR_SECRET: ${PULSEFEED_FEED_CURSOR_SECRET:-}
     # 第二道保险：即使 MQ 初始化仍偶发失败，容器也会自动重启而不是停在 Exited。
     restart: unless-stopped
     depends_on:

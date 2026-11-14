@@ -11,9 +11,17 @@ type Config struct {
 	TrustedProxies []string       `yaml:"trusted_proxies"`
 	JWT            JWTConfig      `yaml:"jwt"`
 	Internal       InternalConfig `yaml:"internal"`
+	Feed           FeedConfig     `yaml:"feed"`
 	Database       DatabaseConfig `yaml:"database"`
 	Redis          RedisConfig    `yaml:"redis"`
 	RabbitMQ       RabbitMQConfig `yaml:"rabbitmq"`
+}
+
+// FeedConfig 描述 Feed 读取链路的敏感参数。
+type FeedConfig struct {
+	// CursorSecret 是翻页游标的 HMAC 签名密钥：游标由服务端生成、对前端不透明，
+	// 签名用于阻止任意伪造游标构造出无限多的页缓存键。
+	CursorSecret string `yaml:"cursor_secret"`
 }
 
 // JWTConfig 描述令牌签发参数：访问令牌有效期、刷新令牌有效期、宽限窗口与时钟容差。

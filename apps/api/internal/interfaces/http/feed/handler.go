@@ -108,6 +108,7 @@ func mapError(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, domfeed.ErrUnsupportedScene),
 		errors.Is(err, domfeed.ErrInvalidCursor),
+		errors.Is(err, domfeed.ErrInvalidCursorSignature),
 		errors.Is(err, domfeed.ErrInvalidLimit):
 		fail(c, http.StatusBadRequest, err.Error())
 	case errors.Is(err, domfeed.ErrViewerRequired):

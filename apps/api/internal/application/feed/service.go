@@ -87,6 +87,8 @@ type FeedCache interface {
 	GetPage(ctx context.Context, digest string) (entries []*domfeed.FeedEntry, ok bool, err error)
 	// SetPage 回填页缓存；firstPage 为 true 使用首页短 TTL。
 	SetPage(ctx context.Context, digest string, entries []*domfeed.FeedEntry, firstPage bool)
+	// SetPageEmpty 为空结果写短 TTL 负标记，避免同一 digest 在回源空页后反复击穿。
+	SetPageEmpty(ctx context.Context, digest string)
 	// FeedVersion 返回页缓存版本号；删除内容后递增版本即可整体失效既有页缓存。
 	// 读取故障返回错误，调用方应跳过页缓存而不是用默认版本构造摘要。
 	FeedVersion(ctx context.Context) (string, error)
@@ -129,11 +131,17 @@ func WithMetrics(metrics appobservability.Metrics) Option {
 	return func(s *Service) { s.metrics = metrics }
 }
 
+// WithCursorCodec 注入带服务端签名的游标编解码器；未注入时保持无签名的旧行为（仅限测试装配）。
+func WithCursorCodec(codec *domfeed.CursorCodec) Option {
+	return func(s *Service) { s.cursors = codec }
+}
+
 // Service 提供 Feed 读取用例。
 type Service struct {
 	repo       domfeed.Repository
 	strategies map[domfeed.Scene]Strategy
 	cache      FeedCache
+	cursors    *domfeed.CursorCodec
 	group      singleflight.Group
 	metrics    appobservability.Metrics
 }
@@ -186,11 +194,16 @@ func (s *Service) getFeed(ctx context.Context, req *FeedRequest) (*FeedResult, e
 	if limit == 0 {
 		limit = domfeed.DefaultFeedLimit
 	}
-	cursor, err := domfeed.DecodeCursor(req.Cursor)
+	cursor, legacy, err := s.decodeCursor(req.Cursor)
 	if err != nil {
 		return nil, err
 	}
-	if scene == domfeed.SceneFollowing && cursor != nil && cursor.Version < domfeed.CursorVersionMilli {
+	if legacy {
+		// 签名上线前的旧游标没有服务端签名，无法纳入受控的页缓存键空间；
+		// 与 Version 过旧一致降级为首屏并记日志，避免旧客户端拿到 500。
+		log.Printf("info: 收到无签名旧游标，重置为首屏")
+		cursor = nil
+	} else if scene == domfeed.SceneFollowing && cursor != nil && cursor.Version < domfeed.CursorVersionMilli {
 		// 旧客户端持有毫秒改造前生成的秒级游标：其时间边界无法与新毫秒边界可靠比较，
 		// 继续使用会漏掉同一秒内更早发布的内容。显式降级为首屏而不是返回错误，
 		// 保证旧游标不会触发 500；客户端会回到第一页重新开始翻页。
@@ -211,12 +224,18 @@ func (s *Service) getFeed(ctx context.Context, req *FeedRequest) (*FeedResult, e
 		result.Items = result.Items[:limit]
 		if result.NextCursor == "" {
 			last := result.Items[len(result.Items)-1]
-			result.NextCursor = domfeed.EncodeCursor(&domfeed.Cursor{
+			result.NextCursor = s.encodeCursor(&domfeed.Cursor{
 				PublishedAt: last.PublishedAt,
 				ClipID:      last.ClipID,
 				Version:     domfeed.CursorVersionMilli,
 			})
 		}
+	}
+
+	// 策略自行生成的游标（hot/for-you）是未签名载荷，统一在出口补充签名，
+	// 保证客户端拿到的游标只能由本服务生成。
+	if result.NextCursor != "" {
+		result.NextCursor = s.resignCursor(result.NextCursor)
 	}
 
 	if err := s.assembleFeedEntries(ctx, req.ViewerID, result.Items); err != nil {
@@ -244,7 +263,9 @@ func (s *Service) loadFeedPage(ctx context.Context, strategy Strategy, req *Feed
 	}
 
 	// count 比页大小多 1，key 还原为页大小以符合 C5 的 limit 语义。
-	digest := pageDigest(strategy.Scene(), req.ViewerID, req.Cursor, count-1, version)
+	// 摘要用规范化游标而不是 req.Cursor 原文：同一逻辑游标的不同文本编码必须落到同一个键，
+	// 否则任意改写游标字符串都会扩散出新的缓存键。签名校验已在 getFeed 完成。
+	digest := pageDigest(strategy.Scene(), req.ViewerID, domfeed.EncodeCursor(cursor), count-1, version)
 	entries, ok, err := s.cache.GetPage(ctx, digest)
 	if err != nil {
 		// 缓存故障与未命中区分：直接回源且不回填，避免把故障期结果写进缓存。
@@ -272,7 +293,13 @@ func (s *Service) loadFeedPage(ctx context.Context, strategy Strategy, req *Feed
 			return nil, err
 		}
 		if !cacheFault {
-			s.cache.SetPage(ctx, digest, page.Entries, cursor == nil)
+			// 空页写短 TTL 负标记而不是普通页：既吸收同一 key 的连续重放，
+			// 又避免空结论按翻页 TTL 挡住之后发布的新内容。
+			if len(page.Entries) == 0 {
+				s.cache.SetPageEmpty(ctx, digest)
+			} else {
+				s.cache.SetPage(ctx, digest, page.Entries, cursor == nil)
+			}
 		}
 		return page, nil
 	})
@@ -280,6 +307,34 @@ func (s *Service) loadFeedPage(ctx context.Context, strategy Strategy, req *Feed
 		return nil, err
 	}
 	return value.(*Page), nil
+}
+
+// decodeCursor 按装配情况解析游标：注入签名器时校验签名并识别无签名旧游标；
+// 未注入时保持原来的无签名解析（单元测试与内部装配）。
+func (s *Service) decodeCursor(token string) (*domfeed.Cursor, bool, error) {
+	if s.cursors == nil {
+		cursor, err := domfeed.DecodeCursor(token)
+		return cursor, false, err
+	}
+	return s.cursors.Decode(token)
+}
+
+// encodeCursor 按装配情况编码游标，保证出口游标与入口校验使用同一把密钥。
+func (s *Service) encodeCursor(cursor *domfeed.Cursor) string {
+	if s.cursors == nil {
+		return domfeed.EncodeCursor(cursor)
+	}
+	return s.cursors.Encode(cursor)
+}
+
+// resignCursor 把策略产出的（未签名）游标统一重新编码，使出口游标始终带签名；
+// 已签名的游标解码后再签名结果不变，因此可安全重复调用。
+func (s *Service) resignCursor(token string) string {
+	cursor, _, err := s.decodeCursor(token)
+	if err != nil || cursor == nil {
+		return token
+	}
+	return s.encodeCursor(cursor)
 }
 
 // observeCache 记录一次页缓存访问结果；未注入指标时静默跳过。

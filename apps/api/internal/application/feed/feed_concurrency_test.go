@@ -110,6 +110,13 @@ func (c *concurrentPageCache) SetPage(_ context.Context, digest string, entries 
 	c.pages[digest] = feedFakeCloneEntries(entries)
 }
 
+// SetPageEmpty 为空页写负标记；并发用例不覆盖空页场景，仅满足接口。
+func (c *concurrentPageCache) SetPageEmpty(_ context.Context, digest string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.pages[digest] = nil
+}
+
 // FeedVersion 返回固定版本号，保证并发用例共享同一摘要。
 func (c *concurrentPageCache) FeedVersion(_ context.Context) (string, error) {
 	return "", nil
