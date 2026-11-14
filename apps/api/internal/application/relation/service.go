@@ -22,6 +22,13 @@ type FollowEventMessenger interface {
 	NotifyFollowed(ctx context.Context, followerID, targetUserID int64) error
 }
 
+// InboxCleaner 描述取关后清理读者 inbox 残留条目的能力，由 feed 缓存实现、组合根注入。
+// 清理失败只记日志：读路径仍按实时关注集过滤，取关立即生效不依赖清理是否成功。
+type InboxCleaner interface {
+	// RemoveCreatorFromInbox 删除读者 inbox 中该创作者的全部条目。
+	RemoveCreatorFromInbox(ctx context.Context, userID, creatorID int64) error
+}
+
 // Option 用于装配可选依赖。
 type Option func(*Service)
 
@@ -35,11 +42,17 @@ func WithFollowEventMessenger(m FollowEventMessenger) Option {
 	return func(s *Service) { s.messenger = m }
 }
 
+// WithInboxCleaner 注入取关清理器：取关状态真正迁移后删除该创作者在读者 inbox 的残留条目。
+func WithInboxCleaner(c InboxCleaner) Option {
+	return func(s *Service) { s.inboxCleaner = c }
+}
+
 // Service 提供关注关系用例。
 type Service struct {
-	repo       domrelation.Repository
-	backfiller FollowFeedBackfiller
-	messenger  FollowEventMessenger
+	repo         domrelation.Repository
+	backfiller   FollowFeedBackfiller
+	messenger    FollowEventMessenger
+	inboxCleaner InboxCleaner
 }
 
 // New 创建 relation 应用服务。
@@ -56,7 +69,8 @@ func (s *Service) Follow(ctx context.Context, userID, targetUserID int64, idempo
 	return s.setFollow(ctx, userID, targetUserID, true, idempotencyKey)
 }
 
-// Unfollow 取消关注目标用户：重复取关幂等返回当前关系；历史 inbox 条目由读路径按实时关注集过滤。
+// Unfollow 取消关注目标用户：重复取关幂等返回当前关系；状态真正迁移后清理该创作者
+// 在读者 inbox 的残留条目，读路径仍按实时关注集过滤兜底，保证取关立即生效。
 func (s *Service) Unfollow(ctx context.Context, userID, targetUserID int64, idempotencyKey string) (*domrelation.FollowResult, error) {
 	return s.setFollow(ctx, userID, targetUserID, false, idempotencyKey)
 }
@@ -97,6 +111,12 @@ func (s *Service) setFollow(ctx context.Context, userID, targetUserID int64, fol
 			if err := s.messenger.NotifyFollowed(ctx, userID, targetUserID); err != nil {
 				log.Printf("warning: 关注站内消息发送失败 (user_id=%d target_user_id=%d): %v", userID, targetUserID, err)
 			}
+		}
+	}
+	if !follow && result.Changed && s.inboxCleaner != nil {
+		// 清理只是减少读侧空转的优化：失败不影响取关结果，读路径仍按实时关注集过滤。
+		if err := s.inboxCleaner.RemoveCreatorFromInbox(ctx, userID, targetUserID); err != nil {
+			log.Printf("warning: 取关清理 inbox 失败 (user_id=%d target_user_id=%d): %v", userID, targetUserID, err)
 		}
 	}
 	return result, nil

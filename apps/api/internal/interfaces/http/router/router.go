@@ -183,12 +183,13 @@ func Register(engine *gin.Engine, cfg *config.Config, db *sql.DB) error {
 	), appplayback.WithMetrics(apiMetrics))
 	playbackHandler := httpplayback.New(playbackService)
 
-	// relation 链路：关注/取关与列表；关注状态迁移时经 feed 回填器同步回填读者 inbox、
-	// 并经 message service 向被关注者发送站内消息（S16 接入）。
+	// relation 链路：关注/取关与列表；关注状态迁移时经 feed 回填器同步回填读者 inbox，
+	// 取关时清理该创作者在读者 inbox 的残留条目，并经 message service 向被关注者发送站内消息。
 	relationRepo := infrarelation.New(gormDB)
 	relationService := apprelation.New(relationRepo,
 		apprelation.WithFollowFeedBackfiller(appfeed.NewInboxBackfiller(feedRepo, feedCache)),
 		apprelation.WithFollowEventMessenger(messageService),
+		apprelation.WithInboxCleaner(feedCache),
 	)
 	relationHandler := httprelation.New(relationService)
 

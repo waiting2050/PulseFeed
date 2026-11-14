@@ -336,6 +336,21 @@ func TestRelationFollowAtLimitAllowsIdempotentReplay(t *testing.T) {
 	}
 }
 
+// relationFakeInboxCleaner 记录取关清理调用并支持失败注入。
+type relationFakeInboxCleaner struct {
+	calls     int
+	lastUser  int64
+	lastOwner int64
+	err       error
+}
+
+func (f *relationFakeInboxCleaner) RemoveCreatorFromInbox(_ context.Context, userID, creatorID int64) error {
+	f.calls++
+	f.lastUser = userID
+	f.lastOwner = creatorID
+	return f.err
+}
+
 // TestRelationUnfollowIsIdempotent 验证取关递减计数一次且重复取关幂等，且不触发回填/通知。
 func TestRelationUnfollowIsIdempotent(t *testing.T) {
 	ctx := context.Background()
@@ -373,6 +388,56 @@ func TestRelationUnfollowIsIdempotent(t *testing.T) {
 	}
 	if backfiller.calls != 1 || messenger.calls != 1 {
 		t.Fatalf("取关不应触发回填/通知: backfill=%d notify=%d", backfiller.calls, messenger.calls)
+	}
+}
+
+// TestRelationUnfollowCleansInboxResidue 验证只有取关状态真正迁移时才清理 inbox 残留，
+// 重复取关的幂等重放不会重复清理。
+func TestRelationUnfollowCleansInboxResidue(t *testing.T) {
+	ctx := context.Background()
+	repo := newRelationFakeRepo()
+	cleaner := &relationFakeInboxCleaner{}
+	svc := apprelation.New(repo, apprelation.WithInboxCleaner(cleaner))
+
+	if _, err := svc.Follow(ctx, 1, 2, "follow-key"); err != nil {
+		t.Fatalf("关注不应失败: %v", err)
+	}
+	if cleaner.calls != 0 {
+		t.Fatalf("关注不应触发 inbox 清理，实际 %d 次", cleaner.calls)
+	}
+	if _, err := svc.Unfollow(ctx, 1, 2, "unfollow-key"); err != nil {
+		t.Fatalf("首次取关不应失败: %v", err)
+	}
+	if cleaner.calls != 1 || cleaner.lastUser != 1 || cleaner.lastOwner != 2 {
+		t.Fatalf("首次取关应清理一次读者的 inbox 残留: %+v", cleaner)
+	}
+	if _, err := svc.Unfollow(ctx, 1, 2, "unfollow-key"); err != nil {
+		t.Fatalf("重复取关不应失败: %v", err)
+	}
+	if cleaner.calls != 1 {
+		t.Fatalf("幂等重放不应重复清理，实际 %d 次", cleaner.calls)
+	}
+}
+
+// TestRelationUnfollowKeepsResultWhenCleanupFails 验证清理失败只记日志，取关结果不受影响。
+func TestRelationUnfollowKeepsResultWhenCleanupFails(t *testing.T) {
+	ctx := context.Background()
+	repo := newRelationFakeRepo()
+	cleaner := &relationFakeInboxCleaner{err: errors.New("redis down")}
+	svc := apprelation.New(repo, apprelation.WithInboxCleaner(cleaner))
+
+	if _, err := svc.Follow(ctx, 1, 2, "follow-key"); err != nil {
+		t.Fatalf("关注不应失败: %v", err)
+	}
+	result, err := svc.Unfollow(ctx, 1, 2, "unfollow-key")
+	if err != nil {
+		t.Fatalf("清理失败不应影响取关结果: %v", err)
+	}
+	if result.Changed != true || result.Following {
+		t.Fatalf("取关回执不正确: %+v", result)
+	}
+	if cleaner.calls != 1 {
+		t.Fatalf("清理应尝试一次，实际 %d 次", cleaner.calls)
 	}
 }
 

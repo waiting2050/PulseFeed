@@ -242,6 +242,53 @@ func TestListInboxDisabledReturnsUnavailable(t *testing.T) {
 	}
 }
 
+// TestRemoveCreatorFromInboxRemovesOnlyCreatorEntries 验证取关清理只删除目标创作者的精确成员：
+// 条目数超过单次扫描提示数量时仍能通过 ZSCAN 游标清理干净，且不会误删 ID 后缀相似的创作者。
+func TestRemoveCreatorFromInboxRemovesOnlyCreatorEntries(t *testing.T) {
+	ctx := context.Background()
+	cache, _ := newBoxTestCache(t)
+	base := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
+	entries := make([]domfeed.InboxEntry, 0, 251)
+	for i := 1; i <= 240; i++ {
+		entries = append(entries, domfeed.InboxEntry{
+			ClipID: int64(i), CreatorID: 9, PublishedAt: base.Add(time.Duration(i) * time.Second),
+		})
+	}
+	// 保留两个其他创作者的条目，其中 19 用于验证 "*:9" 不会误匹配 "...:19"。
+	entries = append(entries,
+		domfeed.InboxEntry{ClipID: 9001, CreatorID: 7, PublishedAt: base.Add(time.Hour)},
+		domfeed.InboxEntry{ClipID: 9002, CreatorID: 19, PublishedAt: base.Add(time.Hour + time.Second)},
+	)
+	if err := cache.AddInboxEntries(ctx, 5, entries); err != nil {
+		t.Fatalf("写入 inbox 失败: %v", err)
+	}
+
+	if err := cache.RemoveCreatorFromInbox(ctx, 5, 9); err != nil {
+		t.Fatalf("取关清理失败: %v", err)
+	}
+
+	page, err := cache.ListInbox(ctx, 5, nil, 100)
+	if err != nil {
+		t.Fatalf("清理后读取失败: %v", err)
+	}
+	if len(page) != 2 {
+		t.Fatalf("应只剩其他创作者的 2 条，实际 %d 条: %+v", len(page), page)
+	}
+	for _, entry := range page {
+		if entry.CreatorID == 9 {
+			t.Fatalf("目标创作者残留未清理: %+v", entry)
+		}
+	}
+}
+
+// TestRemoveCreatorFromInboxDisabledIsNoop 验证缓存未启用时清理静默跳过，不阻塞取关。
+func TestRemoveCreatorFromInboxDisabledIsNoop(t *testing.T) {
+	cache := &FeedCache{}
+	if err := cache.RemoveCreatorFromInbox(context.Background(), 5, 9); err != nil {
+		t.Fatalf("缓存未启用时清理应静默跳过，实际 %v", err)
+	}
+}
+
 // TestAddFeedBoxRenewsTTL 验证 inbox/outbox 写入时设置并续期 TTL：
 // 活跃键不会无限增长，沉寂键到期后由 DB 回源兜底。
 func TestAddFeedBoxRenewsTTL(t *testing.T) {

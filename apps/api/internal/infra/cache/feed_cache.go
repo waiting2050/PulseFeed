@@ -690,6 +690,51 @@ func (c *FeedCache) ListInbox(ctx context.Context, userID int64, cursor *domfeed
 	return c.listFeedBox(ctx, inboxKey(userID), cursor, limit)
 }
 
+// RemoveCreatorFromInbox 删除读者 inbox 中指定创作者的全部残留条目（取关清理）。
+// 成员是 clipID:creatorID 复合串，无法按下标或分值范围定位，只能用 ZSCAN MATCH "*:<creatorID>"
+// 扫描出精确成员后再批量 ZREM；代价是 O(N)（N≤inboxMaxEntries=1000）的读与至多 10 次小批量删除。
+// 取关是低频写操作，这比额外维护 creator→clipID 反查索引更简单，也不会引入双写不一致。
+// 失败返回错误由调用方记日志，不影响取关结果：读路径仍按实时关注集过滤兜底。
+func (c *FeedCache) RemoveCreatorFromInbox(ctx context.Context, userID, creatorID int64) error {
+	if !c.Enabled() || userID <= 0 || creatorID <= 0 {
+		return nil
+	}
+	key := inboxKey(userID)
+	suffix := ":" + strconv.FormatInt(creatorID, 10)
+
+	// 先完整扫描再统一删除：若在 ZSCAN 迭代过程中同步 ZREM，哈希表收缩会让游标跳过元素，
+	// 导致部分残留清理不掉（实测 240 条只能清掉约 140 条）。inbox 上限 1000，
+	// 把命中成员暂存在内存里是一次有界的 O(N) 读，换取清理的完整性。
+	matched := make([]interface{}, 0, 100)
+	var scanCursor uint64
+	for {
+		members, next, err := c.client.ZScan(ctx, key, scanCursor, "*"+suffix, 500).Result()
+		if err != nil {
+			return fmt.Errorf("扫描关注流缓存失败: %w", err)
+		}
+		// ZSCAN 返回 member/score 交替的扁平数组，只需 member。
+		for i := 0; i+1 < len(members); i += 2 {
+			matched = append(matched, members[i])
+		}
+		scanCursor = next
+		if scanCursor == 0 {
+			break
+		}
+	}
+
+	// ZREM 必须带精确 member；按 100 个一批删除，避免单条命令参数过大。
+	for start := 0; start < len(matched); start += 100 {
+		end := start + 100
+		if end > len(matched) {
+			end = len(matched)
+		}
+		if err := c.client.ZRem(ctx, key, matched[start:end]...).Err(); err != nil {
+			return fmt.Errorf("清理关注流缓存失败: %w", err)
+		}
+	}
+	return nil
+}
+
 // AddOutboxEntries 将条目推入创作者 outbox（大 V 拉取模型），裁剪上限与 inbox 一致。
 func (c *FeedCache) AddOutboxEntries(ctx context.Context, creatorID int64, entries []domfeed.InboxEntry) error {
 	return c.addFeedBoxEntries(ctx, outboxKey(creatorID), entries)

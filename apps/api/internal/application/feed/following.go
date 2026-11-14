@@ -15,6 +15,11 @@ import (
 // 低于该值的创作者走推模型（关注回填/发布扇出时写入读者 inbox）。
 const BigVFollowerThreshold = 10000
 
+// inboxRefillRounds 是单次读取中为过滤已取关残留而补取的最大轮数：
+// 每轮至少读取一页（默认页约 21 条），3 轮约 63 条；耗尽后不再空转，
+// 剩余缺口交给 fallbackFollowingPage 的 DB 回源补齐。
+const inboxRefillRounds = 3
+
 // FollowingCache 描述 following 场景所需的缓存能力，由 infra/cache 的 FeedCache 实现。
 type FollowingCache interface {
 	// Enabled 报告缓存是否启用。
@@ -198,11 +203,12 @@ func (s *FollowingStrategy) loadMergedInbox(ctx context.Context, viewerID int64,
 }
 
 // listInboxPage 按页读取 inbox 并过滤已取关创作者的残留条目。
-// 若过滤后不足一页，以本批最后一条为游标继续向更旧方向补取，直到凑满或键耗尽。
+// 若过滤后不足一页，以本批最后一条为游标继续向更旧方向补取；
+// 补取最多 inboxRefillRounds 轮（约 63 条），耗尽后停止空转，缺口交由 DB 回源补齐。
 func (s *FollowingStrategy) listInboxPage(ctx context.Context, viewerID int64, cursor *domfeed.Cursor, limit int, followed map[int64]bool) ([]domfeed.InboxEntry, error) {
 	collected := make([]domfeed.InboxEntry, 0, limit)
 	next := cursor
-	for len(collected) < limit {
+	for round := 0; round < inboxRefillRounds && len(collected) < limit; round++ {
 		batch, err := s.cache.ListInbox(ctx, viewerID, next, limit-len(collected))
 		if err != nil {
 			return nil, err
