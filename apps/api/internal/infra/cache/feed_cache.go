@@ -682,8 +682,9 @@ func (c *FeedCache) RecordHotScore(ctx context.Context, clipID int64, delta floa
 	}
 }
 
-// ListHotWindow 合并最近 hotWindowBuckets 个分钟桶，返回按累计热度递减排序的 HotItem 列表。
-// Redis 未启用时返回 ErrHotWindowUnavailable，由 hot 策略回源 DB。
+// ListHotWindow 合并最近 hotWindowBuckets 个分钟桶（一次 pipeline 往返读完全部桶），
+// 返回按累计热度递减排序的 HotItem 列表。Redis 未启用时返回 ErrHotWindowUnavailable，
+// 由 hot 策略回源 DB。
 func (c *FeedCache) ListHotWindow(ctx context.Context) ([]domfeed.HotItem, error) {
 	if !c.Enabled() {
 		return nil, ErrHotWindowUnavailable
@@ -696,13 +697,26 @@ func (c *FeedCache) ListHotWindow(ctx context.Context) ([]domfeed.HotItem, error
 		keys = append(keys, hotBucketKey(now.Add(-time.Duration(i)*time.Minute)))
 	}
 
-	// 内存合并：逐桶 ZRANGE（分值降序）累计各 clip 增量，之后统一排序并截断。
+	// 内存合并：用 pipeline 一次往返读完 N 个分钟桶，逐桶累计各 clip 增量，之后统一排序并截断。
+	// 串行 ZRANGE 会让单次热榜请求产生 N 次 Redis 往返；pipeline 只保留 1 次。
+	pipe := c.client.Pipeline()
+	cmds := make([]*redis.ZSliceCmd, 0, len(keys))
+	for _, key := range keys {
+		cmds = append(cmds, pipe.ZRangeWithScores(ctx, key, 0, -1))
+	}
+	// Exec 只返回首个命令错误，部分桶失败（如类型错误）时仍需逐条检查结果，
+	// 因此这里不因整体错误提前返回，失败按命令计数以保持原有部分失败语义。
+	_, execErr := pipe.Exec(ctx)
+	if execErr != nil {
+		log.Printf("warning: 热度分钟桶 pipeline 读取返回错误 (buckets=%d): %v", len(keys), execErr)
+	}
+
 	acc := make(map[string]float64, hotWindowLimit)
 	failed := 0
-	for _, key := range keys {
-		values, err := c.client.ZRangeWithScores(ctx, key, 0, -1).Result()
+	for i, cmd := range cmds {
+		values, err := cmd.Result()
 		if err != nil && !errors.Is(err, redis.Nil) {
-			log.Printf("warning: 热度分钟桶读取失败 (key=%s): %v", key, err)
+			log.Printf("warning: 热度分钟桶读取失败 (key=%s): %v", keys[i], err)
 			failed++
 			continue
 		}
@@ -713,6 +727,11 @@ func (c *FeedCache) ListHotWindow(ctx context.Context) ([]domfeed.HotItem, error
 			}
 			acc[member] += value.Score
 		}
+	}
+	// 连接级故障（Redis 不可达）只会挂在 Exec 上，逐条命令拿不到错误也没有结果；
+	// 此时按全部桶失败处理，避免把「读不到」误判成空窗口。
+	if execErr != nil && failed == 0 {
+		failed = len(keys)
 	}
 	// 全部桶读取失败，或部分失败且没有任何数据时，无法判断窗口是真的为空还是读失败：
 	// 返回错误让上层按缓存故障回源 DB，而不是记成 empty_window。
