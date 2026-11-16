@@ -128,6 +128,59 @@ func TestActionWorkerRedeliveryAfterCommittedFailureKeepsSingleCount(t *testing.
 	}
 }
 
+// TestActionWorkerRecordsHotScoreAfterCommit 验证热度分钟桶在落库成功后按方向累加，
+// 重复投递（幂等命中 changed=false）不会重复加热度。
+func TestActionWorkerRecordsHotScoreAfterCommit(t *testing.T) {
+	repo := newActionWorkerFake()
+	recorder := &interactionFakeHotRecorder{}
+	metrics := &interactionFakeMetrics{}
+	worker := appaction.NewActionWorker(repo,
+		appaction.WithActionHotScoreRecorder(recorder),
+		appaction.WithActionWorkerMetrics(metrics),
+	)
+	ctx := context.Background()
+
+	if err := worker.Handle(ctx, actionChangedBody(t, true)); err != nil {
+		t.Fatalf("首次消费失败: %v", err)
+	}
+	if len(recorder.calls) != 1 || recorder.calls[0].clipID != 11 || recorder.calls[0].delta != 3 {
+		t.Fatalf("热度写入 = %+v, 期望一次 clip=11 delta=3", recorder.calls)
+	}
+	if !metrics.has("hot_score:ok") {
+		t.Fatalf("热度成功应上报 hot_score:ok，实际 %v", metrics.sideEffects)
+	}
+
+	// 同一事件重投：状态未翻转，热度不得重复累加。
+	if err := worker.Handle(ctx, actionChangedBody(t, true)); err != nil {
+		t.Fatalf("重投消费失败: %v", err)
+	}
+	if len(recorder.calls) != 1 {
+		t.Fatalf("重复投递不应重复写热度，实际 %d 次: %+v", len(recorder.calls), recorder.calls)
+	}
+}
+
+// TestActionWorkerHotScoreFailureDoesNotFailHandling 验证热度写失败只记日志与指标，
+// Worker 仍确认消息（DB 已提交，重投也无法补写热度）。
+func TestActionWorkerHotScoreFailureDoesNotFailHandling(t *testing.T) {
+	repo := newActionWorkerFake()
+	recorder := &interactionFakeHotRecorder{err: errors.New("redis down")}
+	metrics := &interactionFakeMetrics{}
+	worker := appaction.NewActionWorker(repo,
+		appaction.WithActionHotScoreRecorder(recorder),
+		appaction.WithActionWorkerMetrics(metrics),
+	)
+
+	if err := worker.Handle(context.Background(), actionChangedBody(t, true)); err != nil {
+		t.Fatalf("热度失败不应导致消息重投，实际错误: %v", err)
+	}
+	if got := repo.likeCounts[11]; got != 1 {
+		t.Fatalf("热度失败不影响落库，点赞计数应为 1，实际 %d", got)
+	}
+	if !metrics.has("hot_score:error") {
+		t.Fatalf("热度失败应上报 hot_score:error，实际 %v", metrics.sideEffects)
+	}
+}
+
 // TestActionWorkerTransientFailureThenRedeliveryCountsOnce 验证首次成功后中间一次瞬时失败触发重投，
 // 再投成功时计数仍为 1。
 func TestActionWorkerTransientFailureThenRedeliveryCountsOnce(t *testing.T) {

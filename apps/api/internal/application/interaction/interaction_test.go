@@ -503,14 +503,168 @@ type interactionHotScoreCall struct {
 	delta  float64
 }
 
-// interactionFakeHotRecorder 是 HotScoreRecorder 的内存替身，按调用顺序记录增量。
+// interactionFakeHotRecorder 是 HotScoreRecorder 的内存替身，按调用顺序记录增量；
+// err 非 nil 时模拟 Redis 热度写入失败。
 type interactionFakeHotRecorder struct {
 	calls []interactionHotScoreCall
+	err   error
 }
 
-// RecordHotScore 记录一次热度增量。
-func (r *interactionFakeHotRecorder) RecordHotScore(_ context.Context, clipID int64, delta float64) {
+// RecordHotScore 记录一次热度增量，并按配置返回错误。
+func (r *interactionFakeHotRecorder) RecordHotScore(_ context.Context, clipID int64, delta float64) error {
 	r.calls = append(r.calls, interactionHotScoreCall{clipID: clipID, delta: delta})
+	return r.err
+}
+
+// interactionFakeStateCache 是 ActionStateCache 的内存替身，返回预设的结果或错误。
+type interactionFakeStateCache struct {
+	result *dominteraction.ActionResult
+	err    error
+	calls  int
+}
+
+// SetActionState 记录调用次数并返回预设值。
+func (c *interactionFakeStateCache) SetActionState(_ context.Context, userID, clipID int64, actionType dominteraction.ActionType, active bool) (*dominteraction.ActionResult, error) {
+	c.calls++
+	if c.err != nil {
+		return nil, c.err
+	}
+	if c.result != nil {
+		return c.result, nil
+	}
+	return &dominteraction.ActionResult{ClipID: clipID, ActionType: actionType, Active: active, Changed: true, LikeCount: 1}, nil
+}
+
+// interactionFakePublisher 是 ActionEventPublisher 的内存替身，记录事件并按配置返回错误。
+type interactionFakePublisher struct {
+	events []appaction.ActionChanged
+	err    error
+}
+
+// PublishActionChanged 记录事件并按配置返回错误。
+func (p *interactionFakePublisher) PublishActionChanged(_ context.Context, event appaction.ActionChanged) error {
+	p.events = append(p.events, event)
+	return p.err
+}
+
+// interactionFakeMetrics 记录副作用指标，键为 "kind:result"。
+type interactionFakeMetrics struct {
+	sideEffects []string
+}
+
+// ObserveInteractionSideEffect 记录一次副作用结果。
+func (m *interactionFakeMetrics) ObserveInteractionSideEffect(kind, result string) {
+	m.sideEffects = append(m.sideEffects, kind+":"+result)
+}
+
+// has 报告是否记录过指定结果。
+func (m *interactionFakeMetrics) has(want string) bool {
+	for _, got := range m.sideEffects {
+		if got == want {
+			return true
+		}
+	}
+	return false
+}
+
+// TestInteractionHotScoreFailureDoesNotBreakAction 验证热度写入失败时点赞/评论仍成功，
+// 失败只体现在指标上（提交后副作用不回滚已成功的互动）。
+func TestInteractionHotScoreFailureDoesNotBreakAction(t *testing.T) {
+	repo := newInteractionFake(25)
+	recorder := &interactionFakeHotRecorder{err: errors.New("redis down")}
+	metrics := &interactionFakeMetrics{}
+	service := appaction.New(repo,
+		appaction.WithHotScoreRecorder(recorder),
+		appaction.WithMetrics(metrics),
+	)
+	ctx := context.Background()
+
+	result, err := service.Like(ctx, 7, 25, "hot-fail-like")
+	if err != nil {
+		t.Fatalf("热度写失败不应影响点赞，实际错误: %v", err)
+	}
+	if result == nil || result.LikeCount != 1 {
+		t.Fatalf("点赞结果 = %+v, 期望计数 1", result)
+	}
+	if len(recorder.calls) != 1 || recorder.calls[0].delta != 3 {
+		t.Fatalf("热度写入调用 = %+v, 期望一次 delta=3", recorder.calls)
+	}
+	if !metrics.has("hot_score:error") {
+		t.Fatalf("热度失败应上报 hot_score:error，实际 %v", metrics.sideEffects)
+	}
+
+	if _, count, err := service.CreateComment(ctx, 7, 25, "热度失败也可以评论", "hot-fail-comment"); err != nil || count != 1 {
+		t.Fatalf("热度写失败不应影响评论，count=%d err=%v", count, err)
+	}
+}
+
+// TestInteractionEventPublishFailureFallsBackToSync 验证事件投递失败时回退同步落库，
+// 接口响应仍成功，并上报 action_event:error。
+func TestInteractionEventPublishFailureFallsBackToSync(t *testing.T) {
+	repo := newInteractionFake(26)
+	states := &interactionFakeStateCache{}
+	publisher := &interactionFakePublisher{err: errors.New("mq down")}
+	metrics := &interactionFakeMetrics{}
+	service := appaction.New(repo,
+		appaction.WithAsyncActionPipeline(states, publisher),
+		appaction.WithHotScoreRecorder(&interactionFakeHotRecorder{}),
+		appaction.WithMetrics(metrics),
+	)
+	ctx := context.Background()
+
+	result, err := service.Like(ctx, 7, 26, "event-fail")
+	if err != nil {
+		t.Fatalf("事件投递失败应回退同步落库，实际错误: %v", err)
+	}
+	if result == nil || result.LikeCount != 1 || !result.Changed {
+		t.Fatalf("点赞结果 = %+v, 期望计数 1 且 changed", result)
+	}
+	if len(repo.actions) != 1 {
+		t.Fatalf("回退后应同步落库 1 行行为，实际 %d", len(repo.actions))
+	}
+	if !metrics.has("action_event:error") {
+		t.Fatalf("事件投递失败应上报 action_event:error，实际 %v", metrics.sideEffects)
+	}
+}
+
+// TestInteractionAsyncPipelinePublishesEvent 验证异步链路正常时事件按预期投递、
+// 请求内不落库；热度由 Worker 在落库后记录，因此 Service 侧不写热度。
+func TestInteractionAsyncPipelinePublishesEvent(t *testing.T) {
+	repo := newInteractionFake(27)
+	states := &interactionFakeStateCache{}
+	publisher := &interactionFakePublisher{}
+	recorder := &interactionFakeHotRecorder{}
+	metrics := &interactionFakeMetrics{}
+	service := appaction.New(repo,
+		appaction.WithAsyncActionPipeline(states, publisher),
+		appaction.WithHotScoreRecorder(recorder),
+		appaction.WithMetrics(metrics),
+	)
+	ctx := context.Background()
+
+	result, err := service.Like(ctx, 7, 27, "async-ok")
+	if err != nil {
+		t.Fatalf("异步链路点赞失败: %v", err)
+	}
+	if result == nil || result.LikeCount != 1 {
+		t.Fatalf("点赞结果 = %+v, 期望计数 1", result)
+	}
+	if len(publisher.events) != 1 {
+		t.Fatalf("应投递 1 条 action_changed 事件，实际 %d", len(publisher.events))
+	}
+	event := publisher.events[0]
+	if event.UserID != 7 || event.ClipID != 27 || event.ActionType != dominteraction.ActionLike || !event.Active {
+		t.Fatalf("事件载荷 = %+v, 期望 user=7 clip=27 like active", event)
+	}
+	if len(recorder.calls) != 0 {
+		t.Fatalf("异步链路热度应由 Worker 记录，Service 不应写入，实际 %+v", recorder.calls)
+	}
+	if len(repo.actions) != 0 {
+		t.Fatalf("异步链路请求内不应同步落库，实际 %d 行", len(repo.actions))
+	}
+	if !metrics.has("action_event:ok") {
+		t.Fatalf("事件投递成功应上报 action_event:ok，实际 %v", metrics.sideEffects)
+	}
 }
 
 // TestInteractionHotScoreFollowsActionDirection 验证热度按行为方向累加：

@@ -668,18 +668,19 @@ func parseCountValue(value any) int64 {
 // RecordHotScore 按 clip ID 与当前分钟把热度增量累加到分钟桶 ZSET（ZINCRBY）：
 // 桶键形如 pf:v1:feed:hot:202601021504（分钟内若干次小增量合并为桶内累计值）。
 // delta 允许为负（取消点赞/收藏），零值不写桶。
-func (c *FeedCache) RecordHotScore(ctx context.Context, clipID int64, delta float64) {
+// 返回错误供调用方上报失败指标；热度写入失败不能影响已经提交的互动。
+func (c *FeedCache) RecordHotScore(ctx context.Context, clipID int64, delta float64) error {
 	if !c.Enabled() || clipID <= 0 || delta == 0 {
-		return
+		return nil
 	}
 	key := hotBucketKey(c.clock())
 	if err := c.client.ZIncrBy(ctx, key, delta, strconv.FormatInt(clipID, 10)).Err(); err != nil {
-		log.Printf("warning: 热度分钟桶写入失败 (clip_id=%d): %v", clipID, err)
-		return
+		return fmt.Errorf("热度分钟桶写入失败 (clip_id=%d): %w", clipID, err)
 	}
 	if err := c.client.Expire(ctx, key, hotBucketTTL).Err(); err != nil {
-		log.Printf("warning: 热度分钟桶 TTL 设置失败 (clip_id=%d): %v", clipID, err)
+		return fmt.Errorf("热度分钟桶 TTL 设置失败 (clip_id=%d): %w", clipID, err)
 	}
+	return nil
 }
 
 // ListHotWindow 合并最近 hotWindowBuckets 个分钟桶（一次 pipeline 往返读完全部桶），

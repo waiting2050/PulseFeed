@@ -204,10 +204,12 @@ func Register(engine *gin.Engine, cfg *config.Config, db *sql.DB) error {
 
 	// 互动链路：Redis 与 MQ 均可用时启用异步流水线（Redis 先写 → MQ → Worker 落库），
 	// 否则回退 S9 的同步落库路径；评论始终同步处理。
-	// 计数真正变化时同步累加 Redis 热度分钟桶（S15 hot 场景数据源），缓存禁用时实现自身跳过。
+	// 热度分钟桶属于非正确性写入：同步链路在事务提交后累加，异步链路由 Worker 在落库成功后累加。
 	actionRepo := infraaction.New(gormDB)
-	actionOpts := make([]appaction.Option, 0, 3)
+	actionOpts := make([]appaction.Option, 0, 4)
 	actionOpts = append(actionOpts, appaction.WithHotScoreRecorder(feedCache))
+	// 提交后副作用失败（热度/通知/事件投递）只计数不回滚，指标供告警与补偿。
+	actionOpts = append(actionOpts, appaction.WithMetrics(apiMetrics))
 	// 点赞/评论通知：message 服务作为投递端口，创作者通过 clip 仓储的最小解析器获得。
 	actionOpts = append(actionOpts, appaction.WithMessageNotifier(messageService, appaction.ClipOwnerFunc(
 		func(ctx context.Context, clipID int64) (int64, error) {

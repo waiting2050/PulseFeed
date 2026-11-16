@@ -70,7 +70,19 @@ func main() {
 	}
 	defer mqClient.Close()
 
-	actionWorker := appaction.NewActionWorker(infraaction.New(gormDB))
+	// 指标注册表与 API 进程隔离；监听地址可由 -metrics-addr 覆盖（Windows 端口保留段场景）。
+	workerMetrics := inframetrics.New("worker")
+
+	// 发布扇出与互动热度共用同一个 Redis 缓存实现。
+	redisClient := infracache.New(cfg.Redis)
+	feedCache := infracache.NewFeedCache(redisClient)
+
+	// 互动落库 Worker：热度分钟桶在 DB 提交成功后累加，写入失败只记日志与指标，
+	// 不影响消息 ack（DB 状态已幂等，重投也无法补写热度）。
+	actionWorker := appaction.NewActionWorker(infraaction.New(gormDB),
+		appaction.WithActionHotScoreRecorder(feedCache),
+		appaction.WithActionWorkerMetrics(workerMetrics),
+	)
 
 	// 播放事件消费链路：对 API 同步链路未完成曝光聚合的事件做二次 upsert 补偿（D7 修正）。
 	playEventWorker := appimpression.NewPlayEventWorker(infraimpression.New(gormDB))
@@ -78,9 +90,7 @@ func main() {
 	// 向量生成链路：消费 clip.embedding 事件，按标题 hash n-gram 写入 pf_clip_embeddings。
 	embeddingWorker := appembedding.NewWorker(appembedding.New(infraembedding.New(gormDB)))
 
-	// 发布扇出链路：复用与 API 相同的 Redis 缓存实现，把新 clip 推入粉丝 inbox 或大 V outbox。
-	redisClient := infracache.New(cfg.Redis)
-	feedCache := infracache.NewFeedCache(redisClient)
+	// 发布扇出链路：把新 clip 推入粉丝 inbox 或大 V outbox。
 	fanoutWorker := appclip.NewFanoutWorker(infrafeed.New(gormDB), feedCache)
 
 	// 事务性 outbox relay：把与 clip 同事务落库的事件经 publisher confirm 投递到 broker，
@@ -104,8 +114,6 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// 指标注册表与 API 进程隔离；监听地址可由 -metrics-addr 覆盖（Windows 端口保留段场景）。
-	workerMetrics := inframetrics.New("worker")
 	go func() {
 		if err := inframetrics.RunServer(*metricsAddr, workerMetrics.Registry()); err != nil {
 			log.Printf("Worker metrics 端口异常退出: %v", err)

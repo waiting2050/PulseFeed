@@ -35,6 +35,8 @@ type Metrics struct {
 	authRevocations prometheus.Counter
 
 	feedLimiterErr *prometheus.CounterVec
+
+	interactionSideEffects *prometheus.CounterVec
 }
 
 // New 按进程组件名创建指标集合并注册到独立注册表；component 取 api 或 worker。
@@ -118,6 +120,10 @@ func New(component string) *Metrics {
 		Name: "pulsefeed_feed_limiter_errors_total",
 		Help: "Feed 限流降级次数（Redis 不可用时 fail-open），按 user/ip 维度区分。",
 	}, []string{"scope"})
+	interactionSideEffects := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "pulsefeed_interaction_side_effects_total",
+		Help: "互动提交后副作用的执行结果，按副作用类型（hot_score/action_event/like_notify/comment_notify）与结果（ok/error）区分。",
+	}, []string{"kind", "result"})
 
 	registry.MustRegister(
 		up,
@@ -137,6 +143,7 @@ func New(component string) *Metrics {
 		authLoginErr,
 		authRevocations,
 		feedLimiterErr,
+		interactionSideEffects,
 	)
 
 	return &Metrics{
@@ -158,6 +165,8 @@ func New(component string) *Metrics {
 		authLoginErr:    authLoginErr,
 		authRevocations: authRevocations,
 		feedLimiterErr:  feedLimiterErr,
+
+		interactionSideEffects: interactionSideEffects,
 	}
 }
 
@@ -252,6 +261,14 @@ func (m *Metrics) ObserveFeedLimiterError(scope string) {
 		return
 	}
 	m.feedLimiterErr.WithLabelValues(scope).Inc()
+}
+
+// ObserveInteractionSideEffect 记录一次互动提交后副作用的执行结果（ok/error）。
+func (m *Metrics) ObserveInteractionSideEffect(kind, result string) {
+	if m == nil {
+		return
+	}
+	m.interactionSideEffects.WithLabelValues(kind, result).Inc()
 }
 
 // ObserveRevocations 累加被吊销的刷新令牌行数。
