@@ -206,10 +206,12 @@ func Register(engine *gin.Engine, cfg *config.Config, db *sql.DB) error {
 	// 否则回退 S9 的同步落库路径；评论始终同步处理。
 	// 热度分钟桶属于非正确性写入：同步链路在事务提交后累加，异步链路由 Worker 在落库成功后累加。
 	actionRepo := infraaction.New(gormDB)
-	actionOpts := make([]appaction.Option, 0, 4)
+	actionOpts := make([]appaction.Option, 0, 5)
 	actionOpts = append(actionOpts, appaction.WithHotScoreRecorder(feedCache))
 	// 提交后副作用失败（热度/通知/事件投递）只计数不回滚，指标供告警与补偿。
 	actionOpts = append(actionOpts, appaction.WithMetrics(apiMetrics))
+	// 点赞/收藏/评论写接口按用户固定窗口限流；Redis 不可用时 fail-open 并上报降级指标。
+	actionOpts = append(actionOpts, appaction.WithRateLimiter(infracache.NewInteractionGuard(redisClient)))
 	// 点赞/评论通知：message 服务作为投递端口，创作者通过 clip 仓储的最小解析器获得。
 	actionOpts = append(actionOpts, appaction.WithMessageNotifier(messageService, appaction.ClipOwnerFunc(
 		func(ctx context.Context, clipID int64) (int64, error) {

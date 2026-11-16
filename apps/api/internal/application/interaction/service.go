@@ -60,6 +60,41 @@ const (
 type InteractionMetrics interface {
 	// ObserveInteractionSideEffect 记录一次提交后副作用的执行结果，result 取 ok/error。
 	ObserveInteractionSideEffect(kind, result string)
+	// ObserveInteractionLimiterError 记录一次互动写限流降级（Redis 不可用 fail-open）。
+	ObserveInteractionLimiterError(scope string)
+}
+
+// ActionRateLimiter 是互动写接口的用户级限流端口，由 infra/cache 的固定窗口实现；
+// 返回 (allowed, retryAfter, err)：err 非 nil 时调用方 fail-open，不允许用户因限流器故障被拒绝。
+type ActionRateLimiter interface {
+	AllowUser(ctx context.Context, userID int64) (bool, time.Duration, error)
+}
+
+// WithRateLimiter 注入互动写限流器；未注入时不限流。
+func WithRateLimiter(limiter ActionRateLimiter) Option {
+	return func(s *Service) {
+		s.rateLimiter = limiter
+	}
+}
+
+// enforceWriteLimit 在写接口入口做用户级固定窗口校验。
+// Redis 故障时 fail-open 只记日志与指标，保证限流器不可用不会让用户点不了赞。
+func (s *Service) enforceWriteLimit(ctx context.Context, userID int64) error {
+	if s.rateLimiter == nil {
+		return nil
+	}
+	allowed, retryAfter, err := s.rateLimiter.AllowUser(ctx, userID)
+	if err != nil {
+		log.Printf("warning: 互动写限流降级（Redis 故障，fail-open, user_id=%d）: %v", userID, err)
+		if s.metrics != nil {
+			s.metrics.ObserveInteractionLimiterError("user")
+		}
+		return nil
+	}
+	if !allowed {
+		return &dominteraction.ErrActionRateLimited{RetryAfter: retryAfter}
+	}
+	return nil
 }
 
 // WithMetrics 注入互动指标；未注入时副作用失败只记日志。
@@ -127,13 +162,14 @@ func WithHotScoreRecorder(recorder HotScoreRecorder) Option {
 
 // Service 提供互动相关用例。
 type Service struct {
-	repo       dominteraction.Repository
-	stateCache ActionStateCache
-	publisher  ActionEventPublisher
-	hotScores  HotScoreRecorder
-	notifier   MessageNotifier
-	owners     ClipOwnerResolver
-	metrics    InteractionMetrics
+	repo        dominteraction.Repository
+	stateCache  ActionStateCache
+	publisher   ActionEventPublisher
+	hotScores   HotScoreRecorder
+	notifier    MessageNotifier
+	owners      ClipOwnerResolver
+	metrics     InteractionMetrics
+	rateLimiter ActionRateLimiter
 }
 
 // New 创建互动应用服务。
@@ -175,6 +211,9 @@ func (s *Service) Unsave(ctx context.Context, userID, clipID int64, idempotencyK
 func (s *Service) setAction(ctx context.Context, userID, clipID int64, actionType dominteraction.ActionType, active bool, idempotencyKey string) (*dominteraction.ActionResult, error) {
 	if clipID <= 0 {
 		return nil, dominteraction.ErrClipNotFound
+	}
+	if err := s.enforceWriteLimit(ctx, userID); err != nil {
+		return nil, err
 	}
 	var result *dominteraction.ActionResult
 	var err error
@@ -291,6 +330,9 @@ func (s *Service) CreateComment(ctx context.Context, userID, clipID int64, conte
 	if clipID <= 0 {
 		return nil, 0, dominteraction.ErrClipNotFound
 	}
+	if err := s.enforceWriteLimit(ctx, userID); err != nil {
+		return nil, 0, err
+	}
 	comment, err := dominteraction.NewComment(clipID, userID, content)
 	if err != nil {
 		return nil, 0, err
@@ -329,6 +371,9 @@ func (s *Service) notifyComment(ctx context.Context, userID, clipID int64, comme
 func (s *Service) DeleteComment(ctx context.Context, userID, commentID int64) (*dominteraction.DeletedComment, error) {
 	if commentID <= 0 {
 		return nil, dominteraction.ErrCommentNotFound
+	}
+	if err := s.enforceWriteLimit(ctx, userID); err != nil {
+		return nil, err
 	}
 	return s.repo.DeleteComment(ctx, userID, commentID)
 }

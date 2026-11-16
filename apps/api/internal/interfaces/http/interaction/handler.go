@@ -3,6 +3,7 @@ package httpaction
 
 import (
 	"errors"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -223,8 +224,19 @@ func idempotencyKey(c *gin.Context) (string, bool) {
 	return key, true
 }
 
-// mapError 将领域错误映射为 HTTP 状态码：400 参数非法、403 权限不足、404 资源缺失。
+// mapError 将领域错误映射为 HTTP 状态码：400 参数非法、403 权限不足、404 资源缺失、429 限流。
 func mapError(c *gin.Context, err error) {
+	var limited *dominteraction.ErrActionRateLimited
+	if errors.As(err, &limited) {
+		// 与 feed/登录的 429 保持一致：Retry-After 取固定窗口剩余秒数，向上取整且最小 1。
+		retryAfter := int(math.Ceil(limited.RetryAfter.Seconds()))
+		if retryAfter < 1 {
+			retryAfter = 1
+		}
+		c.Header("Retry-After", strconv.Itoa(retryAfter))
+		fail(c, http.StatusTooManyRequests, err.Error())
+		return
+	}
 	switch {
 	case errors.Is(err, dominteraction.ErrInvalidActionType),
 		errors.Is(err, dominteraction.ErrInvalidCommentContent),

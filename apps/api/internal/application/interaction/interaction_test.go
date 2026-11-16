@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"sync"
 	"testing"
+	"time"
 
 	appaction "pulsefeed/internal/application/interaction"
 	dominteraction "pulsefeed/internal/domain/interaction"
@@ -547,14 +548,20 @@ func (p *interactionFakePublisher) PublishActionChanged(_ context.Context, event
 	return p.err
 }
 
-// interactionFakeMetrics 记录副作用指标，键为 "kind:result"。
+// interactionFakeMetrics 记录副作用与限流降级指标，键为 "kind:result"。
 type interactionFakeMetrics struct {
-	sideEffects []string
+	sideEffects  []string
+	limiterError []string
 }
 
 // ObserveInteractionSideEffect 记录一次副作用结果。
 func (m *interactionFakeMetrics) ObserveInteractionSideEffect(kind, result string) {
 	m.sideEffects = append(m.sideEffects, kind+":"+result)
+}
+
+// ObserveInteractionLimiterError 记录一次限流降级。
+func (m *interactionFakeMetrics) ObserveInteractionLimiterError(scope string) {
+	m.limiterError = append(m.limiterError, scope)
 }
 
 // has 报告是否记录过指定结果。
@@ -664,6 +671,89 @@ func TestInteractionAsyncPipelinePublishesEvent(t *testing.T) {
 	}
 	if !metrics.has("action_event:ok") {
 		t.Fatalf("事件投递成功应上报 action_event:ok，实际 %v", metrics.sideEffects)
+	}
+}
+
+// interactionFakeLimiter 是 ActionRateLimiter 的内存替身，返回预设的允许结果或故障。
+type interactionFakeLimiter struct {
+	allowed    bool
+	retryAfter time.Duration
+	err        error
+	calls      int
+	lastUserID int64
+}
+
+// AllowUser 记录调用并返回预设结果。
+func (l *interactionFakeLimiter) AllowUser(_ context.Context, userID int64) (bool, time.Duration, error) {
+	l.calls++
+	l.lastUserID = userID
+	if l.err != nil {
+		return true, 0, l.err
+	}
+	return l.allowed, l.retryAfter, nil
+}
+
+// TestInteractionWriteLimiterRejects 验证点赞/收藏/评论写接口超限返回 ErrActionRateLimited，
+// 且不触达仓储；读接口不调用限流器。
+func TestInteractionWriteLimiterRejects(t *testing.T) {
+	repo := newInteractionFake(31)
+	limiter := &interactionFakeLimiter{allowed: false, retryAfter: 3 * time.Second}
+	service := appaction.New(repo, appaction.WithRateLimiter(limiter))
+	ctx := context.Background()
+
+	var limited *dominteraction.ErrActionRateLimited
+	for _, call := range []struct {
+		name string
+		run  func() error
+	}{
+		{"点赞", func() error { _, err := service.Like(ctx, 7, 31, ""); return err }},
+		{"取消点赞", func() error { _, err := service.Unlike(ctx, 7, 31, ""); return err }},
+		{"收藏", func() error { _, err := service.Save(ctx, 7, 31, ""); return err }},
+		{"评论", func() error { _, _, err := service.CreateComment(ctx, 7, 31, "内容", ""); return err }},
+		{"删除评论", func() error { _, err := service.DeleteComment(ctx, 7, 31); return err }},
+	} {
+		err := call.run()
+		if !errors.As(err, &limited) {
+			t.Fatalf("%s 超限期望 ErrActionRateLimited，实际 %v", call.name, err)
+		}
+		if limited.RetryAfter != 3*time.Second {
+			t.Fatalf("%s RetryAfter = %v, 期望 3s", call.name, limited.RetryAfter)
+		}
+	}
+	if len(repo.actions) != 0 || len(repo.comments) != 0 {
+		t.Fatalf("超限请求不应触达仓储，actions=%d comments=%d", len(repo.actions), len(repo.comments))
+	}
+
+	// 读接口不在此列：分页评论不应消耗或触发限流计数。
+	before := limiter.calls
+	if _, err := service.ListComments(ctx, 31, "", 10); err != nil {
+		t.Fatalf("读取评论失败: %v", err)
+	}
+	if limiter.calls != before {
+		t.Fatalf("读接口不应调用写限流器，调用次数 %d -> %d", before, limiter.calls)
+	}
+}
+
+// TestInteractionWriteLimiterFailOpen 验证限流器 Redis 故障时放行并上报降级指标。
+func TestInteractionWriteLimiterFailOpen(t *testing.T) {
+	repo := newInteractionFake(32)
+	limiter := &interactionFakeLimiter{err: errors.New("redis down")}
+	metrics := &interactionFakeMetrics{}
+	service := appaction.New(repo,
+		appaction.WithRateLimiter(limiter),
+		appaction.WithMetrics(metrics),
+	)
+	ctx := context.Background()
+
+	result, err := service.Like(ctx, 7, 32, "fail-open")
+	if err != nil {
+		t.Fatalf("限流器故障应 fail-open，实际错误: %v", err)
+	}
+	if result == nil || result.LikeCount != 1 {
+		t.Fatalf("点赞结果 = %+v, 期望计数 1", result)
+	}
+	if len(metrics.limiterError) != 1 || metrics.limiterError[0] != "user" {
+		t.Fatalf("限流降级指标 = %v, 期望 [user]", metrics.limiterError)
 	}
 }
 

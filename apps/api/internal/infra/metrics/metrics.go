@@ -37,6 +37,7 @@ type Metrics struct {
 	feedLimiterErr *prometheus.CounterVec
 
 	interactionSideEffects *prometheus.CounterVec
+	interactionLimiterErr  *prometheus.CounterVec
 }
 
 // New 按进程组件名创建指标集合并注册到独立注册表；component 取 api 或 worker。
@@ -124,6 +125,10 @@ func New(component string) *Metrics {
 		Name: "pulsefeed_interaction_side_effects_total",
 		Help: "互动提交后副作用的执行结果，按副作用类型（hot_score/action_event/like_notify/comment_notify）与结果（ok/error）区分。",
 	}, []string{"kind", "result"})
+	interactionLimiterErr := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "pulsefeed_interaction_limiter_errors_total",
+		Help: "互动写限流降级次数（Redis 不可用时 fail-open），按 user 维度区分。",
+	}, []string{"scope"})
 
 	registry.MustRegister(
 		up,
@@ -144,6 +149,7 @@ func New(component string) *Metrics {
 		authRevocations,
 		feedLimiterErr,
 		interactionSideEffects,
+		interactionLimiterErr,
 	)
 
 	return &Metrics{
@@ -167,6 +173,7 @@ func New(component string) *Metrics {
 		feedLimiterErr:  feedLimiterErr,
 
 		interactionSideEffects: interactionSideEffects,
+		interactionLimiterErr:  interactionLimiterErr,
 	}
 }
 
@@ -269,6 +276,14 @@ func (m *Metrics) ObserveInteractionSideEffect(kind, result string) {
 		return
 	}
 	m.interactionSideEffects.WithLabelValues(kind, result).Inc()
+}
+
+// ObserveInteractionLimiterError 记录一次互动写限流降级（Redis 不可用 fail-open）。
+func (m *Metrics) ObserveInteractionLimiterError(scope string) {
+	if m == nil {
+		return
+	}
+	m.interactionLimiterErr.WithLabelValues(scope).Inc()
 }
 
 // ObserveRevocations 累加被吊销的刷新令牌行数。
