@@ -5,8 +5,8 @@ import "context"
 
 // Repository 描述点赞/收藏与评论的持久化能力，由 infra 层实现。
 type Repository interface {
-	// SetAction 在同一事务内把行为置为目标状态并维护计数：
-	// 状态变化才调整 pf_clip_stats，幂等命中仅刷新幂等键；返回最新计数。
+	// SetAction 把行为置为目标状态并维护计数：重复判定交给唯一索引，
+	// 仅状态真正变化时原子调整 pf_clip_stats；返回最新计数。
 	// clip 不存在或非发布态返回 ErrClipNotFound。
 	SetAction(ctx context.Context, userID, clipID int64, actionType ActionType, active bool, idempotencyKey string) (*ActionResult, error)
 	// ExistsPublished 报告 clip 是否存在且处于发布态，供异步链路在写缓存前做前置校验。

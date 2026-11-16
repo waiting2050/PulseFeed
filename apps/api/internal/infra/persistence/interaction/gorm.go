@@ -1,10 +1,12 @@
-// gorm.go 实现互动领域仓储端口：事务内锁 clip → 锁计数行 → 锁行为行，
-// 仅在状态真正变化时调整计数；评论写入/软删除同步维护 comment_count。
+// gorm.go 实现互动领域仓储端口：点赞/收藏以唯一索引做幂等判定并原子增减计数，
+// 不锁定 pf_clips；评论写入/软删除同步维护 comment_count。
 package infraaction
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"fmt"
 	"time"
 
 	domclip "pulsefeed/internal/domain/clip"
@@ -30,7 +32,9 @@ func New(db *gorm.DB) *Repository {
 	return &Repository{db: db}
 }
 
-// SetAction 把行为置为目标状态：状态变化才调整 pf_clip_stats，幂等命中仅刷新幂等键。
+// SetAction 把行为置为目标状态：由 uk_user_clip_type 唯一索引承担幂等，
+// 一次条件插入的影响行数即可区分“首次写入 / 状态翻转 / 重复操作”，
+// 不再先查后写，也不再对 pf_clips 加行锁；计数由数据库原子增减。
 func (r *Repository) SetAction(ctx context.Context, userID, clipID int64, actionType dominteraction.ActionType, active bool, idempotencyKey string) (*dominteraction.ActionResult, error) {
 	if !actionType.Valid() {
 		return nil, dominteraction.ErrInvalidActionType
@@ -41,75 +45,56 @@ func (r *Repository) SetAction(ctx context.Context, userID, clipID int64, action
 	}
 
 	result := &dominteraction.ActionResult{ClipID: clipID, ActionType: actionType, Active: active}
+	// READ COMMITTED 下条件插入对 pf_clips 只做一致性读、不取共享锁，
+	// 避免为了“作品可互动”校验重新引入行锁。
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		// 1. 锁 clip 行：既校验可见性，也把同一 clip 的并发互动写入串行化，
-		//    这样“无记录→插入”的竞争不会发生，计数不会重复累加。
-		if err := lockPublishedClip(tx, clipID); err != nil {
-			return err
+		// 1 = 新增行为，2 = 已有行为状态翻转，0 = 重复操作或作品不可互动。
+		outcome := tx.Exec(
+			`INSERT INTO pf_actions (user_id, clip_id, action_type, status, idempotency_key, created_at, updated_at)
+SELECT ?, ?, ?, ?, ?, CURRENT_TIMESTAMP(3), CURRENT_TIMESTAMP(3) FROM pf_clips WHERE id = ? AND status = ?
+ON DUPLICATE KEY UPDATE
+  idempotency_key = IF(pf_actions.status <> ?, IF(? = '', pf_actions.idempotency_key, ?), pf_actions.idempotency_key),
+  updated_at = IF(pf_actions.status <> ?, CURRENT_TIMESTAMP(3), pf_actions.updated_at),
+  status = ?`,
+			userID, clipID, string(actionType), desired, idempotencyKey, clipID, domclip.StatusPublished,
+			desired, idempotencyKey, idempotencyKey, desired, desired,
+		)
+		if outcome.Error != nil {
+			return outcome.Error
 		}
-		// 2. 锁计数行，后续计数变更在锁保护下读改写。
-		stats, err := lockStats(tx, clipID)
+
+		switch outcome.RowsAffected {
+		case 1:
+			// 首次行为：仅“启用”递增计数，首次取消保持计数稳定。
+			result.Changed = active
+			if active {
+				if err := adjustStats(tx, clipID, actionType, 1); err != nil {
+					return err
+				}
+			}
+		case 2:
+			// 已有行为状态翻转：按方向原子增减。
+			delta := int64(-1)
+			if active {
+				delta = 1
+			}
+			if err := adjustStats(tx, clipID, actionType, delta); err != nil {
+				return err
+			}
+			result.Changed = true
+		default:
+			// 影响 0 行：要么状态本就一致（幂等），要么作品不存在/非发布态。
+			return fillUnchangedResult(tx, clipID, result)
+		}
+
+		like, save, err := readStats(tx, clipID)
 		if err != nil {
 			return err
 		}
-		// 3. 锁行为行。
-		var action ActionModel
-		err = tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-			Where("user_id = ? AND clip_id = ? AND action_type = ?", userID, clipID, string(actionType)).
-			Take(&action).Error
-		switch {
-		case errors.Is(err, gorm.ErrRecordNotFound):
-			// 首次行为：写入目标状态；仅“启用”才递增计数，首次取消保持计数稳定。
-			model := ActionModel{
-				UserID:         userID,
-				ClipID:         clipID,
-				ActionType:     string(actionType),
-				Status:         desired,
-				IdempotencyKey: idempotencyKey,
-			}
-			if err := tx.Create(&model).Error; err != nil {
-				return err
-			}
-			if active {
-				if err := adjustStats(tx, stats, actionType, 1); err != nil {
-					return err
-				}
-				result.Changed = true
-			}
-		case err != nil:
-			return err
-		default:
-			if action.Status == desired {
-				// 状态未变化：幂等命中，仅记录最近一次幂等键。
-				if idempotencyKey != "" && action.IdempotencyKey != idempotencyKey {
-					if err := tx.Model(&ActionModel{}).Where("id = ?", action.ID).
-						Update("idempotency_key", idempotencyKey).Error; err != nil {
-						return err
-					}
-				}
-			} else {
-				updates := map[string]any{"status": desired}
-				if idempotencyKey != "" {
-					updates["idempotency_key"] = idempotencyKey
-				}
-				if err := tx.Model(&ActionModel{}).Where("id = ?", action.ID).Updates(updates).Error; err != nil {
-					return err
-				}
-				delta := int64(-1)
-				if active {
-					delta = 1
-				}
-				if err := adjustStats(tx, stats, actionType, delta); err != nil {
-					return err
-				}
-				result.Changed = true
-			}
-		}
-
-		result.LikeCount = stats.LikeCount
-		result.SaveCount = stats.SaveCount
+		result.LikeCount = like
+		result.SaveCount = save
 		return nil
-	})
+	}, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		return nil, err
 	}
@@ -334,26 +319,60 @@ func lockStats(tx *gorm.DB, clipID int64) (*infraclip.ClipStatsModel, error) {
 	return &stats, nil
 }
 
-// adjustStats 按行为类型调整计数并回写；调用方已持有计数行锁，故可安全读改写。
-func adjustStats(tx *gorm.DB, stats *infraclip.ClipStatsModel, actionType dominteraction.ActionType, delta int64) error {
+// adjustStats 用单条 upsert 原子增减计数，不再先锁行再读改写：
+// 计数行缺失时按增量建行（负增量归零），存在时在数据库侧完成增减并保证下限 0。
+func adjustStats(tx *gorm.DB, clipID int64, actionType dominteraction.ActionType, delta int64) error {
 	column := "like_count"
 	if actionType == dominteraction.ActionSave {
 		column = "save_count"
 	}
-	value := stats.LikeCount + delta
-	if column == "save_count" {
-		value = stats.SaveCount + delta
+	stmt := fmt.Sprintf(
+		`INSERT INTO pf_clip_stats (clip_id, %s, created_at, updated_at)
+VALUES (?, GREATEST(?, 0), CURRENT_TIMESTAMP(3), CURRENT_TIMESTAMP(3))
+ON DUPLICATE KEY UPDATE %s = GREATEST(%s + ?, 0), updated_at = CURRENT_TIMESTAMP(3)`,
+		column, column, column,
+	)
+	return tx.Exec(stmt, clipID, delta, delta).Error
+}
+
+// fillUnchangedResult 处理条件插入影响 0 行的情况：
+// 作品不存在或非发布态返回 ErrClipNotFound，否则是重复操作，直接回填当前计数。
+func fillUnchangedResult(tx *gorm.DB, clipID int64, result *dominteraction.ActionResult) error {
+	var snapshot struct {
+		Status    int
+		LikeCount int64
+		SaveCount int64
 	}
-	if value < 0 {
-		value = 0
+	err := tx.Raw(
+		`SELECT c.status AS status,
+       COALESCE(s.like_count, 0) AS like_count,
+       COALESCE(s.save_count, 0) AS save_count
+FROM pf_clips c
+LEFT JOIN pf_clip_stats s ON s.clip_id = c.id
+WHERE c.id = ?`, clipID,
+	).Scan(&snapshot).Error
+	if err != nil {
+		return err
 	}
-	if column == "save_count" {
-		stats.SaveCount = value
-	} else {
-		stats.LikeCount = value
+	if snapshot.Status != domclip.StatusPublished {
+		return dominteraction.ErrClipNotFound
 	}
-	return tx.Model(&infraclip.ClipStatsModel{}).Where("clip_id = ?", stats.ClipID).
-		UpdateColumn(column, value).Error
+	result.LikeCount = snapshot.LikeCount
+	result.SaveCount = snapshot.SaveCount
+	return nil
+}
+
+// readStats 读取最新计数；计数行缺失时按 0 处理。
+func readStats(tx *gorm.DB, clipID int64) (int64, int64, error) {
+	var stats infraclip.ClipStatsModel
+	err := tx.Select("like_count", "save_count").Where("clip_id = ?", clipID).Take(&stats).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return 0, 0, nil
+	}
+	if err != nil {
+		return 0, 0, err
+	}
+	return stats.LikeCount, stats.SaveCount, nil
 }
 
 // fillProfile 为评论补充作者昵称与头像；资料缺失时保留空值，不影响评论写入。

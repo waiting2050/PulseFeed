@@ -5,8 +5,10 @@ package appaction_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sort"
 	"strconv"
+	"sync"
 	"testing"
 
 	appaction "pulsefeed/internal/application/interaction"
@@ -21,7 +23,9 @@ type interactionFakeActionKey struct {
 }
 
 // interactionFake 是内存版互动仓储，按领域端口语义维护行为状态、计数与评论。
+// SetAction/ExistsPublished/deleteClip 由 mu 保护，供并发用例安全调用。
 type interactionFake struct {
+	mu            sync.Mutex
 	published     map[int64]int64 // clipID -> 创作者 ID
 	actions       map[interactionFakeActionKey]*dominteraction.Action
 	likeCounts    map[int64]int64
@@ -63,6 +67,9 @@ func (f *interactionFake) adjust(clipID int64, actionType dominteraction.ActionT
 
 // SetAction 内存实现：仅状态翻转时调整计数，重复调用不改变计数。
 func (f *interactionFake) SetAction(_ context.Context, userID, clipID int64, actionType dominteraction.ActionType, active bool, idempotencyKey string) (*dominteraction.ActionResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
 	if !actionType.Valid() {
 		return nil, dominteraction.ErrInvalidActionType
 	}
@@ -110,8 +117,17 @@ func (f *interactionFake) SetAction(_ context.Context, userID, clipID int64, act
 
 // ExistsPublished 报告 clip 是否存在于发布集合。
 func (f *interactionFake) ExistsPublished(_ context.Context, clipID int64) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	_, ok := f.published[clipID]
 	return ok, nil
+}
+
+// deleteClip 模拟作品删除：从发布集合移除，后续互动按不存在处理。
+func (f *interactionFake) deleteClip(clipID int64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.published, clipID)
 }
 
 // CreateComment 内存实现：同 (userID, 幂等键) 命中时返回既有评论且不重复计数。
@@ -566,5 +582,222 @@ func TestInteractionHotScoreFollowsActionDirection(t *testing.T) {
 		if recorder.calls[i].delta != delta {
 			t.Fatalf("第 %d 次热度增量 = %v, 期望 %v", i+1, recorder.calls[i].delta, delta)
 		}
+	}
+}
+
+// interactionActionStep 描述状态机用例中的一步调用与期望结果。
+type interactionActionStep struct {
+	name        string
+	call        func(*appaction.Service) (*dominteraction.ActionResult, error)
+	wantCount   int64
+	wantChanged bool
+}
+
+// TestInteractionIdempotentStateMachine 覆盖取消再点赞、重复点赞、重复取消三条路径：
+// 仅状态真正翻转才改变计数，重复操作返回原计数且不标记 changed。
+func TestInteractionIdempotentStateMachine(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("取消再点赞", func(t *testing.T) {
+		repo := newInteractionFake(41)
+		service := appaction.New(repo)
+		steps := []interactionActionStep{
+			{"首次点赞", func(s *appaction.Service) (*dominteraction.ActionResult, error) { return s.Like(ctx, 3, 41, "a") }, 1, true},
+			{"取消点赞", func(s *appaction.Service) (*dominteraction.ActionResult, error) { return s.Unlike(ctx, 3, 41, "b") }, 0, true},
+			{"再次点赞", func(s *appaction.Service) (*dominteraction.ActionResult, error) { return s.Like(ctx, 3, 41, "c") }, 1, true},
+		}
+		assertActionSteps(t, service, repo, steps)
+	})
+
+	t.Run("重复点赞", func(t *testing.T) {
+		repo := newInteractionFake(42)
+		service := appaction.New(repo)
+		steps := []interactionActionStep{
+			{"首次点赞", func(s *appaction.Service) (*dominteraction.ActionResult, error) { return s.Like(ctx, 3, 42, "a") }, 1, true},
+			{"重复点赞", func(s *appaction.Service) (*dominteraction.ActionResult, error) { return s.Like(ctx, 3, 42, "b") }, 1, false},
+			{"再次重复点赞", func(s *appaction.Service) (*dominteraction.ActionResult, error) { return s.Like(ctx, 3, 42, "c") }, 1, false},
+		}
+		assertActionSteps(t, service, repo, steps)
+	})
+
+	t.Run("重复取消", func(t *testing.T) {
+		repo := newInteractionFake(43)
+		service := appaction.New(repo)
+		steps := []interactionActionStep{
+			{"首次取消", func(s *appaction.Service) (*dominteraction.ActionResult, error) { return s.Unlike(ctx, 3, 43, "a") }, 0, false},
+			{"重复取消", func(s *appaction.Service) (*dominteraction.ActionResult, error) { return s.Unlike(ctx, 3, 43, "b") }, 0, false},
+			{"再次重复取消", func(s *appaction.Service) (*dominteraction.ActionResult, error) { return s.Unlike(ctx, 3, 43, "c") }, 0, false},
+		}
+		assertActionSteps(t, service, repo, steps)
+	})
+
+	t.Run("收藏取消再收藏", func(t *testing.T) {
+		repo := newInteractionFake(44)
+		service := appaction.New(repo)
+		steps := []interactionActionStep{
+			{"首次收藏", func(s *appaction.Service) (*dominteraction.ActionResult, error) { return s.Save(ctx, 3, 44, "a") }, 1, true},
+			{"取消收藏", func(s *appaction.Service) (*dominteraction.ActionResult, error) { return s.Unsave(ctx, 3, 44, "b") }, 0, true},
+			{"再次收藏", func(s *appaction.Service) (*dominteraction.ActionResult, error) { return s.Save(ctx, 3, 44, "c") }, 1, true},
+		}
+		assertActionSteps(t, service, repo, steps)
+	})
+}
+
+// assertActionSteps 逐条执行状态机步骤并断言计数、changed 与行为行数。
+func assertActionSteps(t *testing.T, service *appaction.Service, repo *interactionFake, steps []interactionActionStep) {
+	t.Helper()
+	for _, step := range steps {
+		result, err := step.call(service)
+		if err != nil {
+			t.Fatalf("%s失败: %v", step.name, err)
+		}
+		gotCount := result.LikeCount
+		if result.ActionType == dominteraction.ActionSave {
+			gotCount = result.SaveCount
+		}
+		if gotCount != step.wantCount || result.Changed != step.wantChanged {
+			t.Fatalf("%s 结果 count=%d changed=%v，期望 count=%d changed=%v",
+				step.name, gotCount, result.Changed, step.wantCount, step.wantChanged)
+		}
+		repo.mu.Lock()
+		rows := len(repo.actions)
+		repo.mu.Unlock()
+		if rows != 1 {
+			t.Fatalf("%s 后同一 (user, clip, 行为) 应只有 1 行，实际 %d", step.name, rows)
+		}
+	}
+}
+
+// TestInteractionConcurrentDuplicateLike 验证同一用户并发重复点赞只计一次，
+// 仅一次调用真正翻转状态，其余按幂等命中返回。
+func TestInteractionConcurrentDuplicateLike(t *testing.T) {
+	repo := newInteractionFake(45)
+	service := appaction.New(repo)
+	ctx := context.Background()
+
+	const workers = 16
+	results := make([]*dominteraction.ActionResult, workers)
+	errs := make([]error, workers)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			results[i], errs[i] = service.Like(ctx, 9, 45, fmt.Sprintf("dup-%d", i))
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	changed := 0
+	for i := range results {
+		if errs[i] != nil {
+			t.Fatalf("第 %d 次并发点赞失败: %v", i, errs[i])
+		}
+		if results[i].Changed {
+			changed++
+		}
+		if results[i].LikeCount < 1 || results[i].LikeCount > workers {
+			t.Fatalf("第 %d 次点赞返回计数 %d，超出 [1,%d]", i, results[i].LikeCount, workers)
+		}
+	}
+	if changed != 1 {
+		t.Fatalf("并发重复点赞应只有 1 次标记 changed，实际 %d", changed)
+	}
+	if repo.likeCounts[45] != 1 {
+		t.Fatalf("同一用户并发点赞最终计数应为 1，实际 %d", repo.likeCounts[45])
+	}
+	if len(repo.actions) != 1 {
+		t.Fatalf("同一用户并发点赞应只落 1 行行为，实际 %d", len(repo.actions))
+	}
+}
+
+// TestInteractionConcurrentMultiUserLike 验证多用户并发点赞同一作品时计数不丢。
+func TestInteractionConcurrentMultiUserLike(t *testing.T) {
+	repo := newInteractionFake(46)
+	service := appaction.New(repo)
+	ctx := context.Background()
+
+	const users = 32
+	errs := make([]error, users)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < users; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			_, errs[i] = service.Like(ctx, int64(i+1), 46, fmt.Sprintf("user-%d", i))
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("第 %d 个用户并发点赞失败: %v", i, err)
+		}
+	}
+	if repo.likeCounts[46] != users {
+		t.Fatalf("%d 个用户并发点赞后计数应为 %d，实际 %d", users, users, repo.likeCounts[46])
+	}
+	if len(repo.actions) != users {
+		t.Fatalf("应落 %d 行行为，实际 %d", users, len(repo.actions))
+	}
+}
+
+// TestInteractionConcurrentLikeWithDelete 验证点赞与作品删除并发后，
+// 计数与行为行始终等于成功点赞数，删除后的点赞返回 404 且不再写入。
+func TestInteractionConcurrentLikeWithDelete(t *testing.T) {
+	repo := newInteractionFake(47)
+	service := appaction.New(repo)
+	ctx := context.Background()
+
+	const users = 24
+	errs := make([]error, users)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < users; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			_, errs[i] = service.Like(ctx, int64(i+1), 47, fmt.Sprintf("race-%d", i))
+		}(i)
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		<-start
+		repo.deleteClip(47)
+	}()
+	close(start)
+	wg.Wait()
+
+	accepted := int64(0)
+	for i, err := range errs {
+		switch {
+		case err == nil:
+			accepted++
+		case errors.Is(err, dominteraction.ErrClipNotFound):
+		default:
+			t.Fatalf("第 %d 个用户点赞返回非预期错误: %v", i, err)
+		}
+	}
+	if repo.likeCounts[47] != accepted {
+		t.Fatalf("最终计数应等于成功点赞数 %d，实际 %d", accepted, repo.likeCounts[47])
+	}
+	if int64(len(repo.actions)) != accepted {
+		t.Fatalf("行为行数应等于成功点赞数 %d，实际 %d", accepted, len(repo.actions))
+	}
+
+	// 删除已生效后，新的点赞必须返回 404 且不改变计数。
+	if _, err := service.Like(ctx, 999, 47, "after-delete"); !errors.Is(err, dominteraction.ErrClipNotFound) {
+		t.Fatalf("删除后点赞期望 ErrClipNotFound，实际 %v", err)
+	}
+	if repo.likeCounts[47] != accepted {
+		t.Fatalf("删除后点赞不应改变计数，期望 %d，实际 %d", accepted, repo.likeCounts[47])
 	}
 }
