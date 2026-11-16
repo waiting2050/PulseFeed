@@ -12,6 +12,7 @@ import (
 	infraoutbox "pulsefeed/internal/infra/persistence/outbox"
 	infraplayback "pulsefeed/internal/infra/persistence/playback"
 	infrarelation "pulsefeed/internal/infra/persistence/relation"
+	infraupload "pulsefeed/internal/infra/persistence/upload"
 )
 
 // Models 返回当前阶段全部表模型；后续阶段新增表时只在此处登记。
@@ -38,5 +39,8 @@ func Models() []any {
 		&inframessage.MessageModel{},
 		&infraplayback.ConfigModel{},
 		&infraplayback.QoSReportModel{},
+		// 分片上传：会话与分片元数据两张表，仅追加、不改动既有表。
+		&infraupload.SessionModel{},
+		&infraupload.PartModel{},
 	}
 }

@@ -38,6 +38,7 @@ import (
 	infraoutbox "pulsefeed/internal/infra/persistence/outbox"
 	infraplayback "pulsefeed/internal/infra/persistence/playback"
 	infrarelation "pulsefeed/internal/infra/persistence/relation"
+	infraupload "pulsefeed/internal/infra/persistence/upload"
 )
 
 const (
@@ -95,6 +96,9 @@ func TestMain(m *testing.M) {
 		&infraoutbox.EventModel{},
 		&infrarelation.FollowModel{},
 		&infrarelation.UserStatsModel{},
+		// 分片上传：会话与分片元数据；集成测试只在本独立 schema 内建表。
+		&infraupload.SessionModel{},
+		&infraupload.PartModel{},
 	}
 	if err := db.AutoMigrate(models...); err != nil {
 		fmt.Fprintf(os.Stderr, "独立 schema 建表失败: %v\n", err)

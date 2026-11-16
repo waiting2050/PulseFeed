@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"path"
 	"strconv"
+	"strings"
 	"time"
 
 	appaccount "pulsefeed/internal/application/account"
@@ -37,6 +39,7 @@ import (
 	infraplayback "pulsefeed/internal/infra/persistence/playback"
 	infrarecommendation "pulsefeed/internal/infra/persistence/recommendation"
 	infrarelation "pulsefeed/internal/infra/persistence/relation"
+	infraupload "pulsefeed/internal/infra/persistence/upload"
 	httpaccount "pulsefeed/internal/interfaces/http/account"
 	httpclip "pulsefeed/internal/interfaces/http/clip"
 	httpfeed "pulsefeed/internal/interfaces/http/feed"
@@ -77,6 +80,9 @@ func Register(engine *gin.Engine, cfg *config.Config, db *sql.DB) error {
 	// 中间件必须在路由注册前启用，Gin 的 Use 不会回溯作用于已注册路由。
 	apiMetrics := inframetrics.New("api")
 	engine.Use(observeHTTP(apiMetrics))
+	// 半成品上传目录位于静态根目录之下，必须在 engine.Static 之前注册全局拦截，
+	// 否则 Gin 的 Use 不会回溯作用于已注册的静态路由。
+	engine.Use(blockUploadTmp())
 
 	// 认证链路在 Redis 就绪后装配：签发器 → 仓储/缓存/限流/拒绝名单 → 应用服务 → 处理器。
 
@@ -93,7 +99,9 @@ func Register(engine *gin.Engine, cfg *config.Config, db *sql.DB) error {
 	clipRepo := infraclip.New(gormDB)
 
 	// upload 链路：文件落盘 ./uploads 并经静态路由回读，上传端点要求登录。
-	uploadHandler := httpupload.New("./uploads")
+	// 分片通道复用同一目录，临时文件落 .upload-tmp/<uploadId>/，双通道共用一套硬校验。
+	uploadRepo := infraupload.New(gormDB)
+	uploadHandler := httpupload.New("./uploads", httpupload.WithMultipartRepository(uploadRepo))
 
 	// feed 链路：latest 场景复合游标分页；页缓存 + singleflight 回源，Redis 缺失/禁用自动降级纯 DB。
 	feedRepo := infrafeed.New(gormDB)
@@ -270,6 +278,12 @@ func Register(engine *gin.Engine, cfg *config.Config, db *sql.DB) error {
 	authed.POST("/clips", clipHandler.Publish)
 	authed.DELETE("/clips/:clipId", clipHandler.Delete)
 	authed.POST("/uploads", uploadHandler.Upload)
+	// 分片上传通道：init → PUT 分片 → complete；GET/DELETE 分别用于续传查询与取消。
+	authed.POST("/uploads/multipart", uploadHandler.InitMultipart)
+	authed.PUT("/uploads/multipart/:uploadId/parts/:partNumber", uploadHandler.UploadPart)
+	authed.GET("/uploads/multipart/:uploadId", uploadHandler.GetMultipart)
+	authed.POST("/uploads/multipart/:uploadId/complete", uploadHandler.CompleteMultipart)
+	authed.DELETE("/uploads/multipart/:uploadId", uploadHandler.CancelMultipart)
 	// 互动端点：点赞/收藏状态变更与评论增删，均要求登录。
 	authed.PUT("/clips/:clipId/like", actionHandler.Like)
 	authed.DELETE("/clips/:clipId/like", actionHandler.Unlike)
@@ -328,4 +342,27 @@ func observeHTTP(metrics *inframetrics.Metrics) gin.HandlerFunc {
 		c.Next()
 		metrics.ObserveHTTP(c.Request.Method, strconv.Itoa(c.Writer.Status()), time.Since(start))
 	}
+}
+
+// uploadTmpSegment 是半成品上传目录的静态路径段。
+const uploadTmpSegment = ".upload-tmp"
+
+// blockUploadTmp 拦截 /uploads/.upload-tmp/ 前缀的静态访问，避免半成品被公网读到。
+// 路径先做一次解码与 path.Clean，再按小写比较，覆盖大小写变体、百分号编码与多余分隔符。
+func blockUploadTmp() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if isUploadTmpPath(c.Request.URL.Path) {
+			c.AbortWithStatus(http.StatusNotFound)
+			return
+		}
+		c.Next()
+	}
+}
+
+// isUploadTmpPath 判断请求路径是否落在半成品目录内。
+func isUploadTmpPath(requestPath string) bool {
+	lowered := strings.ToLower(requestPath)
+	cleaned := path.Clean("/" + lowered)
+	prefix := "/uploads/" + uploadTmpSegment
+	return cleaned == prefix || strings.HasPrefix(cleaned, prefix+"/")
 }

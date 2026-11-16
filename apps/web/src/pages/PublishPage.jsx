@@ -3,7 +3,7 @@ import React, { useEffect, useState } from 'react'
 import Icon from '../components/Icon.jsx'
 import Spinner from '../components/Spinner.jsx'
 import Toast from '../components/Toast.jsx'
-import { api, FILE_KIND } from '../lib/api.js'
+import { api } from '../lib/api.js'
 import { formatFileSize } from '../lib/format.js'
 
 const STAGE_LABELS = {
@@ -39,6 +39,7 @@ export default function PublishPage({ onPublished }) {
   const [cover, setCover] = useState(null)
   const [coverPreview, setCoverPreview] = useState('')
   const [stage, setStage] = useState('')
+  const [uploadProgress, setUploadProgress] = useState(null)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
 
@@ -106,7 +107,9 @@ export default function PublishPage({ onPublished }) {
 
     try {
       setStage('uploading')
-      const uploaded = await api.uploadFile(file, FILE_KIND)
+      setUploadProgress(null)
+      // 短视频仍走单请求；超过 16MiB 时 uploadVideo 内部切到分片通道并回报进度。
+      const uploaded = await api.uploadVideo(file, { onProgress: setUploadProgress })
 
       // 后端抽帧成功时回传 cover_url，未手动选封面则直接沿用首帧；时长同样透传给创建接口。
       let coverUrl = uploaded.cover_url || ''
@@ -134,6 +137,7 @@ export default function PublishPage({ onPublished }) {
       setError(err.message)
     } finally {
       setStage('')
+      setUploadProgress(null)
     }
   }
 
@@ -244,7 +248,9 @@ export default function PublishPage({ onPublished }) {
 
         {stage ? (
           <p className="pf-note" role="status" aria-live="polite">
-            {STAGE_LABELS[stage]}
+            {stage === 'uploading' && uploadProgress
+              ? `正在上传素材… ${uploadProgress.percent}%（${uploadProgress.partsDone}/${uploadProgress.totalParts} 分片）`
+              : STAGE_LABELS[stage]}
           </p>
         ) : null}
 

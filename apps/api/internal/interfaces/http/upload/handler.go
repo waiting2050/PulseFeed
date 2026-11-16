@@ -19,8 +19,10 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
+	domupload "pulsefeed/internal/domain/upload"
 	"pulsefeed/internal/infra/media"
 
 	"github.com/gin-gonic/gin"
@@ -93,11 +95,32 @@ type Handler struct {
 	uploadDir string
 	prober    videoProber
 	limits    uploadLimits
+
+	// 分片通道：仓储为 nil 时不提供 multipart 端点；chunkSize 在建会话时固化。
+	multipart   domupload.Repository
+	chunkSize   int64
+	activeLimit int
+
+	// 兜底清扫节流：进程内最多每 10 分钟一次，TryLock 避免多请求并发清扫。
+	sweepStateMu sync.Mutex
+	lastSweep    time.Time
+	sweepRun     sync.Mutex
 }
 
 // New 创建上传处理器；uploadDir 为落盘根目录，响应 URL 以 /uploads/<kind>/ 为前缀。
-func New(uploadDir string) *Handler {
-	return &Handler{uploadDir: uploadDir, prober: media.NewProber(), limits: defaultUploadLimits()}
+// 变参选项用于注入分片通道的仓储与分片大小，单请求通道不依赖任何选项。
+func New(uploadDir string, opts ...Option) *Handler {
+	handler := &Handler{
+		uploadDir:   uploadDir,
+		prober:      media.NewProber(),
+		limits:      defaultUploadLimits(),
+		chunkSize:   DefaultChunkSize,
+		activeLimit: defaultActiveSessions,
+	}
+	for _, opt := range opts {
+		opt(handler)
+	}
+	return handler
 }
 
 // uploadResponse 是上传成功的响应数据；视频额外回传首帧封面与时长，工具缺失时两个字段省略。
@@ -139,8 +162,7 @@ func (h *Handler) Upload(c *gin.Context) {
 	if kind == "" {
 		kind = defaultKind
 	}
-	whitelist, exists := extWhitelist[kind]
-	if !exists {
+	if _, exists := extWhitelist[kind]; !exists {
 		fail(c, http.StatusBadRequest, "非法的 kind")
 		return
 	}
@@ -152,21 +174,15 @@ func (h *Handler) Upload(c *gin.Context) {
 	}
 
 	// 第一步：大小上限。放在扩展名与 ffprobe 之前，超限文件不落盘、不探测。
-	limit := h.limits.imageBytes
-	label := "图片"
-	if kind == "video" {
-		limit = h.limits.videoBytes
-		label = "视频"
-	}
-	if fileHeader.Size > limit {
-		fail(c, http.StatusBadRequest, fmt.Sprintf("%s文件超过大小上限（%dMB）", label, limit>>20))
+	if message := validateUploadSize(kind, fileHeader.Size, h.limits); message != "" {
+		fail(c, http.StatusBadRequest, message)
 		return
 	}
 
 	// 第二步：扩展名白名单。
-	ext := strings.ToLower(filepath.Ext(fileHeader.Filename))
-	if !slices.Contains(whitelist, ext) {
-		fail(c, http.StatusBadRequest, "不支持的文件类型")
+	kind, ext, err := resolveUploadKind(kind, fileHeader.Filename)
+	if err != nil {
+		fail(c, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -181,26 +197,16 @@ func (h *Handler) Upload(c *gin.Context) {
 		return
 	}
 
+	// 第三步：内容硬校验（视频 ffprobe / 图片解码）只在最终产物上跑一次。
+	durationMS, message := validateMediaContent(c.Request.Context(), h.prober, dst, kind, ext, h.limits)
+	if message != "" {
+		_ = os.Remove(dst)
+		fail(c, http.StatusBadRequest, message)
+		return
+	}
+
 	if kind == "video" {
-		// 第三步：ffprobe 探测时长、分辨率与编码；环境缺失时降级并写明跳过项。
-		var durationMS int64
-		info, err := h.prober.ProbeVideo(c.Request.Context(), dst)
-		switch {
-		case err != nil && errors.Is(err, media.ErrUnavailable):
-			log.Printf("warning: ffprobe 不可用，跳过视频时长/分辨率/编码白名单校验，仅保留扩展名校验: %s", fileHeader.Filename)
-		case err != nil:
-			_ = os.Remove(dst)
-			fail(c, http.StatusBadRequest, "视频文件内容非法，无法解析媒体信息")
-			return
-		default:
-			if message := validateVideoInfo(info, h.limits); message != "" {
-				_ = os.Remove(dst)
-				fail(c, http.StatusBadRequest, message)
-				return
-			}
-			durationMS = info.DurationMS
-		}
-		// 封面抽取同样允许降级：ffmpeg 缺失或抽帧失败只记录 warning，上传照常成功。
+		// 封面抽取允许降级：ffmpeg 缺失或抽帧失败只记录 warning，上传照常成功。
 		coverURL, enrichedDuration := h.enrichVideo(c.Request.Context(), dst, strings.TrimSuffix(filename, ext)+".jpg", durationMS)
 		ok(c, http.StatusCreated, uploadResponse{
 			URL:        "/uploads/video/" + filename,
@@ -211,12 +217,6 @@ func (h *Handler) Upload(c *gin.Context) {
 		return
 	}
 
-	// 图片：第三步校验真实格式与可解码性，防止改扩展名绕过。
-	if err := validateImage(dst, ext); err != nil {
-		_ = os.Remove(dst)
-		fail(c, http.StatusBadRequest, err.Error())
-		return
-	}
 	ok(c, http.StatusCreated, uploadResponse{
 		URL:  "/uploads/" + kind + "/" + filename,
 		Kind: kind,

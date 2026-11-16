@@ -18,6 +18,8 @@ export class ApiError extends Error {
     super(message)
     this.name = 'ApiError'
     this.code = code
+    // 错误信封里的 data 原样保留：complete 的 409 需要按 data.reason 分流。
+    this.data = null
   }
 }
 
@@ -95,7 +97,9 @@ async function readEnvelope(response) {
     const message =
       (payload && payload.message) ||
       (response.status === 401 ? '登录状态已失效，请重新登录' : `请求失败 (${response.status})`)
-    throw new ApiError(message, (payload && payload.code) || response.status)
+    const error = new ApiError(message, (payload && payload.code) || response.status)
+    error.data = payload ? payload.data : null
+    throw error
   }
   return payload ? payload.data : null
 }
@@ -163,6 +167,290 @@ async function upload(path, formData) {
     throw new ApiError('网络异常，上传失败，请重试')
   }
   return readEnvelope(response)
+}
+
+// uploadSingle 是单请求通道：一次 FormData 提交 file + kind，短视频/封面/头像沿用。
+function uploadSingle(file, kind) {
+  const form = new FormData()
+  form.append('file', file)
+  form.append('kind', kind)
+  return upload('/uploads', form)
+}
+
+// 分片通道常量：阈值只影响前端选通道；分片大小以服务端 init 响应为准。
+const MULTIPART_THRESHOLD_BYTES = 16 * 1024 * 1024
+const PART_RETRY_DELAYS = [400, 1200]
+const COMPLETE_POLL_INTERVAL_MS = 2000
+const COMPLETE_POLL_MAX = 15
+const UPLOAD_RECORD_PREFIX = 'pf:upload:'
+
+// uploadFingerprint 以文件名、大小与最后修改时间标识同一份本地文件，支撑刷新后续传。
+function uploadFingerprint(file) {
+  return `${file.name}:${file.size}:${file.lastModified}`
+}
+
+function readUploadRecord(key) {
+  if (typeof sessionStorage === 'undefined') return null
+  try {
+    const raw = sessionStorage.getItem(key)
+    return raw ? JSON.parse(raw) : null
+  } catch {
+    return null
+  }
+}
+
+function writeUploadRecord(key, record) {
+  if (typeof sessionStorage === 'undefined') return
+  try {
+    sessionStorage.setItem(key, JSON.stringify(record))
+  } catch {
+    // 存储不可用（隐私模式/配额满）时退化为纯内存续传，不影响本次上传。
+  }
+}
+
+function clearUploadRecord(key) {
+  if (typeof sessionStorage === 'undefined') return
+  try {
+    sessionStorage.removeItem(key)
+  } catch {
+    // 清理失败不阻断主流程。
+  }
+}
+
+function isGoneError(err) {
+  return err instanceof ApiError && (err.code === 404 || err.code === 410)
+}
+
+function isConflictReason(err, reason) {
+  return err instanceof ApiError && err.code === 409 && Boolean(err.data) && err.data.reason === reason
+}
+
+// wait 支持取消：信号中止时立即退出退避/轮询等待。
+function wait(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal && signal.aborted) {
+      reject(new ApiError('上传已取消'))
+      return
+    }
+    const timer = setTimeout(resolve, ms)
+    if (!signal) return
+    signal.addEventListener(
+      'abort',
+      () => {
+        clearTimeout(timer)
+        reject(new ApiError('上传已取消'))
+      },
+      { once: true },
+    )
+  })
+}
+
+// expectedPartSize 按分片序号计算预期字节数：末片通常不足 chunkSize。
+function expectedPartSize(total, chunkSize, totalParts, partNumber) {
+  if (partNumber === totalParts) return total - (totalParts - 1) * chunkSize
+  return chunkSize
+}
+
+function reportProgress(onProgress, loaded, total, uploaded, totalParts) {
+  if (!onProgress) return
+  const percent = total > 0 ? Math.min(100, Math.round((loaded / total) * 100)) : 0
+  onProgress({ loaded, total, percent, partsDone: uploaded.size, totalParts })
+}
+
+// toUploadResult 把 GET/complete 的响应对齐旧通道字段，publishClip 无需区分来源。
+function toUploadResult(state) {
+  return {
+    url: state.url || '',
+    kind: state.kind || FILE_KIND,
+    cover_url: state.cover_url || '',
+    duration_ms: Number(state.duration_ms) || 0,
+  }
+}
+
+// sendPartRequest 发送原始二进制分片，不走 JSON 信封的请求构造。
+async function sendPartRequest(path, blob, signal) {
+  const headers = { 'Content-Type': 'application/octet-stream' }
+  if (accessToken) headers.Authorization = `Bearer ${accessToken}`
+  let response
+  try {
+    response = await fetch(`/api${path}`, { method: 'PUT', headers, body: blob, signal })
+  } catch {
+    throw new ApiError('网络异常，上传失败，请重试')
+  }
+  return readEnvelope(response)
+}
+
+// putPartWithRetry 单分片最多 3 次尝试，退避 400ms / 1200ms；401 等刷新后重发一次。
+async function putPartWithRetry(uploadId, partNumber, blob, signal) {
+  const path = `/uploads/multipart/${uploadId}/parts/${partNumber}`
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      if (refreshing) await refreshing.catch(() => {})
+      try {
+        return await sendPartRequest(path, blob, signal)
+      } catch (err) {
+        if (!isAuthError(err)) throw err
+        await ensureRefresh().catch(() => {})
+        return await sendPartRequest(path, blob, signal)
+      }
+    } catch (err) {
+      if (signal && signal.aborted) throw err
+      const retryable = err instanceof ApiError && (err.code === 0 || err.code >= 500)
+      if (!retryable || attempt >= PART_RETRY_DELAYS.length) throw err
+      await wait(PART_RETRY_DELAYS[attempt], signal)
+    }
+  }
+}
+
+// uploadMissingParts 按 init/GET 返回的已传分片集合补传缺口，进度按实际 size 累加。
+async function uploadMissingParts(state, storageKey, { file, onProgress, signal }) {
+  const total = file.size
+  const chunkSize = Number(state.chunk_size)
+  const totalParts = Number(state.total_parts)
+  const uploadId = state.upload_id
+  const uploaded = new Set((state.uploaded_parts || []).map(Number))
+  let loaded = 0
+  uploaded.forEach((number) => {
+    loaded += expectedPartSize(total, chunkSize, totalParts, number)
+  })
+  reportProgress(onProgress, loaded, total, uploaded, totalParts)
+
+  for (let number = 1; number <= totalParts; number += 1) {
+    if (uploaded.has(number)) continue
+    const start = (number - 1) * chunkSize
+    const end = Math.min(start + chunkSize, total)
+    const part = await putPartWithRetry(uploadId, number, file.slice(start, end), signal)
+    uploaded.add(number)
+    // 必须用每个分片的实际 size_bytes：末片通常不足 chunkSize。
+    loaded += Number(part && part.size) || 0
+    writeUploadRecord(storageKey, {
+      uploadId,
+      kind: FILE_KIND,
+      size: total,
+      chunkSize,
+      totalParts,
+      uploadedParts: [...uploaded],
+    })
+    reportProgress(onProgress, loaded, total, uploaded, totalParts)
+  }
+}
+
+// pollCompleted 对应 409 upload_merging：每 2s 轮询 GET，最多 15 次（30s）。
+async function pollCompleted(uploadId, storageKey, signal) {
+  for (let index = 0; index < COMPLETE_POLL_MAX; index += 1) {
+    await wait(COMPLETE_POLL_INTERVAL_MS, signal)
+    const state = await request(`/uploads/multipart/${uploadId}`, { signal })
+    if (state.status === 'completed') {
+      clearUploadRecord(storageKey)
+      return toUploadResult(state)
+    }
+    if (state.status === 'failed' || state.status === 'canceled') {
+      clearUploadRecord(storageKey)
+      throw new ApiError('上传已终止，请重新选择文件')
+    }
+  }
+  throw new ApiError('上传处理超时，请稍后重试')
+}
+
+// completeUpload 调用 complete，并按 data.reason 分流：merging 轮询、缺片补传、终态失败。
+async function completeUpload(uploadId, storageKey, options) {
+  const { file, onProgress, signal } = options
+  for (let round = 0; round < 2; round += 1) {
+    try {
+      const result = await request(`/uploads/multipart/${uploadId}/complete`, {
+        method: 'POST',
+        body: {},
+        signal,
+      })
+      clearUploadRecord(storageKey)
+      return result
+    } catch (err) {
+      if (isConflictReason(err, 'upload_merging')) {
+        return pollCompleted(uploadId, storageKey, signal)
+      }
+      if (isConflictReason(err, 'upload_parts_incomplete')) {
+        const state = await request(`/uploads/multipart/${uploadId}`, { signal })
+        if (state.status === 'completed') {
+          clearUploadRecord(storageKey)
+          return toUploadResult(state)
+        }
+        if (state.status !== 'pending') {
+          clearUploadRecord(storageKey)
+          throw new ApiError('上传会话已结束，请重新选择文件')
+        }
+        await uploadMissingParts(state, storageKey, { file, onProgress, signal })
+        continue
+      }
+      if (isConflictReason(err, 'upload_terminal_state')) {
+        clearUploadRecord(storageKey)
+        throw new ApiError(err.message || '上传已终止，请重新选择文件')
+      }
+      throw err
+    }
+  }
+  throw new ApiError('上传未完成，请重试')
+}
+
+// runMultipartUpload 组织一次完整分片流程：续传探测 → 补传缺口 → complete。
+async function runMultipartUpload(file, storageKey, options) {
+  const stored = readUploadRecord(storageKey)
+  let state = null
+  if (stored && stored.uploadId && stored.size === file.size) {
+    state = await request(`/uploads/multipart/${stored.uploadId}`, { signal: options.signal })
+    if (state.status === 'completed') {
+      clearUploadRecord(storageKey)
+      return toUploadResult(state)
+    }
+  }
+  if (!state) {
+    state = await request('/uploads/multipart', {
+      method: 'POST',
+      body: { filename: file.name, kind: FILE_KIND, size: file.size },
+      signal: options.signal,
+    })
+    writeUploadRecord(storageKey, {
+      uploadId: state.upload_id,
+      kind: FILE_KIND,
+      size: file.size,
+      chunkSize: Number(state.chunk_size),
+      totalParts: Number(state.total_parts),
+      uploadedParts: (state.uploaded_parts || []).map(Number),
+    })
+  }
+
+  if (state.status === 'merging') {
+    return pollCompleted(state.upload_id, storageKey, options.signal)
+  }
+  if (state.status !== 'pending') {
+    clearUploadRecord(storageKey)
+    throw new ApiError('上传会话已结束，请重新选择文件')
+  }
+
+  await uploadMissingParts(state, storageKey, options)
+  return completeUpload(state.upload_id, storageKey, options)
+}
+
+// uploadVideo 按大小选通道：≤16MiB 走单请求，超过则走分片并回报进度。
+// 404/410 表示会话失效，清除本地记录后按文档 §8.4 重新 init 一次。
+async function uploadVideo(file, { onProgress, signal } = {}) {
+  if (!file || file.size <= MULTIPART_THRESHOLD_BYTES) {
+    return uploadSingle(file, FILE_KIND)
+  }
+  const storageKey = `${UPLOAD_RECORD_PREFIX}${uploadFingerprint(file)}`
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      return await runMultipartUpload(file, storageKey, { file, onProgress, signal })
+    } catch (err) {
+      // 400/403 属终态失败，清理本地上传记录，避免下次选中同一文件时误续传。
+      if (err instanceof ApiError && (err.code === 400 || err.code === 403)) {
+        clearUploadRecord(storageKey)
+        throw err
+      }
+      if (!isGoneError(err) || attempt === 1) throw err
+      clearUploadRecord(storageKey)
+    }
+  }
+  throw new ApiError('上传会话已失效，请重新选择文件重试')
 }
 
 async function request(path, opts = {}) {
@@ -336,12 +624,14 @@ export const api = {
 
   save: (clipId, active) => request(`/clips/${clipId}/save`, { method: active ? 'PUT' : 'DELETE' }),
 
-  uploadFile: (file, kind) => {
-    const form = new FormData()
-    form.append('file', file)
-    form.append('kind', kind)
-    return upload('/uploads', form)
-  },
+  uploadFile: (file, kind) => uploadSingle(file, kind),
+
+  // 视频入口：≤16MiB 走单请求，超过则分片续传；封面/头像仍用 uploadFile。
+  uploadVideo,
+
+  // 取消分片会话：V1 不设「放弃上传」入口，仅作为 api 层能力保留（文档 §8.5）。
+  cancelMultipartUpload: (uploadId) =>
+    request(`/uploads/multipart/${uploadId}`, { method: 'DELETE' }),
 
   // 沿用既有发布契约：先上传素材，再提交 title / description / video_url / cover_url；
   // description 可选，最长 1000 字符；duration_ms 由上传探测回传。
