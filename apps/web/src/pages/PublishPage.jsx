@@ -1,9 +1,9 @@
 // PublishPage.jsx 提供上传到创建内容的完整表单、素材预览与分阶段状态反馈。
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import Icon from '../components/Icon.jsx'
 import Spinner from '../components/Spinner.jsx'
 import Toast from '../components/Toast.jsx'
-import { api } from '../lib/api.js'
+import { api, newClientId } from '../lib/api.js'
 import { formatFileSize } from '../lib/format.js'
 
 const STAGE_LABELS = {
@@ -42,6 +42,8 @@ export default function PublishPage({ onPublished }) {
   const [uploadProgress, setUploadProgress] = useState(null)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
+  // 发布幂等键按「一次提交」粒度保留：提交失败后手动重试沿用同一个 key，成功后清空。
+  const publishKeyRef = useRef('')
 
   useEffect(() => {
     if (!cover) {
@@ -106,6 +108,9 @@ export default function PublishPage({ onPublished }) {
     }
 
     try {
+      if (!publishKeyRef.current) {
+        publishKeyRef.current = newClientId('pf')
+      }
       setStage('uploading')
       setUploadProgress(null)
       // 短视频仍走单请求；超过 16MiB 时 uploadVideo 内部切到分片通道并回报进度。
@@ -127,7 +132,9 @@ export default function PublishPage({ onPublished }) {
         fileUrl: uploaded.url,
         coverUrl,
         durationMs,
+        idempotencyKey: publishKeyRef.current,
       })
+      publishKeyRef.current = ''
       setTitle('')
       setDescription('')
       setFile(null)

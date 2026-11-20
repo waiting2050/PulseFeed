@@ -133,7 +133,8 @@ async function send(path, opts = {}, token = accessToken) {
   const headers = { ...(opts.headers || {}) }
   if (opts.body !== undefined) headers['Content-Type'] = 'application/json'
   if (token) headers.Authorization = `Bearer ${token}`
-  if (method !== 'GET' && method !== 'HEAD') {
+  if (method !== 'GET' && method !== 'HEAD' && !headers['Idempotency-Key']) {
+    // 未显式指定时按请求生成；发布等需要「一次提交一个 key」的调用方可自行传入。
     headers['Idempotency-Key'] = newIdempotencyKey()
   }
 
@@ -635,9 +636,11 @@ export const api = {
 
   // 沿用既有发布契约：先上传素材，再提交 title / description / video_url / cover_url；
   // description 可选，最长 1000 字符；duration_ms 由上传探测回传。
-  publishClip: ({ title, description, fileUrl, coverUrl, durationMs }) =>
+  // idempotencyKey 由调用方按「一次提交」生成并透传，手动重试沿用同一 key。
+  publishClip: ({ title, description, fileUrl, coverUrl, durationMs, idempotencyKey }) =>
     request('/clips', {
       method: 'POST',
+      headers: idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : undefined,
       body: {
         title,
         description: description || '',
