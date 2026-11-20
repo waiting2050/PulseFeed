@@ -28,6 +28,18 @@ func (r *limitTestRepo) SetAction(_ context.Context, _ int64, clipID int64, acti
 	return &dominteraction.ActionResult{ClipID: clipID, ActionType: actionType, Active: active, Changed: true, LikeCount: 1}, nil
 }
 
+// ApplyBatch 逐条计入 SetAction 调用次数并返回全部变化。
+func (r *limitTestRepo) ApplyBatch(ctx context.Context, clipID int64, changes []dominteraction.ActionChange) ([]dominteraction.BatchActionResult, error) {
+	results := make([]dominteraction.BatchActionResult, len(changes))
+	for i, change := range changes {
+		if _, err := r.SetAction(ctx, change.UserID, clipID, change.ActionType, change.Active, change.IdempotencyKey); err != nil {
+			return nil, err
+		}
+		results[i].Changed = true
+	}
+	return results, nil
+}
+
 // ExistsPublished 报告 clip 存在。
 func (r *limitTestRepo) ExistsPublished(_ context.Context, _ int64) (bool, error) {
 	return true, nil

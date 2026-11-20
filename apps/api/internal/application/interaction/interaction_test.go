@@ -116,6 +116,19 @@ func (f *interactionFake) SetAction(_ context.Context, userID, clipID int64, act
 	return result, nil
 }
 
+// ApplyBatch 内存实现：按顺序逐条复用 SetAction 的幂等语义，并汇总逐条变化标记。
+func (f *interactionFake) ApplyBatch(ctx context.Context, clipID int64, changes []dominteraction.ActionChange) ([]dominteraction.BatchActionResult, error) {
+	results := make([]dominteraction.BatchActionResult, len(changes))
+	for i, change := range changes {
+		result, err := f.SetAction(ctx, change.UserID, clipID, change.ActionType, change.Active, change.IdempotencyKey)
+		if err != nil {
+			return nil, err
+		}
+		results[i].Changed = result.Changed
+	}
+	return results, nil
+}
+
 // ExistsPublished 报告 clip 是否存在于发布集合。
 func (f *interactionFake) ExistsPublished(_ context.Context, clipID int64) (bool, error) {
 	f.mu.Lock()

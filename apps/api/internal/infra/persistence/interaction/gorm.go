@@ -101,6 +101,120 @@ ON DUPLICATE KEY UPDATE
 	return result, nil
 }
 
+// ApplyBatch 在同一事务内按顺序重放同一 clip 的多条行为变更：
+// 每条变更的影响行数判定与 SetAction 完全一致，但计数只在批末按“当前值 + 顺序增量”写一次，
+// 因此同一批事件只竞争一次 pf_clip_stats 行锁，而不是每条事件各抢一次。
+func (r *Repository) ApplyBatch(ctx context.Context, clipID int64, changes []dominteraction.ActionChange) ([]dominteraction.BatchActionResult, error) {
+	results := make([]dominteraction.BatchActionResult, len(changes))
+	if len(changes) == 0 {
+		return results, nil
+	}
+
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// deltas 按行为类型保留事件顺序，批末据此复现逐条写的“计数下限为 0”语义。
+		deltas := make(map[dominteraction.ActionType][]int64, 2)
+		hasUnchanged := false
+
+		for i := range changes {
+			if !changes[i].ActionType.Valid() {
+				return dominteraction.ErrInvalidActionType
+			}
+			desired := dominteraction.StatusCanceled
+			if changes[i].Active {
+				desired = dominteraction.StatusActive
+			}
+
+			outcome := tx.Exec(
+				`INSERT INTO pf_actions (user_id, clip_id, action_type, status, idempotency_key, created_at, updated_at)
+SELECT ?, ?, ?, ?, ?, CURRENT_TIMESTAMP(3), CURRENT_TIMESTAMP(3) FROM pf_clips WHERE id = ? AND status = ?
+ON DUPLICATE KEY UPDATE
+  idempotency_key = IF(pf_actions.status <> ?, IF(? = '', pf_actions.idempotency_key, ?), pf_actions.idempotency_key),
+  updated_at = IF(pf_actions.status <> ?, CURRENT_TIMESTAMP(3), pf_actions.updated_at),
+  status = ?`,
+				changes[i].UserID, clipID, string(changes[i].ActionType), desired, changes[i].IdempotencyKey, clipID, domclip.StatusPublished,
+				desired, changes[i].IdempotencyKey, changes[i].IdempotencyKey, desired, desired,
+			)
+			if outcome.Error != nil {
+				return outcome.Error
+			}
+
+			switch outcome.RowsAffected {
+			case 1:
+				// 首次行为：仅“启用”递增计数，首次取消保持计数稳定。
+				results[i].Changed = changes[i].Active
+				if changes[i].Active {
+					deltas[changes[i].ActionType] = append(deltas[changes[i].ActionType], 1)
+				}
+			case 2:
+				// 已有行为状态翻转：按方向累加，批末一次写入。
+				delta := int64(-1)
+				if changes[i].Active {
+					delta = 1
+				}
+				results[i].Changed = true
+				deltas[changes[i].ActionType] = append(deltas[changes[i].ActionType], delta)
+			default:
+				// 影响 0 行：要么状态本就一致（幂等），要么作品不存在/非发布态。
+				hasUnchanged = true
+			}
+		}
+
+		// 同一 clip 的批量事件共享一次存在性判定，避免为每条幂等命中重复查询。
+		if hasUnchanged {
+			if err := ensurePublishedClip(tx, clipID); err != nil {
+				return err
+			}
+		}
+
+		if len(deltas) == 0 {
+			return nil
+		}
+		stats, err := lockStats(tx, clipID)
+		if err != nil {
+			return err
+		}
+		like, save := stats.LikeCount, stats.SaveCount
+		for _, delta := range deltas[dominteraction.ActionLike] {
+			like = clampCount(like + delta)
+		}
+		for _, delta := range deltas[dominteraction.ActionSave] {
+			save = clampCount(save + delta)
+		}
+		if like == stats.LikeCount && save == stats.SaveCount {
+			return nil
+		}
+		return tx.Exec(
+			`UPDATE pf_clip_stats SET like_count = ?, save_count = ?, updated_at = CURRENT_TIMESTAMP(3) WHERE clip_id = ?`,
+			like, save, clipID,
+		).Error
+	}, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+	if err != nil {
+		return nil, err
+	}
+	return results, nil
+}
+
+// clampCount 复现计数器“下限为 0”的单步语义。
+func clampCount(value int64) int64 {
+	if value < 0 {
+		return 0
+	}
+	return value
+}
+
+// ensurePublishedClip 校验 clip 存在且为发布态，供批量落库在出现幂等命中时统一判定。
+func ensurePublishedClip(tx *gorm.DB, clipID int64) error {
+	var status int
+	err := tx.Raw(`SELECT status FROM pf_clips WHERE id = ?`, clipID).Scan(&status).Error
+	if err != nil {
+		return err
+	}
+	if status != domclip.StatusPublished {
+		return dominteraction.ErrClipNotFound
+	}
+	return nil
+}
+
 // ExistsPublished 判断 clip 是否存在且处于发布态，只做一次轻量只读查询。
 func (r *Repository) ExistsPublished(ctx context.Context, clipID int64) (bool, error) {
 	var count int64

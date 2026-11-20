@@ -35,6 +35,7 @@ import (
 func main() {
 	configPath := flag.String("config", "configs/config.yaml", "配置文件路径")
 	metricsAddr := flag.String("metrics-addr", ":9092", "Worker 独立指标监听地址，9092 被系统保留时可改用 :9093")
+	actionBatch := flag.Bool("action-batch", true, "action_changed 是否按批聚合同一作品的计数写入（false 为逐条落库，便于 A/B 对比）")
 	flag.Parse()
 
 	cfg, err := config.Load(*configPath)
@@ -141,6 +142,10 @@ func main() {
 
 	// 四个消费者各自持有独立 AMQP 通道并发消费，outbox relay 独立轮询；任一消费者异常退出即终止进程。
 	log.Printf("worker 已启动: %s (queue=%s)", actionWorker.Name(), cfg.RabbitMQ.ActionChangedQueue)
+	if *actionBatch {
+		log.Printf("worker 已启动: %s 批次聚合 (size=%d wait=%s)",
+			actionWorker.Name(), appaction.ActionBatchSize, appaction.ActionBatchWait)
+	}
 	log.Printf("worker 已启动: %s (queue=%s)", fanoutWorker.Name(), cfg.RabbitMQ.ClipPublishedQueue)
 	log.Printf("worker 已启动: %s (queue=%s)", embeddingWorker.Name(), cfg.RabbitMQ.ClipEmbeddingQueue)
 	log.Printf("worker 已启动: %s (queue=%s)", playEventWorker.Name(), cfg.RabbitMQ.PlayEventRecordedQueue)
@@ -150,6 +155,12 @@ func main() {
 		errCh <- outboxRelay.Run(ctx)
 	}()
 	go func() {
+		if *actionBatch {
+			errCh <- mqClient.ConsumeBatch(ctx, cfg.RabbitMQ.ActionChangedQueue,
+				appaction.ActionBatchSize, appaction.ActionBatchWait,
+				observeWorkerBatch(workerMetrics, actionWorker.Name(), actionWorker.HandleBatch))
+			return
+		}
 		errCh <- mqClient.Consume(ctx, cfg.RabbitMQ.ActionChangedQueue,
 			observeWorker(workerMetrics, actionWorker.Name(), actionWorker.Handle))
 	}()
@@ -201,5 +212,20 @@ func observeWorker(metrics *inframetrics.Metrics, name string, handler func(cont
 		}
 		metrics.ObserveWorker(name, result)
 		return err
+	}
+}
+
+// observeWorkerBatch 包装批量处理器，按每条消息的处理结果记录 ok/error 计数。
+func observeWorkerBatch(metrics *inframetrics.Metrics, name string, handler func(context.Context, [][]byte) []error) func(context.Context, [][]byte) []error {
+	return func(ctx context.Context, bodies [][]byte) []error {
+		errs := handler(ctx, bodies)
+		for _, err := range errs {
+			result := "ok"
+			if err != nil {
+				result = "error"
+			}
+			metrics.ObserveWorker(name, result)
+		}
+		return errs
 	}
 }
