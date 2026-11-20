@@ -618,8 +618,13 @@ export const api = {
   comments: (clipId, { limit = 20, cursor = '' } = {}) =>
     request(`/clips/${clipId}/comments${buildQuery({ limit, cursor })}`),
 
-  createComment: (clipId, content) =>
-    request(`/clips/${clipId}/comments`, { method: 'POST', body: { content } }),
+  // idempotencyKey 由调用方按「一次提交意图」生成并透传；缺省时 send() 仍会补一个。
+  createComment: (clipId, content, idempotencyKey) =>
+    request(`/clips/${clipId}/comments`, {
+      method: 'POST',
+      headers: idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : undefined,
+      body: { content },
+    }),
 
   like: (clipId, active) => request(`/clips/${clipId}/like`, { method: active ? 'PUT' : 'DELETE' }),
 

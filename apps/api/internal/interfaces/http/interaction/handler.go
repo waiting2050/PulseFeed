@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	appaction "pulsefeed/internal/application/interaction"
 	dominteraction "pulsefeed/internal/domain/interaction"
@@ -17,6 +18,9 @@ import (
 
 // idempotencyKeyMaxLen 是幂等键长度上限，与 pf_actions/pf_comments 列宽一致。
 const idempotencyKeyMaxLen = 128
+
+// commentIdempotencyKeyMaxLen 是评论幂等键长度上限，与发布接口的 64 字符口径对齐。
+const commentIdempotencyKeyMaxLen = 64
 
 // Handler 聚合互动相关端点。
 type Handler struct {
@@ -113,7 +117,7 @@ func (h *Handler) CreateComment(c *gin.Context) {
 	if !ok {
 		return
 	}
-	key, ok := idempotencyKey(c)
+	key, ok := commentIdempotencyKey(c)
 	if !ok {
 		return
 	}
@@ -219,6 +223,17 @@ func idempotencyKey(c *gin.Context) (string, bool) {
 	key := strings.TrimSpace(c.GetHeader("Idempotency-Key"))
 	if len(key) > idempotencyKeyMaxLen {
 		fail(c, http.StatusBadRequest, "Idempotency-Key 超长")
+		return "", false
+	}
+	return key, true
+}
+
+// commentIdempotencyKey 读取并校验评论用 Idempotency-Key：仍可选（空串表示不使用），
+// 超过 64 个字符直接 400，避免落到数据库字段超长报错。
+func commentIdempotencyKey(c *gin.Context) (string, bool) {
+	key := strings.TrimSpace(c.GetHeader("Idempotency-Key"))
+	if utf8.RuneCountInString(key) > commentIdempotencyKeyMaxLen {
+		fail(c, http.StatusBadRequest, "Idempotency-Key 过长（最多 64 个字符）")
 		return "", false
 	}
 	return key, true

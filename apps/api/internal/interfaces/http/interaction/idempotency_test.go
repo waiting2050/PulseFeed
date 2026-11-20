@@ -24,6 +24,54 @@ func newHeaderContext(key string) *gin.Context {
 	return c
 }
 
+// newCommentHeaderContext 构造携带 Idempotency-Key 的评论接口上下文。
+func newCommentHeaderContext(key string) (*gin.Context, *httptest.ResponseRecorder) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/api/clips/1/comments", nil)
+	if key != "" {
+		c.Request.Header.Set("Idempotency-Key", key)
+	}
+	return c, rec
+}
+
+// TestCommentIdempotencyKeyLimit 覆盖评论幂等键的 64 字符边界：边界放行、超长 400。
+func TestCommentIdempotencyKeyLimit(t *testing.T) {
+	t.Run("缺省头为空串", func(t *testing.T) {
+		c, _ := newCommentHeaderContext("")
+		key, ok := commentIdempotencyKey(c)
+		if !ok || key != "" {
+			t.Fatalf("期望空键放行，实际 key=%q ok=%v", key, ok)
+		}
+	})
+
+	t.Run("边界长度 64 放行", func(t *testing.T) {
+		c, _ := newCommentHeaderContext(strings.Repeat("k", commentIdempotencyKeyMaxLen))
+		key, ok := commentIdempotencyKey(c)
+		if !ok || len(key) != commentIdempotencyKeyMaxLen {
+			t.Fatalf("期望 64 长度放行，实际 len=%d ok=%v", len(key), ok)
+		}
+	})
+
+	t.Run("超长返回 400 信封", func(t *testing.T) {
+		c, rec := newCommentHeaderContext(strings.Repeat("k", commentIdempotencyKeyMaxLen+1))
+		if _, ok := commentIdempotencyKey(c); ok {
+			t.Fatalf("超长评论幂等键不应放行")
+		}
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("期望 400，实际 %d", rec.Code)
+		}
+		var envelope map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+			t.Fatalf("错误信封不是合法 JSON: %v", err)
+		}
+		if code, _ := envelope["code"].(float64); code != http.StatusBadRequest {
+			t.Fatalf("错误信封 code 期望 400，实际 %v", envelope["code"])
+		}
+	})
+}
+
 // TestIdempotencyKeyNormalization 覆盖缺省、空白、边界长度与超长四种输入。
 func TestIdempotencyKeyNormalization(t *testing.T) {
 	t.Run("缺省头为空串", func(t *testing.T) {

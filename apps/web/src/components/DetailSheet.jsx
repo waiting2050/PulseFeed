@@ -6,7 +6,7 @@ import ClipCover from './ClipCover.jsx'
 import Spinner from './Spinner.jsx'
 import VideoPlayer from './VideoPlayer.jsx'
 import useApi from '../hooks/useApi.js'
-import { api } from '../lib/api.js'
+import { api, newClientId } from '../lib/api.js'
 import { formatCount, formatTime } from '../lib/format.js'
 
 export default function DetailSheet({ item, onClose, onLike, onSave, onCommentAdded, viewerId = 0, onCreator, onFollow }) {
@@ -21,6 +21,8 @@ export default function DetailSheet({ item, onClose, onLike, onSave, onCommentAd
   const [submitting, setSubmitting] = useState(false)
   const [submitError, setSubmitError] = useState('')
   const [added, setAdded] = useState([])
+  // 评论幂等键按「一次提交意图」复用：内容不变的重试沿用同一个 key，成功后清空。
+  const commentKeyRef = useRef({ key: '', content: '' })
 
   const comments = useApi(() => api.comments(item.clip_id, { limit: 20 }), [item.clip_id])
 
@@ -29,6 +31,7 @@ export default function DetailSheet({ item, onClose, onLike, onSave, onCommentAd
     setAdded([])
     setDraft('')
     setSubmitError('')
+    commentKeyRef.current = { key: '', content: '' }
   }, [item.clip_id])
 
   // 打开时锁定页面滚动、把焦点移入弹层，Esc 关闭并把焦点还给触发元素。
@@ -73,10 +76,16 @@ export default function DetailSheet({ item, onClose, onLike, onSave, onCommentAd
       event.preventDefault()
       const content = draft.trim()
       if (!content || submitting) return
+      // 内容变化视为新的提交意图：换新 key；同内容重发沿用旧 key，交给服务端幂等去重。
+      const pending = commentKeyRef.current
+      if (!pending.key || pending.content !== content) {
+        commentKeyRef.current = { key: newClientId('pf'), content }
+      }
       setSubmitting(true)
       setSubmitError('')
       try {
-        const created = await api.createComment(item.clip_id, content)
+        const created = await api.createComment(item.clip_id, content, commentKeyRef.current.key)
+        commentKeyRef.current = { key: '', content: '' }
         setAdded((prev) => [created, ...prev])
         setDraft('')
         onCommentAdded(item.clip_id, created.comment_count)
