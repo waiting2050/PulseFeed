@@ -1,5 +1,4 @@
-// impression_test.go 用内存 fake 验证播放事件上报的 event_id 幂等、播放/完播累加、参数校验、
-// 投递失败不影响上报，以及 PlayEventWorker 对已同步事件的幂等与未同步事件的曝光补偿契约。
+// impression_test.go 用内存 fake 验证播放事件上报的 event_id 幂等、播放/完播累加、参数校验与投递失败不影响上报。
 package appimpression_test
 
 import (
@@ -9,11 +8,9 @@ import (
 	"fmt"
 	"strings"
 	"testing"
-	"time"
 
 	appimpression "pulsefeed/internal/application/impression"
 	domimpression "pulsefeed/internal/domain/impression"
-	"pulsefeed/internal/domain/messaging"
 )
 
 // impressionFakeRepository 是曝光仓储的内存替身：按 event_id 去重，并按 (viewer, clip, day) 聚合计数。
@@ -21,18 +18,11 @@ type impressionFakeRepository struct {
 	clips       map[int64]bool
 	events      map[string]*domimpression.PlayEvent
 	impressions map[string]*domimpression.Impression
-	synced      map[string]bool
 	recordCalls int
 	withEvents  int
 	outbox      []domimpression.OutboxEvent
-	upsertCalls int
-	markCalls   int
-	syncedCalls int
 	lastIsNew   bool
 	recordErr   error
-	upsertErr   error
-	syncedErr   error
-	markErr     error
 }
 
 var _ domimpression.Repository = (*impressionFakeRepository)(nil)
@@ -47,7 +37,6 @@ func newImpressionFakeRepository(clipIDs ...int64) *impressionFakeRepository {
 		clips:       clips,
 		events:      make(map[string]*domimpression.PlayEvent),
 		impressions: make(map[string]*domimpression.Impression),
-		synced:      make(map[string]bool),
 	}
 }
 
@@ -104,7 +93,7 @@ func playEventInput(eventID string, clipID, watchMs int64, eventType string, com
 	}
 }
 
-// RecordPlayEvent 模拟唯一键幂等落库：仅首次写入时聚合曝光并标记已同步。
+// RecordPlayEvent 模拟唯一键幂等落库：仅首次写入时聚合曝光计数。
 func (f *impressionFakeRepository) RecordPlayEvent(_ context.Context, event *domimpression.PlayEvent) (bool, error) {
 	f.recordCalls++
 	f.lastIsNew = false
@@ -121,7 +110,6 @@ func (f *impressionFakeRepository) RecordPlayEvent(_ context.Context, event *dom
 	clone := *event
 	f.events[event.EventID] = &clone
 	f.applyImpression(event)
-	f.synced[event.EventID] = true
 	f.lastIsNew = true
 	return true, nil
 }
@@ -140,38 +128,6 @@ func (f *impressionFakeRepository) RecordPlayEventWithEvents(ctx context.Context
 	}
 	f.outbox = append(f.outbox, events...)
 	return true, nil
-}
-
-// UpsertImpression 模拟 Worker 补偿链路的聚合 upsert；clip 不可见时返回领域错误。
-func (f *impressionFakeRepository) UpsertImpression(_ context.Context, event *domimpression.PlayEvent) error {
-	f.upsertCalls++
-	if f.upsertErr != nil {
-		return f.upsertErr
-	}
-	if !f.clips[event.ClipID] {
-		return domimpression.ErrClipNotFound
-	}
-	f.applyImpression(event)
-	return nil
-}
-
-// MarkEventSynced 标记事件已完成曝光聚合。
-func (f *impressionFakeRepository) MarkEventSynced(_ context.Context, eventID string) error {
-	f.markCalls++
-	if f.markErr != nil {
-		return f.markErr
-	}
-	f.synced[eventID] = true
-	return nil
-}
-
-// IsEventSynced 查询事件是否已完成曝光聚合。
-func (f *impressionFakeRepository) IsEventSynced(_ context.Context, eventID string) (bool, error) {
-	f.syncedCalls++
-	if f.syncedErr != nil {
-		return false, f.syncedErr
-	}
-	return f.synced[eventID], nil
 }
 
 // impressionFakePublisher 记录投递的 play.recorded 事件。
@@ -472,156 +428,5 @@ func TestRecordPlayEventWithOutboxPropagatesStoreError(t *testing.T) {
 	}
 	if len(repo.outbox) != 0 {
 		t.Fatalf("落库失败不应产生 outbox 事件, 实际 %d", len(repo.outbox))
-	}
-}
-
-// TestPlayEventWorkerDeadLettersInvalidPayload 验证非法载荷标记为不可重试（转入死信），不查询同步状态也不补偿。
-func TestPlayEventWorkerDeadLettersInvalidPayload(t *testing.T) {
-	repo := newImpressionFakeRepository(10)
-	worker := appimpression.NewPlayEventWorker(repo)
-
-	payloads := [][]byte{
-		[]byte("not-json"),
-		[]byte(`{"event_id":"","viewer_id":7,"clip_id":10}`),
-		[]byte(`{"event_id":"evt-1","viewer_id":0,"clip_id":10}`),
-		[]byte(`{"event_id":"evt-1","viewer_id":7,"clip_id":0}`),
-	}
-	for _, body := range payloads {
-		if err := worker.Handle(context.Background(), body); !messaging.IsPermanent(err) {
-			t.Fatalf("非法载荷 %s 应标记不可重试（转入死信）, 实际返回 %v", body, err)
-		}
-	}
-	if repo.syncedCalls != 0 || repo.upsertCalls != 0 || repo.markCalls != 0 {
-		t.Fatalf("非法载荷不应访问仓储, synced=%d upsert=%d mark=%d", repo.syncedCalls, repo.upsertCalls, repo.markCalls)
-	}
-}
-
-// TestPlayEventWorkerConfirmsSyncedEvent 验证已同步事件重复消费直接确认，不产生二次聚合。
-func TestPlayEventWorkerConfirmsSyncedEvent(t *testing.T) {
-	repo := newImpressionFakeRepository(10)
-	repo.synced["evt-1"] = true
-
-	body, err := json.Marshal(appimpression.PlayRecorded{
-		EventID:    "evt-1",
-		ViewerID:   7,
-		ClipID:     10,
-		WatchMs:    1200,
-		Impression: true,
-		OccurredAt: time.Now(),
-	})
-	if err != nil {
-		t.Fatalf("序列化事件失败: %v", err)
-	}
-
-	worker := appimpression.NewPlayEventWorker(repo)
-	if err := worker.Handle(context.Background(), body); err != nil {
-		t.Fatalf("已同步事件应直接确认, 实际返回 %v", err)
-	}
-	if repo.upsertCalls != 0 || repo.markCalls != 0 {
-		t.Fatalf("已同步事件不应补偿, upsert=%d mark=%d", repo.upsertCalls, repo.markCalls)
-	}
-	if len(repo.impressions) != 0 {
-		t.Fatalf("已同步事件不应新增聚合行, 实际 %d", len(repo.impressions))
-	}
-}
-
-// TestPlayEventWorkerCompensatesUnsyncedEvent 验证未同步事件被补偿聚合并标记已同步，重复消费保持幂等。
-func TestPlayEventWorkerCompensatesUnsyncedEvent(t *testing.T) {
-	occurredAt := time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC)
-	repo := newImpressionFakeRepository(10)
-	body, err := json.Marshal(appimpression.PlayRecorded{
-		EventID:    "evt-2",
-		ViewerID:   7,
-		ClipID:     10,
-		EventType:  "complete",
-		WatchMs:    1500,
-		Completed:  true,
-		Impression: true,
-		OccurredAt: occurredAt,
-	})
-	if err != nil {
-		t.Fatalf("序列化事件失败: %v", err)
-	}
-
-	worker := appimpression.NewPlayEventWorker(repo)
-	if err := worker.Handle(context.Background(), body); err != nil {
-		t.Fatalf("补偿消费返回错误: %v", err)
-	}
-	if repo.upsertCalls != 1 {
-		t.Fatalf("补偿 upsert 次数 = %d, 期望 1", repo.upsertCalls)
-	}
-	if repo.markCalls != 1 {
-		t.Fatalf("标记已同步次数 = %d, 期望 1", repo.markCalls)
-	}
-	if !repo.synced["evt-2"] {
-		t.Fatalf("补偿后事件未标记为已同步")
-	}
-
-	row := impressionFakeOnlyRow(t, repo)
-	if row.PlayCount != 0 || row.CompletedCount != 1 {
-		t.Fatalf("补偿聚合 = play %d / complete %d, 期望 0 / 1（complete 不累加 play）", row.PlayCount, row.CompletedCount)
-	}
-	if row.Day != domimpression.Day(occurredAt) {
-		t.Fatalf("聚合日 = %s, 期望 %s", row.Day, domimpression.Day(occurredAt))
-	}
-
-	// 已同步后重复消费：直接确认，不再二次累加。
-	if err := worker.Handle(context.Background(), body); err != nil {
-		t.Fatalf("重复消费返回错误: %v", err)
-	}
-	if repo.upsertCalls != 1 {
-		t.Fatalf("重复消费不应再次补偿, upsert=%d", repo.upsertCalls)
-	}
-	if row.PlayCount != 0 || row.CompletedCount != 1 {
-		t.Fatalf("重复消费后聚合被二次累加: play %d / complete %d", row.PlayCount, row.CompletedCount)
-	}
-}
-
-// TestPlayEventWorkerDeadLettersMissingClip 验证补偿时 clip 不可见标记为不可重试（转入死信），避免毒消息无限回队。
-func TestPlayEventWorkerDeadLettersMissingClip(t *testing.T) {
-	repo := newImpressionFakeRepository(10)
-	body, err := json.Marshal(appimpression.PlayRecorded{
-		EventID:    "evt-3",
-		ViewerID:   7,
-		ClipID:     99,
-		WatchMs:    1000,
-		OccurredAt: time.Now(),
-	})
-	if err != nil {
-		t.Fatalf("序列化事件失败: %v", err)
-	}
-
-	worker := appimpression.NewPlayEventWorker(repo)
-	if err := worker.Handle(context.Background(), body); !messaging.IsPermanent(err) {
-		t.Fatalf("clip 不可见应标记不可重试（转入死信）, 实际返回 %v", err)
-	}
-	if repo.markCalls != 0 {
-		t.Fatalf("clip 不可见不应标记已同步, mark=%d", repo.markCalls)
-	}
-	if len(repo.impressions) != 0 {
-		t.Fatalf("clip 不可见不应新增聚合行, 实际 %d", len(repo.impressions))
-	}
-}
-
-// TestPlayEventWorkerReturnsErrorOnLookupFailure 验证查询同步状态失败时返回错误触发 MQ 重投。
-func TestPlayEventWorkerReturnsErrorOnLookupFailure(t *testing.T) {
-	repo := newImpressionFakeRepository(10)
-	repo.syncedErr = errors.New("查询同步状态失败")
-	body, err := json.Marshal(appimpression.PlayRecorded{
-		EventID:    "evt-4",
-		ViewerID:   7,
-		ClipID:     10,
-		OccurredAt: time.Now(),
-	})
-	if err != nil {
-		t.Fatalf("序列化事件失败: %v", err)
-	}
-
-	worker := appimpression.NewPlayEventWorker(repo)
-	if err := worker.Handle(context.Background(), body); err == nil {
-		t.Fatalf("查询同步状态失败应返回错误触发重投")
-	}
-	if repo.upsertCalls != 0 {
-		t.Fatalf("查询失败不应继续补偿, upsert=%d", repo.upsertCalls)
 	}
 }

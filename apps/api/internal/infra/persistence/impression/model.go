@@ -6,7 +6,8 @@ import "time"
 // PlayEventModel 映射 pf_play_events 表；event_id 唯一索引保证同一事件只落一行。
 // event_type 缺省为 play，保证迁移前写入的旧行仍按播放事件语义读取。
 // play_duration_ms 为旧列保留兼容写入，watch_ms 为当前观看时长字段。
-// synced 标记该事件的展示聚合是否已完成：API 同步落库后置 true，Worker 消费时据此跳过重复聚合。
+// synced 已废弃：播放事件的 synced 补偿链路已删除，该列不再参与任何读写逻辑。
+// 保留列仅为兼容既有表结构（不写迁移、不删列）；新事件不再显式赋值，落库取列默认值 false。
 type PlayEventModel struct {
 	ID             int64     `gorm:"column:id;primaryKey;autoIncrement"`
 	EventID        string    `gorm:"column:event_id;size:128;not null;uniqueIndex:uk_event_id"`

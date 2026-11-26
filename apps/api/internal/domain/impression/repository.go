@@ -32,11 +32,4 @@ type Repository interface {
 	// 任一写入失败整体回滚，避免“事件落库但消息丢失”或“消息存在但事件回滚”。
 	// 同 event_id 重复上报时为 no-op，不产生新的 outbox 事件。
 	RecordPlayEventWithEvents(ctx context.Context, event *PlayEvent, build EventBuilder) (isNew bool, err error)
-	// UpsertImpression 按事件类型把一条事件的贡献累加进 (viewer_id, clip_id, day) 聚合行，
-	// 用于 Worker 补偿链路：API 进程崩溃导致聚合未完成时，由 Worker 二次调用保证最终一致。
-	UpsertImpression(ctx context.Context, event *PlayEvent) error
-	// MarkEventSynced 把播放事件标记为已完成曝光聚合，供 Worker 判定是否需要补偿。
-	MarkEventSynced(ctx context.Context, eventID string) error
-	// IsEventSynced 查询播放事件是否已完成曝光聚合。
-	IsEventSynced(ctx context.Context, eventID string) (bool, error)
 }

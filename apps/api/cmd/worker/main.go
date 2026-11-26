@@ -23,7 +23,6 @@ import (
 	infradlq "pulsefeed/internal/infra/persistence/dlq"
 	infraembedding "pulsefeed/internal/infra/persistence/embedding"
 	infrafeed "pulsefeed/internal/infra/persistence/feed"
-	infraimpression "pulsefeed/internal/infra/persistence/impression"
 	infraaction "pulsefeed/internal/infra/persistence/interaction"
 	"pulsefeed/internal/infra/persistence/migration"
 	infraoutbox "pulsefeed/internal/infra/persistence/outbox"
@@ -85,8 +84,8 @@ func main() {
 		appaction.WithActionWorkerMetrics(workerMetrics),
 	)
 
-	// 播放事件消费链路：对 API 同步链路未完成曝光聚合的事件做二次 upsert 补偿（D7 修正）。
-	playEventWorker := appimpression.NewPlayEventWorker(infraimpression.New(gormDB))
+	// 播放事件队列仅保留排空消费者：synced 补偿链路已删除，消息不再产生业务效果。
+	playEventWorker := appimpression.NewPlayEventWorker()
 
 	// 向量生成链路：消费 clip.embedding 事件，按标题 hash n-gram 写入 pf_clip_embeddings。
 	embeddingWorker := appembedding.NewWorker(appembedding.New(infraembedding.New(gormDB)))

@@ -1,6 +1,5 @@
 // gorm.go 实现展示领域仓储端口：事件按 event_id 幂等写入，
-// 首次写入时按事件类型更新当日聚合，并仅在 play 事件累加 pf_clip_stats.play_count；
-// Worker 可二次调用 UpsertImpression 做补偿。
+// 首次写入时按事件类型更新当日聚合，并仅在 play 事件累加 pf_clip_stats.play_count。
 package infraimpression
 
 import (
@@ -63,7 +62,6 @@ func (r *Repository) recordPlayEvent(ctx context.Context, event *domimpression.P
 			PlayDurationMs: event.WatchMs, // 旧列继续写入同一时长，保证旧查询可读。
 			Completed:      event.Completed,
 			Impression:     event.Impression,
-			Synced:         true, // API 同步链路在同一事务内完成聚合，直接标记已同步。
 		}
 		// ON CONFLICT DO NOTHING：唯一键 event_id 命中时不写入、不报错。
 		result := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&model)
@@ -106,14 +104,6 @@ func (r *Repository) recordPlayEvent(ctx context.Context, event *domimpression.P
 		return false, err
 	}
 	return isNew, nil
-}
-
-// UpsertImpression 按事件类型把单条事件的贡献累加进 (viewer_id, clip_id, day) 聚合行；
-// 由 Worker 在补偿链路调用，幂等安全依赖调用方先判定事件是否已聚合。
-func (r *Repository) UpsertImpression(ctx context.Context, event *domimpression.PlayEvent) error {
-	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		return upsertImpression(tx, event)
-	})
 }
 
 // upsertImpression 执行聚合行 upsert：
@@ -161,26 +151,6 @@ func incrementPlayCount(tx *gorm.DB, eventID string, clipID int64) error {
 	return tx.Table("pf_clip_stats").
 		Where("clip_id = ?", clipID).
 		UpdateColumn("play_count", gorm.Expr("play_count + 1")).Error
-}
-
-// MarkEventSynced 把播放事件标记为已完成曝光聚合。
-func (r *Repository) MarkEventSynced(ctx context.Context, eventID string) error {
-	return r.db.WithContext(ctx).Model(&PlayEventModel{}).
-		Where("event_id = ?", eventID).
-		Update("synced", true).Error
-}
-
-// IsEventSynced 查询播放事件是否已完成曝光聚合；事件不存在时返回 false 而非错误。
-func (r *Repository) IsEventSynced(ctx context.Context, eventID string) (bool, error) {
-	var model PlayEventModel
-	err := r.db.WithContext(ctx).Select("synced").Where("event_id = ?", eventID).Take(&model).Error
-	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return false, nil
-		}
-		return false, err
-	}
-	return model.Synced, nil
 }
 
 // lockPublishedClip 以 FOR UPDATE 锁定 clip 行并校验其存在且为发布态。
