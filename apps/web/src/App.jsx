@@ -10,6 +10,7 @@ import PublishPage from './pages/PublishPage.jsx'
 import MessagesPage from './pages/MessagesPage.jsx'
 import PlaybackPage from './pages/PlaybackPage.jsx'
 import ProfilePage from './pages/ProfilePage.jsx'
+import { feedCacheOwner } from './lib/feedProgress.js'
 import {
   api,
   clearSession,
@@ -52,6 +53,7 @@ export default function App() {
   const location = useLocation()
   const navigate = useNavigate()
   const [token, setTokenState] = useState(() => hydrateToken())
+  const feedOwner = feedCacheOwner(token)
   const [me, setMe] = useState(null)
   const [unread, setUnread] = useState(0)
 
@@ -197,6 +199,8 @@ export default function App() {
             path="/feed"
             element={
               <FeedPage
+                key={feedOwner}
+                feedOwner={feedOwner}
                 me={me}
                 onGoPublish={() => navigate('/publish')}
                 onOpenUser={(userId) => navigate(`/users/${userId}`)}
@@ -213,6 +217,8 @@ export default function App() {
             path="/clip/:clipId"
             element={
               <FeedPage
+                key={feedOwner}
+                feedOwner={feedOwner}
                 me={me}
                 onGoPublish={() => navigate('/publish')}
                 onOpenUser={(userId) => navigate(`/users/${userId}`)}

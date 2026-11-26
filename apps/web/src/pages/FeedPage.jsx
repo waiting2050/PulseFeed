@@ -71,7 +71,7 @@ function normalizeClip(data, clipId) {
   }
 }
 
-export default function FeedPage({ onGoPublish, me, onOpenUser }) {
+export default function FeedPage({ onGoPublish, me, onOpenUser, feedOwner }) {
   const navigate = useNavigate()
   const location = useLocation()
   const clipMatch = useMatch('/clip/:clipId')
@@ -105,6 +105,7 @@ export default function FeedPage({ onGoPublish, me, onOpenUser }) {
   // loadFirstPage 拉取场景首屏；成功写入列表与游标，失败保留错误供 ErrorBanner 重试。
   const loadFirstPage = useCallback(async (targetScene) => {
     const seq = ++firstSeqRef.current
+    setLoadingMore(false)
     setLoadingFirst(true)
     setFirstError('')
     try {
@@ -118,14 +119,14 @@ export default function FeedPage({ onGoPublish, me, onOpenUser }) {
       setCursor(data.next_cursor || '')
       setHasMore(Boolean(data.has_more))
       // 空首屏不落盘，避免下次恢复时把「没有内容」固化；该场景的旧进度一并清掉。
-      if (nextItems.length === 0) clearFeedProgress(targetScene)
+      if (nextItems.length === 0) clearFeedProgress(feedOwner, targetScene)
     } catch (err) {
       if (seq !== firstSeqRef.current) return
       setFirstError(err && err.message ? err.message : '请求失败')
     } finally {
       if (seq === firstSeqRef.current) setLoadingFirst(false)
     }
-  }, [])
+  }, [feedOwner])
 
   // 进入/切换场景：优先恢复该场景的持久化进度，恢复成功就不再请求第一页。
   useEffect(() => {
@@ -133,7 +134,7 @@ export default function FeedPage({ onGoPublish, me, onOpenUser }) {
     firstSeqRef.current += 1 // 丢弃上一场景在途的首屏请求
     setPlayingId(null)
     setLoadingMore(false)
-    const saved = loadFeedProgress(scene)
+    const saved = loadFeedProgress(feedOwner, scene)
     if (saved) {
       const requestId = newClientId('feed')
       requestIdRef.current = requestId
@@ -156,8 +157,8 @@ export default function FeedPage({ onGoPublish, me, onOpenUser }) {
   // 进度落盘：只写当前场景自己的列表，空列表不写（首屏已单独清理）。
   useEffect(() => {
     if (itemsScene !== scene || items.length === 0) return
-    saveFeedProgress(scene, { items, cursor, hasMore })
-  }, [scene, itemsScene, items, cursor, hasMore])
+    saveFeedProgress(feedOwner, scene, { items, cursor, hasMore })
+  }, [feedOwner, scene, itemsScene, items, cursor, hasMore])
 
   // 首屏（含恢复出来的列表）就绪后再预热预加载队列；失败静默，场景切换或离开页面时自动取消。
   const firstPageReady = items.length > 0 && !loadingFirst && !firstError
@@ -218,7 +219,7 @@ export default function FeedPage({ onGoPublish, me, onOpenUser }) {
       const data = await api.follow(creator.user_id, next)
       patchCreator(creator.user_id, data.following)
       // 关注流的可见性由关注关系驱动：关系变化后重新拉取首页，避免缓存里的旧集合。
-      if (scene === 'following') loadFirstPage(scene)
+      if (sceneRef.current === 'following') loadFirstPage('following')
     } catch (err) {
       patchCreator(creator.user_id, creator.following)
       setActionError(err.message)
@@ -265,14 +266,15 @@ export default function FeedPage({ onGoPublish, me, onOpenUser }) {
   }
 
   async function loadMore() {
-    if (!hasMore || loadingMore) return
+    if (!hasMore || loadingMore || loadingFirst) return
+    const seq = firstSeqRef.current
     setLoadingMore(true)
     setActionError('')
     const requestId = newClientId('feed')
     try {
       const next = await api.feed({ scene, cursor, limit: PAGE_SIZE })
       // 切场景后返回的续页结果不属于当前列表，直接丢弃。
-      if (sceneRef.current !== scene) return
+      if (sceneRef.current !== scene || firstSeqRef.current !== seq) return
       setItems((prev) => {
         const seen = new Set(prev.map((item) => item.clip_id))
         const merged = [...prev]
@@ -287,10 +289,10 @@ export default function FeedPage({ onGoPublish, me, onOpenUser }) {
       setCursor(next.next_cursor || '')
       setHasMore(Boolean(next.has_more))
     } catch (err) {
-      if (sceneRef.current !== scene) return
+      if (sceneRef.current !== scene || firstSeqRef.current !== seq) return
       // 服务端判定游标无效（400）说明持久化的进度已不可用：清掉坏数据回第一页，不把用户卡在错误态。
       if (err instanceof ApiError && err.code === 400) {
-        clearFeedProgress(scene)
+        clearFeedProgress(feedOwner, scene)
         setItems([])
         setCursor('')
         setHasMore(false)
@@ -299,7 +301,7 @@ export default function FeedPage({ onGoPublish, me, onOpenUser }) {
       }
       setActionError(err.message)
     } finally {
-      if (sceneRef.current === scene) setLoadingMore(false)
+      if (sceneRef.current === scene && firstSeqRef.current === seq) setLoadingMore(false)
     }
   }
 
@@ -340,7 +342,17 @@ export default function FeedPage({ onGoPublish, me, onOpenUser }) {
 
   return (
     <div className="pf-feed-page">
-      <h1 className="pf-sr-only">内容流</h1>
+      <header className="pf-feed-heading">
+        <div>
+          <p className="pf-feed-eyebrow">PULSEFEED / DISCOVER</p>
+          <h1>发现内容</h1>
+          <p className="pf-feed-description">探索新鲜内容，关注感兴趣的创作者。</p>
+        </div>
+        <button type="button" className="pf-feed-refresh" disabled={loadingFirst || loadingMore || Boolean(clipId)}
+          onClick={() => { clearFeedProgress(feedOwner, scene); loadFirstPage(scene) }}>
+          {loadingFirst ? '刷新中…' : '刷新内容'}
+        </button>
+      </header>
       <SceneTabs scenes={SCENES} scene={scene} onChange={handleScene} hint={SCENE_HINTS[scene]} />
 
       <ErrorBanner message={firstError} onRetry={() => loadFirstPage(scene)} />
@@ -401,7 +413,7 @@ export default function FeedPage({ onGoPublish, me, onOpenUser }) {
         <footer>
           {hasMore ? (
             <div className="pf-load-more">
-              <button type="button" className="pf-primary-btn" onClick={loadMore} disabled={loadingMore}>
+              <button type="button" className="pf-primary-btn" onClick={loadMore} disabled={loadingMore || loadingFirst}>
                 {loadingMore ? <Spinner label="正在加载更多内容" /> : null}
                 {loadingMore ? '加载中…' : '加载更多'}
               </button>
