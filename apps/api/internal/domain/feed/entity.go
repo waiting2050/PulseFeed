@@ -68,21 +68,40 @@ type ViewerState struct {
 	Saved bool
 }
 
-// FeedEntry 是 Feed 流中的一条条目：clip 视图 + 互动计数 + 读者互动状态。
+// CreatorSummary 是卡片上的作者摘要：昵称、头像与当前读者是否已关注该作者。
+// Following 由组装阶段按读者实时补齐，未登录或读自己时恒为 false。
+type CreatorSummary struct {
+	UserID    int64
+	Nickname  string
+	AvatarURL string
+	Following bool
+}
+
+// FeedEntry 是 Feed 流中的一条条目：clip 视图 + 互动计数 + 读者互动状态 + 作者摘要。
 // DurationMS 为媒体时长（毫秒），0 表示未探测到，前端不展示时长角标。
 type FeedEntry struct {
 	ClipID      int64
 	CreatorID   int64
 	Title       string
+	Description string
 	VideoURL    string
 	CoverURL    string
 	DurationMS  int64
 	PublishedAt time.Time
 	Stats       EntryStats
 	Viewer      ViewerState
+	Creator     CreatorSummary
 	// Score 是 hot 场景的排序分数（Redis 分钟桶累计或 DB 回源计算值）；
 	// 其余场景恒为 0，不参与展示，仅供生成 hot 游标锚点。
 	Score float64
+}
+
+// PreloadClip 是预加载队列中的一条媒体信息，只携带客户端预取所需的公开字段。
+type PreloadClip struct {
+	ClipID     int64
+	MediaURL   string
+	CoverURL   string
+	DurationMS int64
 }
 
 // HotItem 是热度窗口（最近 60 个分钟桶合并）中的一条 clip 及其累计热度增量。
@@ -116,7 +135,15 @@ type Cursor struct {
 	Score float64 `json:"s,omitempty"`
 	// SnapshotAt 是推荐场景首屏固定下来的候选池快照时间，仅 for-you 游标携带。
 	SnapshotAt *time.Time `json:"t,omitempty"`
+	// Version 是游标结构版本；0 表示毫秒改造前的旧游标（following 的时间边界只到秒）。
+	// 对外仍是不透明编码，客户端无需理解该字段。
+	Version int `json:"v,omitempty"`
 }
+
+// CursorVersionMilli 是 inbox/outbox 分值改为毫秒后的游标版本。
+// following 读路径据此识别旧客户端的秒级游标：无法与新毫秒边界可靠比较，
+// 降级为首屏（cursor=nil）而不是报错，保证旧客户端不会拿到 500，代价是回到第一页。
+const CursorVersionMilli = 2
 
 // EncodeCursor 将游标编码为 URL 安全字符串；nil 游标编码为空串。
 func EncodeCursor(c *Cursor) string {

@@ -27,6 +27,18 @@ func (r *concurrentFeedRepo) ListLatestPage(ctx context.Context, cursor *domfeed
 }
 
 // BatchGetViewerStates 在锁内委托内存仓储，避免并发读写 viewerStates。
+func (r *concurrentFeedRepo) BatchGetCreatorProfiles(ctx context.Context, creatorIDs []int64) (map[int64]*domfeed.CreatorProfile, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.feedFakeRepo.BatchGetCreatorProfiles(ctx, creatorIDs)
+}
+
+func (r *concurrentFeedRepo) BatchGetFollowedCreatorIDs(ctx context.Context, viewerID int64, creatorIDs []int64) (map[int64]bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.feedFakeRepo.BatchGetFollowedCreatorIDs(ctx, viewerID, creatorIDs)
+}
+
 func (r *concurrentFeedRepo) BatchGetViewerStates(ctx context.Context, viewerID int64, clipIDs []int64) (map[int64]*domfeed.ViewerState, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -73,21 +85,21 @@ func newConcurrentPageCache(shared bool, preset ...*domfeed.FeedEntry) *concurre
 func (c *concurrentPageCache) Enabled() bool { return true }
 
 // GetPage 按模式返回缓存页：shared 模式共享条目对象，普通模式返回独立副本。
-func (c *concurrentPageCache) GetPage(_ context.Context, digest string) ([]*domfeed.FeedEntry, bool) {
+func (c *concurrentPageCache) GetPage(_ context.Context, digest string) ([]*domfeed.FeedEntry, bool, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.getCalls++
 	if c.shared {
 		c.hitCalls++
 		// 新切片、共享条目对象：只有按条目拷贝才能隔离不同读者的状态。
-		return append([]*domfeed.FeedEntry(nil), c.preset...), true
+		return append([]*domfeed.FeedEntry(nil), c.preset...), true, nil
 	}
 	entries, ok := c.pages[digest]
 	if !ok {
-		return nil, false
+		return nil, false, nil
 	}
 	c.hitCalls++
-	return feedFakeCloneEntries(entries), true
+	return feedFakeCloneEntries(entries), true, nil
 }
 
 // SetPage 回填页缓存并统计次数。
@@ -96,6 +108,18 @@ func (c *concurrentPageCache) SetPage(_ context.Context, digest string, entries 
 	defer c.mu.Unlock()
 	c.setCalls++
 	c.pages[digest] = feedFakeCloneEntries(entries)
+}
+
+// SetPageEmpty 为空页写负标记；并发用例不覆盖空页场景，仅满足接口。
+func (c *concurrentPageCache) SetPageEmpty(_ context.Context, digest string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.pages[digest] = nil
+}
+
+// FeedVersion 返回固定版本号，保证并发用例共享同一摘要。
+func (c *concurrentPageCache) FeedVersion(_ context.Context) (string, error) {
+	return "", nil
 }
 
 // feedConcurrentOutcome 汇总一次并发请求的结果。

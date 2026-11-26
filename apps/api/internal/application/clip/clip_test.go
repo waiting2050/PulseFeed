@@ -3,6 +3,7 @@ package appclip_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -20,6 +21,7 @@ type clipFakeRepo struct {
 	keys          map[string]int64
 	nextID        int64
 	createCalls   int
+	outboxEvents  []domclip.OutboxEvent
 	listCalls     int
 	deleteCalls   int
 	lastListLimit int
@@ -53,6 +55,29 @@ func (f *clipFakeRepo) Create(_ context.Context, clip *domclip.Clip) error {
 	stored := *clip
 	f.clips[stored.ID] = &stored
 	f.keys[key] = stored.ID
+	return nil
+}
+
+// CreateWithEvents 模拟同事务写入：clip 落库成功后调用 builder，再把事件追加到 outbox。
+func (f *clipFakeRepo) CreateWithEvents(_ context.Context, clip *domclip.Clip, build domclip.EventBuilder) error {
+	f.createCalls++
+	if f.createErr != nil {
+		return f.createErr
+	}
+	key := clipFakeKey(clip.CreatorID, clip.IdempotencyKey)
+	if _, exists := f.keys[key]; exists {
+		return domclip.ErrClipExists
+	}
+	f.nextID++
+	clip.ID = f.nextID
+	events, err := build(clip)
+	if err != nil {
+		return err
+	}
+	stored := *clip
+	f.clips[stored.ID] = &stored
+	f.keys[key] = stored.ID
+	f.outboxEvents = append(f.outboxEvents, events...)
 	return nil
 }
 
@@ -141,7 +166,7 @@ func (p *clipFakePublisher) PublishClipEmbedding(_ context.Context, event appcli
 
 // clipFakeSeed 直接写入一条可指定发布时间与状态的 clip，供列表/详情用例构造数据。
 func clipFakeSeed(repo *clipFakeRepo, id, creatorID int64, title, mediaURL string, publishedAt time.Time, status int) {
-	repo.clips[id] = domclip.RestoreClip(id, creatorID, title, mediaURL, "", 0, status, fmt.Sprintf("seed-%d", id), publishedAt)
+	repo.clips[id] = domclip.RestoreClip(id, creatorID, title, "", mediaURL, "", 0, status, fmt.Sprintf("seed-%d", id), publishedAt)
 	if id > repo.nextID {
 		repo.nextID = id
 	}
@@ -154,7 +179,7 @@ func TestClipCreatePublishedPublishesEvents(t *testing.T) {
 	publisher := &clipFakePublisher{}
 	svc := appclip.New(repo, appclip.WithPublisher(publisher))
 
-	clip, err := svc.CreatePublished(ctx, 7, "  新 clip  ", " /media/1.mp4 ", " /cover/1.png ", 0, "key-1")
+	clip, err := svc.CreatePublished(ctx, 7, "  新 clip  ", "  首行简介 🎬\n第二行  ", " /media/1.mp4 ", " /cover/1.png ", 0, "key-1")
 	if err != nil {
 		t.Fatalf("合法发布不应失败: %v", err)
 	}
@@ -163,6 +188,9 @@ func TestClipCreatePublishedPublishesEvents(t *testing.T) {
 	}
 	if clip.Title != "新 clip" || clip.VideoURL != "/media/1.mp4" || clip.CoverURL != "/cover/1.png" {
 		t.Fatalf("发布字段未去空白: %+v", clip)
+	}
+	if clip.Description != "首行简介 🎬\n第二行" {
+		t.Fatalf("简介未去首尾空白或内容丢失: %q", clip.Description)
 	}
 	if clip.Status != domclip.StatusPublished || clip.IdempotencyKey != "key-1" {
 		t.Fatalf("发布状态/幂等键不正确: %+v", clip)
@@ -187,6 +215,58 @@ func TestClipCreatePublishedPublishesEvents(t *testing.T) {
 	}
 }
 
+// TestClipCreatePublishedWritesOutbox 验证启用 outbox 后事件与 clip 同事务写入，
+// 不再直接投递，两条事件各自携带稳定且唯一的 event_id；重复发布不重复写事件。
+func TestClipCreatePublishedWritesOutbox(t *testing.T) {
+	ctx := context.Background()
+	repo := newClipFakeRepo()
+	publisher := &clipFakePublisher{}
+	svc := appclip.New(repo, appclip.WithOutbox(), appclip.WithPublisher(publisher))
+
+	clip, err := svc.CreatePublished(ctx, 7, "标题", "", "/media/1.mp4", "", 0, "key-1")
+	if err != nil {
+		t.Fatalf("启用 outbox 的发布不应失败: %v", err)
+	}
+	if repo.createCalls != 1 {
+		t.Fatalf("仓储写入次数 = %d, 期望 1", repo.createCalls)
+	}
+	if len(publisher.publishedEvents) != 0 || len(publisher.embeddingEvents) != 0 {
+		t.Fatalf("启用 outbox 时不应直接投递事件: published=%d embedding=%d",
+			len(publisher.publishedEvents), len(publisher.embeddingEvents))
+	}
+	if len(repo.outboxEvents) != 2 {
+		t.Fatalf("outbox 事件数 = %d, 期望 2", len(repo.outboxEvents))
+	}
+
+	wantTopics := []string{appclip.TopicClipPublished, appclip.TopicClipEmbedding}
+	seen := make(map[string]bool, 2)
+	for i, item := range repo.outboxEvents {
+		if item.Topic != wantTopics[i] {
+			t.Fatalf("第 %d 条事件 topic = %q, 期望 %q", i, item.Topic, wantTopics[i])
+		}
+		if item.EventID == "" || seen[item.EventID] {
+			t.Fatalf("第 %d 条事件 event_id 为空或重复: %q", i, item.EventID)
+		}
+		seen[item.EventID] = true
+
+		var payload appclip.ClipPublished
+		if err := json.Unmarshal(item.Payload, &payload); err != nil {
+			t.Fatalf("第 %d 条事件载荷无法解析: %v", i, err)
+		}
+		if payload.EventID != item.EventID || payload.ClipID != clip.ID || payload.CreatorID != 7 {
+			t.Fatalf("第 %d 条事件载荷与 outbox 记录不一致: %+v", i, payload)
+		}
+	}
+
+	if _, err := svc.CreatePublished(ctx, 7, "另一个标题", "", "/media/2.mp4", "", 0, "key-1"); err != nil {
+		t.Fatalf("重复发布不应失败: %v", err)
+	}
+	if repo.createCalls != 1 || len(repo.outboxEvents) != 2 {
+		t.Fatalf("重复发布不应再次写库或追加事件: create=%d events=%d",
+			repo.createCalls, len(repo.outboxEvents))
+	}
+}
+
 // TestClipCreatePublishedIsIdempotent 验证同幂等键重复发布直接返回既有记录且不再写库/投递。
 func TestClipCreatePublishedIsIdempotent(t *testing.T) {
 	ctx := context.Background()
@@ -194,11 +274,11 @@ func TestClipCreatePublishedIsIdempotent(t *testing.T) {
 	publisher := &clipFakePublisher{}
 	svc := appclip.New(repo, appclip.WithPublisher(publisher))
 
-	first, err := svc.CreatePublished(ctx, 7, "首个标题", "/media/1.mp4", "", 0, "same-key")
+	first, err := svc.CreatePublished(ctx, 7, "首个标题", "", "/media/1.mp4", "", 0, "same-key")
 	if err != nil {
 		t.Fatalf("首次发布不应失败: %v", err)
 	}
-	second, err := svc.CreatePublished(ctx, 7, "另一个标题", "/media/2.mp4", "", 0, "same-key")
+	second, err := svc.CreatePublished(ctx, 7, "另一个标题", "", "/media/2.mp4", "", 0, "same-key")
 	if err != nil {
 		t.Fatalf("重复发布不应失败: %v", err)
 	}
@@ -240,7 +320,7 @@ func TestClipCreatePublishedRejectsInvalidFields(t *testing.T) {
 			publisher := &clipFakePublisher{}
 			svc := appclip.New(repo, appclip.WithPublisher(publisher))
 
-			if _, err := svc.CreatePublished(ctx, 7, tt.title, tt.mediaURL, "", 0, tt.key); !errors.Is(err, tt.wantError) {
+			if _, err := svc.CreatePublished(ctx, 7, tt.title, "", tt.mediaURL, "", 0, tt.key); !errors.Is(err, tt.wantError) {
 				t.Fatalf("期望错误 %v，实际 %v", tt.wantError, err)
 			}
 			if repo.createCalls != 0 {
@@ -261,7 +341,7 @@ func TestClipCreatePublishedIgnoresPublisherFailure(t *testing.T) {
 	publisher := &clipFakePublisher{publishedErr: brokerErr, embeddingErr: brokerErr}
 	svc := appclip.New(repo, appclip.WithPublisher(publisher))
 
-	clip, err := svc.CreatePublished(ctx, 7, "标题", "/media/1.mp4", "", 0, "key-1")
+	clip, err := svc.CreatePublished(ctx, 7, "标题", "", "/media/1.mp4", "", 0, "key-1")
 	if err != nil {
 		t.Fatalf("事件投递失败不应阻塞发布: %v", err)
 	}
@@ -295,6 +375,39 @@ func TestClipGetRespectsVisibility(t *testing.T) {
 		if _, err := svc.Get(ctx, id); !errors.Is(err, domclip.ErrClipNotFound) {
 			t.Fatalf("clip %d 期望 ErrClipNotFound，实际 %v", id, err)
 		}
+	}
+}
+
+// TestClipDescriptionValidationAndLegacyRead 验证空简介可发布、超长简介写库前被拒，
+// 以及无简介的旧记录读取时按空串返回，不触发任何错误。
+func TestClipDescriptionValidationAndLegacyRead(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 2, 1, 12, 0, 0, 0, time.UTC)
+	repo := newClipFakeRepo()
+	svc := appclip.New(repo)
+
+	if _, err := svc.CreatePublished(ctx, 7, "标题", strings.Repeat("中", 1001), "/media/1.mp4", "", 0, "too-long"); !errors.Is(err, domclip.ErrInvalidDescription) {
+		t.Fatalf("超长简介期望 ErrInvalidDescription，实际 %v", err)
+	}
+	if repo.createCalls != 0 {
+		t.Fatalf("超长简介不应写库, create_calls=%d", repo.createCalls)
+	}
+
+	clip, err := svc.CreatePublished(ctx, 7, "标题", "", "/media/2.mp4", "", 0, "empty-desc")
+	if err != nil {
+		t.Fatalf("空简介发布不应失败: %v", err)
+	}
+	if clip.Description != "" {
+		t.Fatalf("空简介应为空串, 实际 %q", clip.Description)
+	}
+
+	clipFakeSeed(repo, 9, 7, "旧内容", "/media/9.mp4", base, domclip.StatusPublished)
+	legacy, err := svc.Get(ctx, 9)
+	if err != nil {
+		t.Fatalf("无简介旧记录读取不应失败: %v", err)
+	}
+	if legacy.Description != "" {
+		t.Fatalf("无简介旧记录应返回空串, 实际 %q", legacy.Description)
 	}
 }
 

@@ -3,6 +3,7 @@ package httpfeed
 
 import (
 	"errors"
+	"math"
 	"net/http"
 	"strconv"
 
@@ -55,10 +56,12 @@ func (h *Handler) SearchFeed(c *gin.Context) {
 	})
 }
 
-// serve 是两个端点的公共逻辑：附带读者身份调用应用服务并输出分页响应。
+// serve 是两个端点的公共逻辑：附带读者身份与来源 IP 调用应用服务并输出分页响应。
 func (h *Handler) serve(c *gin.Context, req *appfeed.FeedRequest) {
 	viewerID, _ := middleware.UserIDFromContext(c)
 	req.ViewerID = viewerID
+	// ClientIP 已按 router.SetTrustedProxies 的配置解析，限流只信任可信代理透传的地址。
+	req.ClientIP = c.ClientIP()
 
 	result, err := h.service.GetFeed(c.Request.Context(), req)
 	if err != nil {
@@ -80,9 +83,16 @@ func (h *Handler) serve(c *gin.Context, req *appfeed.FeedRequest) {
 // toFeedEntryResponse 将领域条目转换为传输层响应。
 func toFeedEntryResponse(entry *domfeed.FeedEntry) feedEntryResponse {
 	return feedEntryResponse{
-		ClipID:       entry.ClipID,
-		CreatorID:    entry.CreatorID,
+		ClipID:    entry.ClipID,
+		CreatorID: entry.CreatorID,
+		Creator: feedCreatorResponse{
+			UserID:    entry.Creator.UserID,
+			Nickname:  entry.Creator.Nickname,
+			AvatarURL: entry.Creator.AvatarURL,
+			Following: entry.Creator.Following,
+		},
 		Title:        entry.Title,
+		Description:  entry.Description,
 		VideoURL:     entry.VideoURL,
 		CoverURL:     entry.CoverURL,
 		DurationMS:   entry.DurationMS,
@@ -96,11 +106,22 @@ func toFeedEntryResponse(entry *domfeed.FeedEntry) feedEntryResponse {
 	}
 }
 
-// mapError 将领域错误映射为 HTTP 状态码：400 参数/场景非法、401 要求登录。
+// mapError 将领域错误映射为 HTTP 状态码：400 参数/场景非法、401 要求登录、429 限流。
 func mapError(c *gin.Context, err error) {
+	var limited *domfeed.ErrFeedRateLimited
+	if errors.As(err, &limited) {
+		retryAfter := int(math.Ceil(limited.RetryAfter.Seconds()))
+		if retryAfter < 1 {
+			retryAfter = 1
+		}
+		c.Header("Retry-After", strconv.Itoa(retryAfter))
+		fail(c, http.StatusTooManyRequests, err.Error())
+		return
+	}
 	switch {
 	case errors.Is(err, domfeed.ErrUnsupportedScene),
 		errors.Is(err, domfeed.ErrInvalidCursor),
+		errors.Is(err, domfeed.ErrInvalidCursorSignature),
 		errors.Is(err, domfeed.ErrInvalidLimit):
 		fail(c, http.StatusBadRequest, err.Error())
 	case errors.Is(err, domfeed.ErrViewerRequired):

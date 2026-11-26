@@ -5,18 +5,35 @@ import "time"
 
 // Config 是配置文件的根结构。
 type Config struct {
-	Port     int            `yaml:"port"`
-	JWT      JWTConfig      `yaml:"jwt"`
-	Internal InternalConfig `yaml:"internal"`
-	Database DatabaseConfig `yaml:"database"`
-	Redis    RedisConfig    `yaml:"redis"`
-	RabbitMQ RabbitMQConfig `yaml:"rabbitmq"`
+	Port int `yaml:"port"`
+	// TrustedProxies 是可信反向代理的 IP/CIDR 列表；只有来自这些地址的
+	// X-Forwarded-For / X-Real-IP 才会被采信，为空表示直连部署不信任任何代理头。
+	TrustedProxies []string       `yaml:"trusted_proxies"`
+	JWT            JWTConfig      `yaml:"jwt"`
+	Internal       InternalConfig `yaml:"internal"`
+	Feed           FeedConfig     `yaml:"feed"`
+	Database       DatabaseConfig `yaml:"database"`
+	Redis          RedisConfig    `yaml:"redis"`
+	RabbitMQ       RabbitMQConfig `yaml:"rabbitmq"`
 }
 
-// JWTConfig 描述令牌签发参数。
+// FeedConfig 描述 Feed 读取链路的敏感参数。
+type FeedConfig struct {
+	// CursorSecret 是翻页游标的 HMAC 签名密钥：游标由服务端生成、对前端不透明，
+	// 签名用于阻止任意伪造游标构造出无限多的页缓存键。
+	CursorSecret string `yaml:"cursor_secret"`
+	// SharedLoadTimeout 是页缓存 singleflight 共享执行侧的超时上限（建议 2-3s）：
+	// 执行侧与首个请求解耦后，需要一个独立上限避免共享回源长期占用连接。
+	SharedLoadTimeout time.Duration `yaml:"shared_load_timeout"`
+}
+
+// JWTConfig 描述令牌签发参数：访问令牌有效期、刷新令牌有效期、宽限窗口与时钟容差。
 type JWTConfig struct {
-	Secret    string        `yaml:"secret"`
-	AccessTTL time.Duration `yaml:"access_ttl"`
+	Secret       string        `yaml:"secret"`
+	AccessTTL    time.Duration `yaml:"access_ttl"`
+	RefreshTTL   time.Duration `yaml:"refresh_ttl"`
+	RefreshGrace time.Duration `yaml:"refresh_grace"`
+	Leeway       time.Duration `yaml:"leeway"`
 }
 
 // InternalConfig 描述内部接口鉴权参数。

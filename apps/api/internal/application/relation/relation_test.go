@@ -22,6 +22,7 @@ type relationFakeRepo struct {
 	setCalls           int
 	listFollowingCalls int
 	listFollowersCalls int
+	isFollowingCalls   int
 	lastListLimit      int
 	lastIdempotencyKey string
 	setErr             error
@@ -144,6 +145,19 @@ func (f *relationFakeRepo) ListFollowing(_ context.Context, userID int64, cursor
 		})
 	}
 	return relationFakePage(entries, cursor, limit), nil
+}
+
+func (f *relationFakeRepo) GetUserStats(_ context.Context, userID int64) (*domrelation.UserStats, error) {
+	return &domrelation.UserStats{
+		FollowingCount: f.followingCounts[userID],
+		FollowerCount:  f.followerCounts[userID],
+	}, nil
+}
+
+func (f *relationFakeRepo) IsFollowing(_ context.Context, userID, targetUserID int64) (bool, error) {
+	f.isFollowingCalls++
+	relation := f.follows[[2]int64{userID, targetUserID}]
+	return relation != nil && relation.Status == domrelation.StatusFollowing, nil
 }
 
 func (f *relationFakeRepo) ListFollowers(_ context.Context, userID int64, cursor *domrelation.ListCursor, limit int) ([]*domrelation.ListEntry, error) {
@@ -285,6 +299,58 @@ func TestRelationFollowIsIdempotent(t *testing.T) {
 	}
 }
 
+// TestRelationFollowRejectsAtFollowingLimit 验证关注数达到上限后拒绝新增关注，
+// 且不会调用仓储 SetFollow 产生写入。
+func TestRelationFollowRejectsAtFollowingLimit(t *testing.T) {
+	ctx := context.Background()
+	repo := newRelationFakeRepo()
+	repo.followingCounts[1] = domrelation.MaxFollowingCount
+	svc := apprelation.New(repo)
+
+	if _, err := svc.Follow(ctx, 1, 99, ""); !errors.Is(err, domrelation.ErrFollowingLimit) {
+		t.Fatalf("期望 ErrFollowingLimit，实际 %v", err)
+	}
+	if repo.setCalls != 0 {
+		t.Fatalf("达到上限后不应调用 SetFollow，实际 %d 次", repo.setCalls)
+	}
+}
+
+// TestRelationFollowAtLimitAllowsIdempotentReplay 验证已达上限时重复关注既有对象幂等成功，
+// 不会被上限拦截，也不会改变计数。
+func TestRelationFollowAtLimitAllowsIdempotentReplay(t *testing.T) {
+	ctx := context.Background()
+	repo := newRelationFakeRepo()
+	relationFakeSeed(repo, 1, 2, time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC))
+	repo.followingCounts[1] = domrelation.MaxFollowingCount
+	svc := apprelation.New(repo)
+
+	result, err := svc.Follow(ctx, 1, 2, "")
+	if err != nil {
+		t.Fatalf("重复关注不应被上限拦截: %v", err)
+	}
+	if result.Changed {
+		t.Fatalf("重复关注不应发生状态迁移: %+v", result)
+	}
+	if repo.setCalls != 1 {
+		t.Fatalf("幂等重放应调用一次 SetFollow，实际 %d 次", repo.setCalls)
+	}
+}
+
+// relationFakeInboxCleaner 记录取关清理调用并支持失败注入。
+type relationFakeInboxCleaner struct {
+	calls     int
+	lastUser  int64
+	lastOwner int64
+	err       error
+}
+
+func (f *relationFakeInboxCleaner) RemoveCreatorFromInbox(_ context.Context, userID, creatorID int64) error {
+	f.calls++
+	f.lastUser = userID
+	f.lastOwner = creatorID
+	return f.err
+}
+
 // TestRelationUnfollowIsIdempotent 验证取关递减计数一次且重复取关幂等，且不触发回填/通知。
 func TestRelationUnfollowIsIdempotent(t *testing.T) {
 	ctx := context.Background()
@@ -322,6 +388,56 @@ func TestRelationUnfollowIsIdempotent(t *testing.T) {
 	}
 	if backfiller.calls != 1 || messenger.calls != 1 {
 		t.Fatalf("取关不应触发回填/通知: backfill=%d notify=%d", backfiller.calls, messenger.calls)
+	}
+}
+
+// TestRelationUnfollowCleansInboxResidue 验证只有取关状态真正迁移时才清理 inbox 残留，
+// 重复取关的幂等重放不会重复清理。
+func TestRelationUnfollowCleansInboxResidue(t *testing.T) {
+	ctx := context.Background()
+	repo := newRelationFakeRepo()
+	cleaner := &relationFakeInboxCleaner{}
+	svc := apprelation.New(repo, apprelation.WithInboxCleaner(cleaner))
+
+	if _, err := svc.Follow(ctx, 1, 2, "follow-key"); err != nil {
+		t.Fatalf("关注不应失败: %v", err)
+	}
+	if cleaner.calls != 0 {
+		t.Fatalf("关注不应触发 inbox 清理，实际 %d 次", cleaner.calls)
+	}
+	if _, err := svc.Unfollow(ctx, 1, 2, "unfollow-key"); err != nil {
+		t.Fatalf("首次取关不应失败: %v", err)
+	}
+	if cleaner.calls != 1 || cleaner.lastUser != 1 || cleaner.lastOwner != 2 {
+		t.Fatalf("首次取关应清理一次读者的 inbox 残留: %+v", cleaner)
+	}
+	if _, err := svc.Unfollow(ctx, 1, 2, "unfollow-key"); err != nil {
+		t.Fatalf("重复取关不应失败: %v", err)
+	}
+	if cleaner.calls != 1 {
+		t.Fatalf("幂等重放不应重复清理，实际 %d 次", cleaner.calls)
+	}
+}
+
+// TestRelationUnfollowKeepsResultWhenCleanupFails 验证清理失败只记日志，取关结果不受影响。
+func TestRelationUnfollowKeepsResultWhenCleanupFails(t *testing.T) {
+	ctx := context.Background()
+	repo := newRelationFakeRepo()
+	cleaner := &relationFakeInboxCleaner{err: errors.New("redis down")}
+	svc := apprelation.New(repo, apprelation.WithInboxCleaner(cleaner))
+
+	if _, err := svc.Follow(ctx, 1, 2, "follow-key"); err != nil {
+		t.Fatalf("关注不应失败: %v", err)
+	}
+	result, err := svc.Unfollow(ctx, 1, 2, "unfollow-key")
+	if err != nil {
+		t.Fatalf("清理失败不应影响取关结果: %v", err)
+	}
+	if result.Changed != true || result.Following {
+		t.Fatalf("取关回执不正确: %+v", result)
+	}
+	if cleaner.calls != 1 {
+		t.Fatalf("清理应尝试一次，实际 %d 次", cleaner.calls)
 	}
 }
 
@@ -553,6 +669,68 @@ func TestRelationListValidatesPage(t *testing.T) {
 		}
 		if repo.lastListLimit != domrelation.DefaultLimit+1 {
 			t.Fatalf("仓储 limit = %d, 期望 %d", repo.lastListLimit, domrelation.DefaultLimit+1)
+		}
+	})
+}
+
+// TestRelationStatsReflectsCountsAndViewerState 验证关系概览返回计数，并仅在非本人已登录读者时回显关注态。
+func TestRelationStatsReflectsCountsAndViewerState(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+	repo := newRelationFakeRepo()
+	relationFakeSeed(repo, 2, 1, base)
+	relationFakeSeed(repo, 3, 1, base.Add(time.Minute))
+	relationFakeSeed(repo, 1, 4, base.Add(2*time.Minute))
+	svc := apprelation.New(repo)
+
+	t.Run("已关注读者", func(t *testing.T) {
+		result, err := svc.Stats(ctx, 2, 1)
+		if err != nil {
+			t.Fatalf("已关注读者不应失败: %v", err)
+		}
+		if result.FollowingCount != 1 || result.FollowerCount != 2 {
+			t.Fatalf("目标计数不正确: %+v", result)
+		}
+		if !result.Following {
+			t.Fatalf("已关注读者应回显 Following=true: %+v", result)
+		}
+	})
+
+	t.Run("未关注读者", func(t *testing.T) {
+		result, err := svc.Stats(ctx, 3, 2)
+		if err != nil {
+			t.Fatalf("未关注读者不应失败: %v", err)
+		}
+		if result.Following {
+			t.Fatalf("未关注读者应回显 Following=false: %+v", result)
+		}
+	})
+
+	t.Run("匿名读者", func(t *testing.T) {
+		callsBefore := repo.isFollowingCalls
+		result, err := svc.Stats(ctx, 0, 1)
+		if err != nil {
+			t.Fatalf("匿名读者不应失败: %v", err)
+		}
+		if result.FollowerCount != 2 || result.Following {
+			t.Fatalf("匿名读者计数或关注态不正确: %+v", result)
+		}
+		if repo.isFollowingCalls != callsBefore {
+			t.Fatalf("匿名读者不应查询关注态")
+		}
+	})
+
+	t.Run("本人查看", func(t *testing.T) {
+		callsBefore := repo.isFollowingCalls
+		result, err := svc.Stats(ctx, 1, 1)
+		if err != nil {
+			t.Fatalf("本人查看不应失败: %v", err)
+		}
+		if result.FollowingCount != 1 || result.FollowerCount != 2 || result.Following {
+			t.Fatalf("本人查看结果不正确: %+v", result)
+		}
+		if repo.isFollowingCalls != callsBefore {
+			t.Fatalf("本人查看不应查询关注态")
 		}
 	})
 }

@@ -21,6 +21,13 @@ type viewerActionRow struct {
 	ActionType string `gorm:"column:action_type"`
 }
 
+// creatorProfileRow 是 pf_user_profiles 作者摘要查询的行映射。
+type creatorProfileRow struct {
+	UserID    int64  `gorm:"column:user_id"`
+	Nickname  string `gorm:"column:nickname"`
+	AvatarURL string `gorm:"column:avatar_url"`
+}
+
 // Repository 是 feed 仓储的 GORM 实现，db 由组合根装配时注入。
 type Repository struct {
 	db *gorm.DB
@@ -58,7 +65,7 @@ func EnsureTimelineIndex(db *gorm.DB) error {
 func (r *Repository) ListLatestPage(ctx context.Context, cursor *domfeed.Cursor, limit int) ([]*domfeed.FeedEntry, error) {
 	query := r.db.WithContext(ctx).
 		Table("pf_clips AS c").
-		Select("c.id, c.creator_id, c.title, c.video_url, c.cover_url, c.duration_ms, c.published_at, "+
+		Select("c.id, c.creator_id, c.title, c.description, c.video_url, c.cover_url, c.duration_ms, c.published_at, "+
 			"s.like_count, s.save_count, s.comment_count, s.play_count").
 		Joins("LEFT JOIN pf_clip_stats s ON s.clip_id = c.id").
 		Where("c.status = ?", domclip.StatusPublished)
@@ -95,7 +102,7 @@ func (r *Repository) ListHotPage(ctx context.Context, cursor *domfeed.Cursor, li
 
 	query := r.db.WithContext(ctx).
 		Table("pf_clips AS c").
-		Select("c.id, c.creator_id, c.title, c.video_url, c.cover_url, c.duration_ms, c.published_at, "+
+		Select("c.id, c.creator_id, c.title, c.description, c.video_url, c.cover_url, c.duration_ms, c.published_at, "+
 			"s.like_count, s.save_count, s.comment_count, s.play_count, "+
 			expr+" AS hot_score", now).
 		Joins("LEFT JOIN pf_clip_stats s ON s.clip_id = c.id").
@@ -123,6 +130,7 @@ func (r *Repository) ListHotPage(ctx context.Context, cursor *domfeed.Cursor, li
 			ClipID:      rows[i].ID,
 			CreatorID:   rows[i].CreatorID,
 			Title:       rows[i].Title,
+			Description: rows[i].Description,
 			VideoURL:    rows[i].VideoURL,
 			CoverURL:    rows[i].CoverURL,
 			DurationMS:  rows[i].DurationMS,
@@ -163,7 +171,7 @@ func (r *Repository) BatchGetEntries(ctx context.Context, clipIDs []int64) (map[
 	var rows []cardRow
 	err := r.db.WithContext(ctx).
 		Table("pf_clips").
-		Select("id, creator_id, title, video_url, cover_url, duration_ms, published_at").
+		Select("id, creator_id, title, description, video_url, cover_url, duration_ms, published_at").
 		Where("status = ? AND id IN ?", domclip.StatusPublished, clipIDs).
 		Scan(&rows).Error
 	if err != nil {
@@ -174,6 +182,7 @@ func (r *Repository) BatchGetEntries(ctx context.Context, clipIDs []int64) (map[
 			ClipID:      rows[i].ID,
 			CreatorID:   rows[i].CreatorID,
 			Title:       rows[i].Title,
+			Description: rows[i].Description,
 			VideoURL:    rows[i].VideoURL,
 			CoverURL:    rows[i].CoverURL,
 			DurationMS:  rows[i].DurationMS,
@@ -215,7 +224,7 @@ func (r *Repository) BatchGetStats(ctx context.Context, clipIDs []int64) (map[in
 func (r *Repository) ListFollowingPage(ctx context.Context, viewerID int64, cursor *domfeed.Cursor, limit int) ([]*domfeed.FeedEntry, error) {
 	query := r.db.WithContext(ctx).
 		Table("pf_clips AS c").
-		Select("c.id, c.creator_id, c.title, c.video_url, c.cover_url, c.duration_ms, c.published_at, "+
+		Select("c.id, c.creator_id, c.title, c.description, c.video_url, c.cover_url, c.duration_ms, c.published_at, "+
 			"s.like_count, s.save_count, s.comment_count, s.play_count").
 		Joins("JOIN pf_follows f ON f.target_user_id = c.creator_id AND f.user_id = ? AND f.status = ?", viewerID, domrelation.StatusFollowing).
 		Joins("LEFT JOIN pf_clip_stats s ON s.clip_id = c.id").
@@ -252,6 +261,8 @@ func (r *Repository) ListFollowedCreators(ctx context.Context, viewerID int64) (
 		Select("f.target_user_id AS creator_id, COALESCE(s.follower_count, 0) AS follower_count").
 		Joins("LEFT JOIN pf_user_stats s ON s.user_id = f.target_user_id").
 		Where("f.user_id = ? AND f.status = ?", viewerID, domrelation.StatusFollowing).
+		Order("f.updated_at DESC, f.target_user_id DESC").
+		Limit(domrelation.MaxFollowingCount).
 		Scan(&rows).Error
 	if err != nil {
 		return nil, err
@@ -302,7 +313,7 @@ func (r *Repository) ListCreatorRecentClips(ctx context.Context, creatorID int64
 	var rows []latestRow
 	err := r.db.WithContext(ctx).
 		Table("pf_clips AS c").
-		Select("c.id, c.creator_id, c.title, c.video_url, c.cover_url, c.duration_ms, c.published_at, "+
+		Select("c.id, c.creator_id, c.title, c.description, c.video_url, c.cover_url, c.duration_ms, c.published_at, "+
 			"s.like_count, s.save_count, s.comment_count, s.play_count").
 		Joins("LEFT JOIN pf_clip_stats s ON s.clip_id = c.id").
 		Where("c.creator_id = ? AND c.status = ?", creatorID, domclip.StatusPublished).
@@ -320,20 +331,30 @@ func (r *Repository) ListCreatorRecentClips(ctx context.Context, creatorID int64
 	return entries, nil
 }
 
-// ListLatestClipIDs 按 (published_at, id) 递减返回最近发布的 N 个可见 clip_id；
-// 供 playback 预加载列表使用（S16 接入）。
-func (r *Repository) ListLatestClipIDs(ctx context.Context, limit int) ([]int64, error) {
-	var ids []int64
+// ListLatestClipMedia 按 (published_at, id) 递减返回最近发布的 N 条可见 clip 的预加载媒体信息；
+// 只查询公开字段（clip_id、video_url、cover_url、duration_ms），供 playback 预加载列表使用（S16 接入）。
+func (r *Repository) ListLatestClipMedia(ctx context.Context, limit int) ([]domfeed.PreloadClip, error) {
+	var rows []preloadRow
 	err := r.db.WithContext(ctx).
 		Table("pf_clips").
+		Select("id, video_url, cover_url, duration_ms").
 		Where("status = ?", domclip.StatusPublished).
 		Order("published_at DESC, id DESC").
 		Limit(limit).
-		Pluck("id", &ids).Error
+		Scan(&rows).Error
 	if err != nil {
 		return nil, err
 	}
-	return ids, nil
+	items := make([]domfeed.PreloadClip, 0, len(rows))
+	for i := range rows {
+		items = append(items, domfeed.PreloadClip{
+			ClipID:     rows[i].ID,
+			MediaURL:   rows[i].VideoURL,
+			CoverURL:   rows[i].CoverURL,
+			DurationMS: rows[i].DurationMS,
+		})
+	}
+	return items, nil
 }
 
 // BatchGetViewerStates 批量读取读者对条目的互动状态：
@@ -370,12 +391,59 @@ func (r *Repository) BatchGetViewerStates(ctx context.Context, viewerID int64, c
 	return states, nil
 }
 
+// BatchGetCreatorProfiles 批量读取作者昵称与头像；资料缺失的作者不出现在结果中，由调用方兜底。
+func (r *Repository) BatchGetCreatorProfiles(ctx context.Context, creatorIDs []int64) (map[int64]*domfeed.CreatorProfile, error) {
+	profiles := make(map[int64]*domfeed.CreatorProfile, len(creatorIDs))
+	if len(creatorIDs) == 0 {
+		return profiles, nil
+	}
+
+	var rows []creatorProfileRow
+	err := r.db.WithContext(ctx).
+		Table("pf_user_profiles").
+		Select("user_id, nickname, avatar_url").
+		Where("user_id IN ?", creatorIDs).
+		Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	for i := range rows {
+		profiles[rows[i].UserID] = &domfeed.CreatorProfile{
+			Nickname:  rows[i].Nickname,
+			AvatarURL: rows[i].AvatarURL,
+		}
+	}
+	return profiles, nil
+}
+
+// BatchGetFollowedCreatorIDs 批量判断读者是否已关注指定作者，未登录读者返回空集合。
+func (r *Repository) BatchGetFollowedCreatorIDs(ctx context.Context, viewerID int64, creatorIDs []int64) (map[int64]bool, error) {
+	followed := make(map[int64]bool, len(creatorIDs))
+	if viewerID == 0 || len(creatorIDs) == 0 {
+		return followed, nil
+	}
+
+	var ids []int64
+	err := r.db.WithContext(ctx).
+		Table("pf_follows").
+		Where("user_id = ? AND status = ? AND target_user_id IN ?", viewerID, domrelation.StatusFollowing, creatorIDs).
+		Pluck("target_user_id", &ids).Error
+	if err != nil {
+		return nil, err
+	}
+	for _, id := range ids {
+		followed[id] = true
+	}
+	return followed, nil
+}
+
 // toEntry 将联表行转换为领域条目，读者状态由应用层组装阶段填充。
 func toEntry(row *latestRow) *domfeed.FeedEntry {
 	return &domfeed.FeedEntry{
 		ClipID:      row.ID,
 		CreatorID:   row.CreatorID,
 		Title:       row.Title,
+		Description: row.Description,
 		VideoURL:    row.VideoURL,
 		CoverURL:    row.CoverURL,
 		DurationMS:  row.DurationMS,

@@ -3,9 +3,11 @@ package httpaction
 
 import (
 	"errors"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	appaction "pulsefeed/internal/application/interaction"
 	dominteraction "pulsefeed/internal/domain/interaction"
@@ -16,6 +18,9 @@ import (
 
 // idempotencyKeyMaxLen 是幂等键长度上限，与 pf_actions/pf_comments 列宽一致。
 const idempotencyKeyMaxLen = 128
+
+// commentIdempotencyKeyMaxLen 是评论幂等键长度上限，与发布接口的 64 字符口径对齐。
+const commentIdempotencyKeyMaxLen = 64
 
 // Handler 聚合互动相关端点。
 type Handler struct {
@@ -112,7 +117,7 @@ func (h *Handler) CreateComment(c *gin.Context) {
 	if !ok {
 		return
 	}
-	key, ok := idempotencyKey(c)
+	key, ok := commentIdempotencyKey(c)
 	if !ok {
 		return
 	}
@@ -223,8 +228,30 @@ func idempotencyKey(c *gin.Context) (string, bool) {
 	return key, true
 }
 
-// mapError 将领域错误映射为 HTTP 状态码：400 参数非法、403 权限不足、404 资源缺失。
+// commentIdempotencyKey 读取并校验评论用 Idempotency-Key：仍可选（空串表示不使用），
+// 超过 64 个字符直接 400，避免落到数据库字段超长报错。
+func commentIdempotencyKey(c *gin.Context) (string, bool) {
+	key := strings.TrimSpace(c.GetHeader("Idempotency-Key"))
+	if utf8.RuneCountInString(key) > commentIdempotencyKeyMaxLen {
+		fail(c, http.StatusBadRequest, "Idempotency-Key 过长（最多 64 个字符）")
+		return "", false
+	}
+	return key, true
+}
+
+// mapError 将领域错误映射为 HTTP 状态码：400 参数非法、403 权限不足、404 资源缺失、429 限流。
 func mapError(c *gin.Context, err error) {
+	var limited *dominteraction.ErrActionRateLimited
+	if errors.As(err, &limited) {
+		// 与 feed/登录的 429 保持一致：Retry-After 取固定窗口剩余秒数，向上取整且最小 1。
+		retryAfter := int(math.Ceil(limited.RetryAfter.Seconds()))
+		if retryAfter < 1 {
+			retryAfter = 1
+		}
+		c.Header("Retry-After", strconv.Itoa(retryAfter))
+		fail(c, http.StatusTooManyRequests, err.Error())
+		return
+	}
 	switch {
 	case errors.Is(err, dominteraction.ErrInvalidActionType),
 		errors.Is(err, dominteraction.ErrInvalidCommentContent),

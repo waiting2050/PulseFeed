@@ -4,10 +4,12 @@ package infraclip
 import "time"
 
 // ClipModel 映射 pf_clips 表；(creator_id, idempotency_key) 唯一索引支撑幂等发布。
+// description 为后加的可选 TEXT 列，允许 NULL，旧行读出为空串，AutoMigrate 只加列不重建表。
 type ClipModel struct {
 	ID             int64     `gorm:"column:id;primaryKey;autoIncrement"`
 	CreatorID      int64     `gorm:"column:creator_id;not null;uniqueIndex:uk_creator_idempotency,priority:1;index:idx_creator_published,priority:1"`
 	Title          string    `gorm:"column:title;size:128;not null"`
+	Description    string    `gorm:"column:description;type:text"`
 	VideoURL       string    `gorm:"column:video_url;size:512;not null"`
 	CoverURL       string    `gorm:"column:cover_url;size:512"`
 	DurationMS     int64     `gorm:"column:duration_ms;not null;default:0"`

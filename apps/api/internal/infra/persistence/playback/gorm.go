@@ -40,6 +40,7 @@ func (r *Repository) GetOrCreateConfig(ctx context.Context, userID int64) (*domp
 		UserID:        row.UserID,
 		PreloadCount:  row.PreloadCount,
 		QoSSampleRate: row.QoSSampleRate,
+		BufferMS:      row.BufferMS,
 		UpdatedAt:     row.UpdatedAt,
 	}
 	cfg.Normalize()
@@ -56,6 +57,7 @@ func (r *Repository) UpsertConfig(ctx context.Context, cfg *domplayback.Config) 
 		UserID:        cfg.UserID,
 		PreloadCount:  cfg.PreloadCount,
 		QoSSampleRate: cfg.QoSSampleRate,
+		BufferMS:      cfg.BufferMS,
 	}
 	res := r.db.WithContext(ctx).Save(&row)
 	if res.Error != nil {

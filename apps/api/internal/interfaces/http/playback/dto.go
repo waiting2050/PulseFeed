@@ -5,17 +5,27 @@ package httpplayback
 type configResponse struct {
 	PreloadCount  int     `json:"preload_count"`
 	QoSSampleRate float64 `json:"qos_sample_rate"`
+	BufferMS      int     `json:"buffer_ms"`
 }
 
 // configUpdateRequest 是 PUT /api/playback-config 的请求体，字段全可选。
 type configUpdateRequest struct {
 	PreloadCount  *int     `json:"preload_count,omitempty"`
 	QoSSampleRate *float64 `json:"qos_sample_rate,omitempty"`
+	BufferMS      *int     `json:"buffer_ms,omitempty"`
 }
 
-// preloadResponse 是预加载 clip 列表的响应，仅返回 clip_id。
+// preloadItem 是预加载队列的一条媒体信息，只包含客户端预取所需的公开字段。
+type preloadItem struct {
+	ClipID     int64  `json:"clip_id"`
+	MediaURL   string `json:"media_url"`
+	CoverURL   string `json:"cover_url"`
+	DurationMS int64  `json:"duration_ms"`
+}
+
+// preloadResponse 是预加载媒体列表的响应。
 type preloadResponse struct {
-	ClipIDs []int64 `json:"clip_ids"`
+	Items []preloadItem `json:"items"`
 }
 
 // qosReportRequest 是 QoS 上报请求体；event_id 必填（幂等）。

@@ -22,13 +22,23 @@ type Repository interface {
 	ListFollowerIDs(ctx context.Context, creatorID int64) ([]int64, error)
 	// ListCreatorRecentClips 返回创作者最近发布的 N 条可见 clip，供关注回填取数（S11 接入）。
 	ListCreatorRecentClips(ctx context.Context, creatorID int64, limit int) ([]*FeedEntry, error)
-	// ListLatestClipIDs 按 (published_at, id) 严格递减返回最近发布的 N 个可见 clip_id，
-	// 供 playback 预加载列表使用（S16 接入）。
-	ListLatestClipIDs(ctx context.Context, limit int) ([]int64, error)
+	// ListLatestClipMedia 按 (published_at, id) 严格递减返回最近发布的 N 条可见 clip 的
+	// 预加载媒体信息（clip_id、视频地址、封面地址、时长），供 playback 预加载列表使用（S16 接入）。
+	ListLatestClipMedia(ctx context.Context, limit int) ([]PreloadClip, error)
 	// BatchGetEntries 按 ID 批量读取条目（不含计数），供卡片缓存回源使用（S11 起消费）。
 	BatchGetEntries(ctx context.Context, clipIDs []int64) (map[int64]*FeedEntry, error)
 	// BatchGetStats 按 ID 批量读取互动计数，供计数缓存回源使用（S11 起消费）。
 	BatchGetStats(ctx context.Context, clipIDs []int64) (map[int64]*EntryStats, error)
 	// BatchGetViewerStates 批量读取读者对条目的互动状态（S9 互动链路补齐）。
 	BatchGetViewerStates(ctx context.Context, viewerID int64, clipIDs []int64) (map[int64]*ViewerState, error)
+	// BatchGetCreatorProfiles 批量读取作者昵称与头像，供卡片作者信息补齐。
+	BatchGetCreatorProfiles(ctx context.Context, creatorIDs []int64) (map[int64]*CreatorProfile, error)
+	// BatchGetFollowedCreatorIDs 批量判断读者是否已关注指定作者，未登录读者返回空集合。
+	BatchGetFollowedCreatorIDs(ctx context.Context, viewerID int64, creatorIDs []int64) (map[int64]bool, error)
+}
+
+// CreatorProfile 是作者公开资料中的展示字段。
+type CreatorProfile struct {
+	Nickname  string
+	AvatarURL string
 }

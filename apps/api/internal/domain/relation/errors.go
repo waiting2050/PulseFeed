@@ -12,4 +12,6 @@ var (
 	ErrInvalidCursor = errors.New("invalid cursor")
 	// ErrInvalidLimit 表示分页条数越界。
 	ErrInvalidLimit = errors.New("invalid limit")
+	// ErrFollowingLimit 表示关注数已达上限，拒绝新增关注。
+	ErrFollowingLimit = errors.New("following count limit reached")
 )

@@ -2,6 +2,7 @@
 package httpmsg
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
 	"time"
@@ -43,6 +44,8 @@ func (h *Handler) ListMessages(c *gin.Context) {
 			ActorID:   m.ActorID,
 			Kind:      string(m.Kind),
 			TargetID:  m.TargetID,
+			Title:     m.Title,
+			Content:   m.Content,
 			EventID:   m.EventID,
 			Read:      m.IsRead(),
 			ReadAt:    messageReadAt(m),
@@ -67,18 +70,35 @@ func (h *Handler) GetUnreadCount(c *gin.Context) {
 	respondOK(c, http.StatusOK, unreadResponse{Unread: n})
 }
 
-// MarkAllRead 处理 PATCH /api/messages，把当前用户所有未读消息一次性标记已读。
-func (h *Handler) MarkAllRead(c *gin.Context) {
+// MarkRead 处理 PATCH /api/messages：
+// 传 ids 时按条标记（仅当前用户名下），不传或传空数组时保持旧行为全部已读。
+func (h *Handler) MarkRead(c *gin.Context) {
 	viewerID, authed := middleware.UserIDFromContext(c)
 	if !authed {
 		fail(c, http.StatusUnauthorized, "missing or invalid token")
+		return
+	}
+	var req markReadRequest
+	if c.Request.ContentLength > 0 {
+		if err := c.ShouldBindJSON(&req); err != nil {
+			fail(c, http.StatusBadRequest, "请求体非法")
+			return
+		}
+	}
+	if len(req.IDs) > 0 {
+		marked, err := h.service.MarkReadByIDs(c.Request.Context(), viewerID, req.IDs)
+		if err != nil {
+			mapError(c, err)
+			return
+		}
+		respondOK(c, http.StatusOK, markReadResponse{Marked: marked})
 		return
 	}
 	if err := h.service.MarkAllRead(c.Request.Context(), viewerID); err != nil {
 		mapError(c, err)
 		return
 	}
-	respondOK(c, http.StatusOK, gin.H{"marked": true})
+	respondOK(c, http.StatusOK, markReadResponse{All: true})
 }
 
 // CreateMessageInternal 处理 POST /internal/messages（X-Internal-Token），主动投递站内消息。
@@ -88,10 +108,14 @@ func (h *Handler) CreateMessageInternal(c *gin.Context) {
 		fail(c, http.StatusBadRequest, "请求体非法")
 		return
 	}
-	inserted, err := h.service.CreateFromActorEvent(
+	kind := dommessage.Kind(req.Kind)
+	if kind == "" {
+		kind = dommessage.KindSystem
+	}
+	inserted, err := h.service.Publish(
 		c.Request.Context(),
 		req.ReceiverID, req.ActorID, req.TargetID,
-		dommessage.Kind(req.Kind), req.EventID,
+		kind, req.Title, req.Content, req.EventID,
 	)
 	if err != nil {
 		mapError(c, err)
@@ -133,6 +157,14 @@ func mapError(c *gin.Context, err error) {
 	switch {
 	case err == nil:
 		return
+	case errors.Is(err, dommessage.ErrInvalidReceiver),
+		errors.Is(err, dommessage.ErrInvalidKind),
+		errors.Is(err, dommessage.ErrInvalidTitle),
+		errors.Is(err, dommessage.ErrInvalidMessageIDs),
+		errors.Is(err, dommessage.ErrEventIDEmpty),
+		errors.Is(err, dommessage.ErrInvalidLimit),
+		errors.Is(err, dommessage.ErrCursorInvalid):
+		fail(c, http.StatusBadRequest, err.Error())
 	default:
 		fail(c, http.StatusInternalServerError, "内部错误")
 	}

@@ -9,7 +9,17 @@ import FeedPage from './pages/FeedPage.jsx'
 import PublishPage from './pages/PublishPage.jsx'
 import MessagesPage from './pages/MessagesPage.jsx'
 import PlaybackPage from './pages/PlaybackPage.jsx'
-import { api, getToken, hydrateToken, setToken } from './lib/api.js'
+import ProfilePage from './pages/ProfilePage.jsx'
+import { feedCacheOwner } from './lib/feedProgress.js'
+import {
+  api,
+  clearSession,
+  getToken,
+  hydrateToken,
+  invalidatePlaybackConfig,
+  loadPlaybackConfig,
+  subscribeSession,
+} from './lib/api.js'
 
 // readNext 只接受站内绝对路径，避免登录回跳被外部地址利用。
 function readNext(search) {
@@ -43,6 +53,7 @@ export default function App() {
   const location = useLocation()
   const navigate = useNavigate()
   const [token, setTokenState] = useState(() => hydrateToken())
+  const feedOwner = feedCacheOwner(token)
   const [me, setMe] = useState(null)
   const [unread, setUnread] = useState(0)
 
@@ -52,6 +63,19 @@ export default function App() {
   const [nickname, setNickname] = useState('')
   const [authError, setAuthError] = useState('')
   const [busy, setBusy] = useState(false)
+
+  // 登录态唯一的写入方是 api.js：登录、刷新、登出、跨标签页同步都经订阅回传。
+  useEffect(
+    () =>
+      subscribeSession((next) => {
+        setTokenState(next)
+        if (!next) {
+          setMe(null)
+          setUnread(0)
+        }
+      }),
+    [],
+  )
 
   useEffect(() => {
     if (!token) {
@@ -72,6 +96,8 @@ export default function App() {
         if (alive) setUnread((data && data.unread) || 0)
       })
       .catch(() => {})
+    // 登录后读取一次播放配置并缓存，播放结算直接复用，不在每次播放时请求。
+    loadPlaybackConfig().catch(() => {})
     return () => {
       alive = false
     }
@@ -88,8 +114,7 @@ export default function App() {
       const data = await api.login({ account, password })
       const nextToken = (data && data.access_token) || ''
       if (!nextToken) throw new Error('登录响应缺少 access_token')
-      setToken(nextToken)
-      setTokenState(nextToken)
+      setTokenState(getToken())
       navigate(readNext(location.search) || '/feed', { replace: true })
     } catch (err) {
       setAuthError(err.message)
@@ -104,8 +129,8 @@ export default function App() {
     } catch {
       // 登出失败不阻塞本地状态清理。
     }
-    setToken('')
-    setTokenState('')
+    invalidatePlaybackConfig()
+    clearSession()
     setMe(null)
     setUnread(0)
     navigate('/login', { replace: true })
@@ -157,18 +182,49 @@ export default function App() {
 
   return (
     <div className="pf-app">
-      <TopBar tab={tabForPath(location.pathname)} onTab={handleTab} unread={unread} me={me} onLogout={handleLogout} />
+      <TopBar
+        tab={tabForPath(location.pathname)}
+        onTab={handleTab}
+        unread={unread}
+        me={me}
+        onLogout={handleLogout}
+        onProfile={() => navigate('/me')}
+      />
 
       <main className="pf-main">
         <Routes>
           <Route index element={<Navigate to="/feed" replace />} />
           <Route path="/login" element={<Navigate to="/feed" replace />} />
-          <Route path="/feed" element={<FeedPage onGoPublish={() => navigate('/publish')} />} />
+          <Route
+            path="/feed"
+            element={
+              <FeedPage
+                key={feedOwner}
+                feedOwner={feedOwner}
+                me={me}
+                onGoPublish={() => navigate('/publish')}
+                onOpenUser={(userId) => navigate(`/users/${userId}`)}
+              />
+            }
+          />
           <Route path="/publish" element={<PublishPage onPublished={() => navigate('/feed')} />} />
           <Route path="/messages" element={<MessagesPage unread={unread} onUnreadChange={handleUnreadChange} />} />
           <Route path="/playback" element={<PlaybackPage />} />
+          <Route path="/me" element={<ProfilePage me={me} onMeChange={setMe} />} />
+          <Route path="/users/:userId" element={<ProfilePage me={me} onMeChange={setMe} />} />
           {/* 单条内容深链：详情弹层由 FeedPage 按 URL 渲染，列表仍留在背后作为关闭后的落点。 */}
-          <Route path="/clip/:clipId" element={<FeedPage onGoPublish={() => navigate('/publish')} />} />
+          <Route
+            path="/clip/:clipId"
+            element={
+              <FeedPage
+                key={feedOwner}
+                feedOwner={feedOwner}
+                me={me}
+                onGoPublish={() => navigate('/publish')}
+                onOpenUser={(userId) => navigate(`/users/${userId}`)}
+              />
+            }
+          />
           <Route path="*" element={<NotFound onBack={() => navigate('/feed')} />} />
         </Routes>
       </main>

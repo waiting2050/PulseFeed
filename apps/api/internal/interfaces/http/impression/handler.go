@@ -22,7 +22,7 @@ func New(service *appimpression.Service) *Handler {
 	return &Handler{service: service}
 }
 
-// RecordPlayEvent 处理 POST /api/clip-play-events：登录用户上报一次播放行为。
+// RecordPlayEvent 处理 POST /api/clip-play-events：登录用户上报一次展示/播放行为。
 func (h *Handler) RecordPlayEvent(c *gin.Context) {
 	userID, ok := middleware.UserIDFromContext(c)
 	if !ok {
@@ -36,8 +36,23 @@ func (h *Handler) RecordPlayEvent(c *gin.Context) {
 		return
 	}
 
-	err := h.service.RecordPlayEvent(c.Request.Context(), userID, req.ClipID, req.EventID,
-		req.PlayDurationMs, req.Completed, req.Impression)
+	// watch_ms 为当前字段；旧客户端只传 play_duration_ms，非零时作为兼容回退。
+	watchMs := req.WatchMs
+	if watchMs == 0 && req.PlayDurationMs > 0 {
+		watchMs = req.PlayDurationMs
+	}
+
+	err := h.service.RecordPlayEvent(c.Request.Context(), domimpression.PlayEventInput{
+		EventID:    req.EventID,
+		ViewerID:   userID,
+		ClipID:     req.ClipID,
+		EventType:  req.EventType,
+		Scene:      req.Scene,
+		RequestID:  req.RequestID,
+		WatchMs:    watchMs,
+		Completed:  req.Completed,
+		Impression: req.Impression,
+	})
 	if err != nil {
 		mapError(c, err)
 		return
@@ -49,6 +64,9 @@ func (h *Handler) RecordPlayEvent(c *gin.Context) {
 func mapError(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, domimpression.ErrInvalidEventID),
+		errors.Is(err, domimpression.ErrInvalidEventType),
+		errors.Is(err, domimpression.ErrInvalidScene),
+		errors.Is(err, domimpression.ErrInvalidRequestID),
 		errors.Is(err, domimpression.ErrInvalidPlayDuration):
 		fail(c, http.StatusBadRequest, err.Error())
 	case errors.Is(err, domimpression.ErrClipNotFound):

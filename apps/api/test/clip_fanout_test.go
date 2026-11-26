@@ -52,7 +52,7 @@ func (f *fanoutFakeRepository) ListCreatorRecentClips(_ context.Context, _ int64
 	return nil, nil
 }
 
-func (f *fanoutFakeRepository) ListLatestClipIDs(_ context.Context, _ int) ([]int64, error) {
+func (f *fanoutFakeRepository) ListLatestClipMedia(_ context.Context, _ int) ([]domfeed.PreloadClip, error) {
 	return nil, nil
 }
 
@@ -74,6 +74,14 @@ func (f *fanoutFakeRepository) BatchGetStats(_ context.Context, ids []int64) (ma
 		}
 	}
 	return result, nil
+}
+
+func (f *fanoutFakeRepository) BatchGetCreatorProfiles(_ context.Context, _ []int64) (map[int64]*domfeed.CreatorProfile, error) {
+	return map[int64]*domfeed.CreatorProfile{}, nil
+}
+
+func (f *fanoutFakeRepository) BatchGetFollowedCreatorIDs(_ context.Context, _ int64, _ []int64) (map[int64]bool, error) {
+	return map[int64]bool{}, nil
 }
 
 func (f *fanoutFakeRepository) BatchGetViewerStates(_ context.Context, _ int64, _ []int64) (map[int64]*domfeed.ViewerState, error) {
@@ -100,7 +108,7 @@ func (f *fanoutFakeCache) AddInboxEntries(_ context.Context, userID int64, _ []d
 	return nil
 }
 
-func (f *fanoutFakeCache) ListInbox(_ context.Context, _ int64) ([]domfeed.InboxEntry, error) {
+func (f *fanoutFakeCache) ListInbox(_ context.Context, _ int64, _ *domfeed.Cursor, _ int) ([]domfeed.InboxEntry, error) {
 	return nil, nil
 }
 
@@ -109,25 +117,31 @@ func (f *fanoutFakeCache) AddOutboxEntries(_ context.Context, creatorID int64, _
 	return nil
 }
 
-func (f *fanoutFakeCache) ListOutbox(_ context.Context, _ int64) ([]domfeed.InboxEntry, error) {
+func (f *fanoutFakeCache) ListOutboxes(_ context.Context, _ []int64, _ *domfeed.Cursor, _ int) ([]domfeed.InboxEntry, error) {
 	return nil, nil
 }
 
-func (f *fanoutFakeCache) GetCards(_ context.Context, _ []int64) map[int64]*domfeed.FeedEntry {
-	return map[int64]*domfeed.FeedEntry{}
+func (f *fanoutFakeCache) GetCards(_ context.Context, _ []int64) (map[int64]*domfeed.FeedEntry, map[int64]bool, error) {
+	return map[int64]*domfeed.FeedEntry{}, map[int64]bool{}, nil
 }
 
 func (f *fanoutFakeCache) SetCards(_ context.Context, entries []*domfeed.FeedEntry) {
 	f.cardsSet += len(entries)
 }
 
-func (f *fanoutFakeCache) GetStats(_ context.Context, _ []int64) map[int64]*domfeed.EntryStats {
-	return map[int64]*domfeed.EntryStats{}
+// MarkCardsMissing 在扇出测试中无意义，仅满足接口。
+func (f *fanoutFakeCache) MarkCardsMissing(context.Context, []int64) {}
+
+func (f *fanoutFakeCache) GetStats(_ context.Context, _ []int64) (map[int64]*domfeed.EntryStats, map[int64]bool, error) {
+	return map[int64]*domfeed.EntryStats{}, map[int64]bool{}, nil
 }
 
 func (f *fanoutFakeCache) SetStats(_ context.Context, stats map[int64]*domfeed.EntryStats) {
 	f.statsSet += len(stats)
 }
+
+// MarkStatsMissing 在扇出测试中无意义，仅满足接口。
+func (f *fanoutFakeCache) MarkStatsMissing(context.Context, []int64) {}
 
 // newFanoutFixture 构造 clip_id=42、creator_id=7 的扇出测试夹具。
 func newFanoutFixture() (*fanoutFakeRepository, *fanoutFakeCache, []byte) {

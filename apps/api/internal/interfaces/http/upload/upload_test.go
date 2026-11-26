@@ -76,8 +76,8 @@ func TestUploadAllKindsPersist(t *testing.T) {
 		content  []byte
 	}{
 		{kind: "video", filename: "clip.MP4", content: []byte("fake-mp4-payload")},
-		{kind: "cover", filename: "cover.jpeg", content: []byte("fake-jpeg-payload")},
-		{kind: "avatar", filename: "me.webp", content: []byte("fake-webp-payload")},
+		{kind: "cover", filename: "cover.jpeg", content: testJPEG(t)},
+		{kind: "avatar", filename: "me.webp", content: testWEBP()},
 	}
 	for _, tc := range cases {
 		t.Run(tc.kind, func(t *testing.T) {

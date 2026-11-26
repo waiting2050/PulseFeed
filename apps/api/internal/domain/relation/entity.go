@@ -17,6 +17,8 @@ const (
 	MaxLimit = 100
 	// DefaultLimit 是未显式指定 limit 时的默认页大小。
 	DefaultLimit = 20
+	// MaxFollowingCount 是单个用户关注数的硬上限，写入校验与读侧兜底共用同一常量。
+	MaxFollowingCount = 2000
 )
 
 // Follow 是一条关注关系记录；同一 (UserID, TargetUserID) 只有一行，取关为状态置位。
@@ -64,6 +66,12 @@ type ListEntry struct {
 	AvatarURL  string
 	Bio        string
 	FollowedAt time.Time
+}
+
+// UserStats 是用户的关注数与粉丝数；统计行缺失时视为 0。
+type UserStats struct {
+	FollowingCount int64
+	FollowerCount  int64
 }
 
 // ListCursor 是关注/粉丝列表按 (updated_at, peer_user_id) 严格递减翻页的游标。

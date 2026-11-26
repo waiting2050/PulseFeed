@@ -161,6 +161,38 @@ func (r *Repository) ListFollowers(ctx context.Context, userID int64, cursor *do
 	return toListEntries(rows), nil
 }
 
+// GetUserStats 读取用户的关注数与粉丝数；统计行不存在返回 0 值，不视为错误。
+func (r *Repository) GetUserStats(ctx context.Context, userID int64) (*domrelation.UserStats, error) {
+	var row UserStatsModel
+	err := r.db.WithContext(ctx).Where("user_id = ?", userID).Take(&row).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return &domrelation.UserStats{}, nil
+		}
+		return nil, err
+	}
+	return &domrelation.UserStats{
+		FollowingCount: row.FollowingCount,
+		FollowerCount:  row.FollowerCount,
+	}, nil
+}
+
+// IsFollowing 判断关注关系是否有效；自关注与非法 ID 直接返回 false。
+func (r *Repository) IsFollowing(ctx context.Context, userID, targetUserID int64) (bool, error) {
+	if userID <= 0 || targetUserID <= 0 || userID == targetUserID {
+		return false, nil
+	}
+	var count int64
+	err := r.db.WithContext(ctx).
+		Table("pf_follows").
+		Where("user_id = ? AND target_user_id = ? AND status = ?", userID, targetUserID, domrelation.StatusFollowing).
+		Count(&count).Error
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
 // listRow 是关注/粉丝列表联查结果的行映射。
 type listRow struct {
 	UserID     int64

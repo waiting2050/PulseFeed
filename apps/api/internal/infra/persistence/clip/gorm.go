@@ -4,8 +4,10 @@ package infraclip
 import (
 	"context"
 	"errors"
+	"time"
 
 	domclip "pulsefeed/internal/domain/clip"
+	infraoutbox "pulsefeed/internal/infra/persistence/outbox"
 
 	"github.com/go-sql-driver/mysql"
 	"gorm.io/gorm"
@@ -29,6 +31,7 @@ func (r *Repository) Create(ctx context.Context, c *domclip.Clip) error {
 	model := ClipModel{
 		CreatorID:      c.CreatorID,
 		Title:          c.Title,
+		Description:    c.Description,
 		VideoURL:       c.VideoURL,
 		CoverURL:       c.CoverURL,
 		DurationMS:     c.DurationMS,
@@ -47,6 +50,55 @@ func (r *Repository) Create(ctx context.Context, c *domclip.Clip) error {
 		}
 		if err := tx.Create(&ClipStatsModel{ClipID: model.ID}).Error; err != nil {
 			return err
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+
+	c.ID = model.ID
+	return nil
+}
+
+// CreateWithEvents 在同一事务内写入 pf_clips、pf_clip_stats 与 outbox 事件；
+// 事件在 clip 自增 ID 生成后构造，保证载荷中的 clip_id 与最终记录一致。
+func (r *Repository) CreateWithEvents(ctx context.Context, c *domclip.Clip, build domclip.EventBuilder) error {
+	model := ClipModel{
+		CreatorID:      c.CreatorID,
+		Title:          c.Title,
+		Description:    c.Description,
+		VideoURL:       c.VideoURL,
+		CoverURL:       c.CoverURL,
+		DurationMS:     c.DurationMS,
+		Status:         c.Status,
+		IdempotencyKey: c.IdempotencyKey,
+		PublishedAt:    c.PublishedAt,
+	}
+
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&model).Error; err != nil {
+			if isDuplicateKeyError(err) {
+				// uk_creator_idempotency 冲突转换为领域错误，应用层负责回读已存在记录。
+				return domclip.ErrClipExists
+			}
+			return err
+		}
+		if err := tx.Create(&ClipStatsModel{ClipID: model.ID}).Error; err != nil {
+			return err
+		}
+
+		c.ID = model.ID
+		events, err := build(c)
+		if err != nil {
+			return err
+		}
+		now := time.Now()
+		for _, event := range events {
+			record := infraoutbox.NewEventModel(event.EventID, event.Topic, event.Payload, now)
+			if err := tx.Create(record).Error; err != nil {
+				return err
+			}
 		}
 		return nil
 	})
@@ -141,7 +193,7 @@ func (r *Repository) Delete(ctx context.Context, id int64, _ string) error {
 
 // toEntity 将 GORM 模型转换为领域实体。
 func toEntity(m *ClipModel) *domclip.Clip {
-	return domclip.RestoreClip(m.ID, m.CreatorID, m.Title, m.VideoURL, m.CoverURL, m.DurationMS, m.Status, m.IdempotencyKey, m.PublishedAt)
+	return domclip.RestoreClip(m.ID, m.CreatorID, m.Title, m.Description, m.VideoURL, m.CoverURL, m.DurationMS, m.Status, m.IdempotencyKey, m.PublishedAt)
 }
 
 // isDuplicateKeyError 判断是否为 MySQL 1062 唯一键冲突。
