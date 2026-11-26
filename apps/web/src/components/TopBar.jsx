@@ -10,7 +10,7 @@ const TABS = [
   { key: 'playback', label: '播放' },
 ]
 
-export default function TopBar({ tab, onTab, unread, me, onLogout }) {
+export default function TopBar({ tab, onTab, unread, me, onLogout, onProfile }) {
   return (
     <header className="pf-topbar">
       <div className="pf-topbar-inner">
@@ -43,7 +43,9 @@ export default function TopBar({ tab, onTab, unread, me, onLogout }) {
         </nav>
 
         <div className="pf-topbar-right">
-          <Avatar name={(me && me.nickname) || '我'} />
+          <button type="button" className="pf-avatar-btn" onClick={onProfile} aria-label="我的主页">
+            <Avatar name={(me && me.nickname) || '我'} src={me && me.avatar_url} />
+          </button>
           <button type="button" className="pf-icon-btn" onClick={onLogout} aria-label="退出登录">
             <Icon name="logout" size={20} />
           </button>

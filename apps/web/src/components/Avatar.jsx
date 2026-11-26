@@ -3,7 +3,7 @@ import React from 'react'
 
 export default function Avatar({ name, src, size = 'md' }) {
   const initial = (name || '?').trim().slice(0, 1) || '?'
-  const className = size === 'sm' ? 'pf-avatar pf-avatar-sm' : 'pf-avatar'
+  const className = size === 'sm' ? 'pf-avatar pf-avatar-sm' : size === 'lg' ? 'pf-avatar pf-avatar-lg' : 'pf-avatar'
   if (src) {
     return <img className={className} src={src} alt="" aria-hidden="true" />
   }

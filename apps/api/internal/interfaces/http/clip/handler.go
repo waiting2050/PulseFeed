@@ -5,6 +5,8 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
+	"unicode/utf8"
 
 	appclip "pulsefeed/internal/application/clip"
 	domclip "pulsefeed/internal/domain/clip"
@@ -12,6 +14,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 )
+
+// idempotencyKeyMaxLen 是幂等键长度上限，与 pf_clips.idempotency_key 列宽（64）一致；
+// 超长在入口直接拒绝，避免落到数据库变成 1406 截断/报错。
+const idempotencyKeyMaxLen = 64
 
 // Handler 聚合 clip 相关端点。
 type Handler struct {
@@ -31,6 +37,11 @@ func (h *Handler) Publish(c *gin.Context) {
 		fail(c, http.StatusUnauthorized, "missing or invalid token")
 		return
 	}
+	idempotencyKey := strings.TrimSpace(c.GetHeader("Idempotency-Key"))
+	if utf8.RuneCountInString(idempotencyKey) > idempotencyKeyMaxLen {
+		fail(c, http.StatusBadRequest, "Idempotency-Key 过长（最多 64 个字符）")
+		return
+	}
 	var req publishRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		fail(c, http.StatusBadRequest, "请求体非法")
@@ -40,10 +51,11 @@ func (h *Handler) Publish(c *gin.Context) {
 		c.Request.Context(),
 		creatorID,
 		req.Title,
+		req.Description,
 		req.VideoURL,
 		req.CoverURL,
 		req.DurationMS,
-		c.GetHeader("Idempotency-Key"),
+		idempotencyKey,
 	)
 	if err != nil {
 		mapError(c, err)
@@ -140,6 +152,7 @@ func toClipResponse(clip *domclip.Clip) clipResponse {
 		ClipID:      clip.ID,
 		CreatorID:   clip.CreatorID,
 		Title:       clip.Title,
+		Description: clip.Description,
 		VideoURL:    clip.VideoURL,
 		CoverURL:    clip.CoverURL,
 		DurationMS:  clip.DurationMS,
@@ -151,6 +164,7 @@ func toClipResponse(clip *domclip.Clip) clipResponse {
 func mapError(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, domclip.ErrInvalidTitle),
+		errors.Is(err, domclip.ErrInvalidDescription),
 		errors.Is(err, domclip.ErrInvalidVideoURL),
 		errors.Is(err, domclip.ErrInvalidIdempotencyKey),
 		errors.Is(err, domclip.ErrInvalidCursor),

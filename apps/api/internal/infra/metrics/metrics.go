@@ -22,11 +22,22 @@ type Metrics struct {
 	feedDuration *prometheus.HistogramVec
 	cacheEvents  *prometheus.CounterVec
 	workerEvents *prometheus.CounterVec
+	dlqMessages  *prometheus.CounterVec
 
 	qosReports   *prometheus.CounterVec
 	qosLatency   prometheus.Histogram
 	qosStalls    prometheus.Counter
 	qosCompleted prometheus.Counter
+
+	authRefresh     *prometheus.CounterVec
+	authDenylistErr *prometheus.CounterVec
+	authLoginErr    *prometheus.CounterVec
+	authRevocations prometheus.Counter
+
+	feedLimiterErr *prometheus.CounterVec
+
+	interactionSideEffects *prometheus.CounterVec
+	interactionLimiterErr  *prometheus.CounterVec
 }
 
 // New 按进程组件名创建指标集合并注册到独立注册表；component 取 api 或 worker。
@@ -63,12 +74,16 @@ func New(component string) *Metrics {
 	}, []string{"scene"})
 	cacheEvents := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "pulsefeed_feed_cache_events_total",
-		Help: "Feed 页缓存访问次数，按 hit/miss/disabled 区分。",
+		Help: "Feed 缓存访问次数，按 hit/miss/disabled/error/card_error/stats_error/hot_error/hot_empty 区分。",
 	}, []string{"result"})
 	workerEvents := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "pulsefeed_worker_events_total",
 		Help: "Worker 消息处理次数，按 Worker 名称与结果区分。",
 	}, []string{"worker", "result"})
+	dlqMessages := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "pulsefeed_dlq_messages_total",
+		Help: "死信消息消费次数，按来源队列、事件类型与死信原因区分。",
+	}, []string{"queue", "event_type", "reason"})
 	qosReports := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "pulsefeed_playback_qos_reports_total",
 		Help: "QoS 上报次数，按结果（inserted/duplicate/error）区分。",
@@ -86,6 +101,34 @@ func New(component string) *Metrics {
 		Name: "pulsefeed_playback_qos_completed_total",
 		Help: "QoS 上报中标记完播的次数，仅统计首次落库的上报。",
 	})
+	authRefresh := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "pulsefeed_auth_refresh_total",
+		Help: "刷新令牌请求次数，按结果（ok/reused/replay/grace_miss/invalid/limited/error）区分。",
+	}, []string{"result"})
+	authDenylistErr := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "pulsefeed_auth_denylist_errors_total",
+		Help: "拒绝名单访问失败次数，按读写（read_error/write_error）区分。",
+	}, []string{"result"})
+	authLoginErr := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "pulsefeed_auth_login_limiter_errors_total",
+		Help: "登录限流降级次数（Redis 不可用 fail-open），按 IP/账号维度区分。",
+	}, []string{"scope"})
+	authRevocations := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "pulsefeed_auth_revocations_total",
+		Help: "因登出或重放被吊销的刷新令牌行数。",
+	})
+	feedLimiterErr := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "pulsefeed_feed_limiter_errors_total",
+		Help: "Feed 限流降级次数（Redis 不可用时 fail-open），按 user/ip 维度区分。",
+	}, []string{"scope"})
+	interactionSideEffects := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "pulsefeed_interaction_side_effects_total",
+		Help: "互动提交后副作用的执行结果，按副作用类型（hot_score/action_event/like_notify/comment_notify）与结果（ok/error）区分。",
+	}, []string{"kind", "result"})
+	interactionLimiterErr := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "pulsefeed_interaction_limiter_errors_total",
+		Help: "互动写限流降级次数（Redis 不可用时 fail-open），按 user 维度区分。",
+	}, []string{"scope"})
 
 	registry.MustRegister(
 		up,
@@ -95,25 +138,42 @@ func New(component string) *Metrics {
 		feedDuration,
 		cacheEvents,
 		workerEvents,
+		dlqMessages,
 		qosReports,
 		qosLatency,
 		qosStalls,
 		qosCompleted,
+		authRefresh,
+		authDenylistErr,
+		authLoginErr,
+		authRevocations,
+		feedLimiterErr,
+		interactionSideEffects,
+		interactionLimiterErr,
 	)
 
 	return &Metrics{
-		registry:     registry,
-		up:           up,
-		httpRequests: httpRequests,
-		httpDuration: httpDuration,
-		feedRequests: feedRequests,
-		feedDuration: feedDuration,
-		cacheEvents:  cacheEvents,
-		workerEvents: workerEvents,
-		qosReports:   qosReports,
-		qosLatency:   qosLatency,
-		qosStalls:    qosStalls,
-		qosCompleted: qosCompleted,
+		registry:        registry,
+		up:              up,
+		httpRequests:    httpRequests,
+		httpDuration:    httpDuration,
+		feedRequests:    feedRequests,
+		feedDuration:    feedDuration,
+		cacheEvents:     cacheEvents,
+		workerEvents:    workerEvents,
+		dlqMessages:     dlqMessages,
+		qosReports:      qosReports,
+		qosLatency:      qosLatency,
+		qosStalls:       qosStalls,
+		qosCompleted:    qosCompleted,
+		authRefresh:     authRefresh,
+		authDenylistErr: authDenylistErr,
+		authLoginErr:    authLoginErr,
+		authRevocations: authRevocations,
+		feedLimiterErr:  feedLimiterErr,
+
+		interactionSideEffects: interactionSideEffects,
+		interactionLimiterErr:  interactionLimiterErr,
 	}
 }
 
@@ -151,6 +211,14 @@ func (m *Metrics) ObserveWorker(worker, result string) {
 	m.workerEvents.WithLabelValues(worker, result).Inc()
 }
 
+// ObserveDeadLetter 记录一条已消费的死信消息。
+func (m *Metrics) ObserveDeadLetter(queue, eventType, reason string) {
+	if m == nil {
+		return
+	}
+	m.dlqMessages.WithLabelValues(queue, eventType, reason).Inc()
+}
+
 // ObserveQoS 记录一次 QoS 上报；延迟、卡顿与完播只在首次落库（inserted）时聚合，
 // 重复上报仅累加 reports_total，避免幂等路径把同一播放重复计入质量指标。
 func (m *Metrics) ObserveQoS(result string, latencyMS, stallCount int, completed bool) {
@@ -168,6 +236,62 @@ func (m *Metrics) ObserveQoS(result string, latencyMS, stallCount int, completed
 	if completed {
 		m.qosCompleted.Inc()
 	}
+}
+
+// ObserveRefresh 记录一次刷新令牌请求的结果分类。
+func (m *Metrics) ObserveRefresh(result string) {
+	if m == nil {
+		return
+	}
+	m.authRefresh.WithLabelValues(result).Inc()
+}
+
+// ObserveDenylistError 记录一次拒绝名单访问失败。
+func (m *Metrics) ObserveDenylistError(result string) {
+	if m == nil {
+		return
+	}
+	m.authDenylistErr.WithLabelValues(result).Inc()
+}
+
+// ObserveLoginLimiterError 记录一次登录限流降级（Redis 不可用时 fail-open）。
+func (m *Metrics) ObserveLoginLimiterError(scope string) {
+	if m == nil {
+		return
+	}
+	m.authLoginErr.WithLabelValues(scope).Inc()
+}
+
+// ObserveFeedLimiterError 记录一次 Feed 限流降级（Redis 不可用时 fail-open）。
+func (m *Metrics) ObserveFeedLimiterError(scope string) {
+	if m == nil {
+		return
+	}
+	m.feedLimiterErr.WithLabelValues(scope).Inc()
+}
+
+// ObserveInteractionSideEffect 记录一次互动提交后副作用的执行结果（ok/error）。
+func (m *Metrics) ObserveInteractionSideEffect(kind, result string) {
+	if m == nil {
+		return
+	}
+	m.interactionSideEffects.WithLabelValues(kind, result).Inc()
+}
+
+// ObserveInteractionLimiterError 记录一次互动写限流降级（Redis 不可用 fail-open）。
+func (m *Metrics) ObserveInteractionLimiterError(scope string) {
+	if m == nil {
+		return
+	}
+	m.interactionLimiterErr.WithLabelValues(scope).Inc()
+}
+
+// ObserveRevocations 累加被吊销的刷新令牌行数。
+func (m *Metrics) ObserveRevocations(count int64) {
+	if m == nil || count <= 0 {
+		return
+	}
+	m.authRevocations.Add(float64(count))
 }
 
 // Handler 返回当前注册表的 /metrics HTTP 处理器。

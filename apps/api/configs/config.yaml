@@ -1,11 +1,27 @@
 port: 8090
 
+# 可信反向代理：只有来自这些地址的 X-Forwarded-For / X-Real-IP 才会被用于解析客户端 IP；
+# 为空表示直连部署，仅使用 TCP 对端地址。登录/刷新限流依赖真实 IP，不要放行任意来源。
+trusted_proxies:
+  - 127.0.0.1
+  - ::1
+
 jwt:
-  secret: placeholder-secret
-  access_ttl: 15m
+  secret: pulsefeed-local-dev-secret-4f8c2b7e9a1d
+  access_ttl: 30m
+  refresh_ttl: 336h
+  refresh_grace: 30s
+  leeway: 30s
 
 internal:
-  token: placeholder-internal-token
+  # 本地开发令牌；生产通过 PULSEFEED_INTERNAL_TOKEN 注入，至少 32 字节且不能是占位值。
+  token: pulsefeed-local-internal-token-8f3c2a7d
+
+feed:
+  # 翻页游标签名密钥；生产通过 PULSEFEED_FEED_CURSOR_SECRET 注入，至少 32 字节且不能是占位值。
+  cursor_secret: pulsefeed-local-cursor-secret-2d7a4c9e5b1f
+  # 页缓存 singleflight 共享执行侧的超时上限；执行侧已与首个请求解耦，需要独立上限。
+  shared_load_timeout: 3s
 
 database:
   host: 127.0.0.1

@@ -7,11 +7,20 @@ import (
 )
 
 // ClipPublished 是 clip 发布成功后投递的事件载荷，供扇出/向量等下游消费。
+// EventID 在 outbox 场景下唯一标识一次事件，重复投递时下游据此识别同一事件。
 type ClipPublished struct {
+	EventID     string    `json:"event_id"`
 	ClipID      int64     `json:"clip_id"`
 	CreatorID   int64     `json:"creator_id"`
 	PublishedAt time.Time `json:"published_at"`
 }
+
+const (
+	// TopicClipPublished 是发布扇出事件的逻辑类型。
+	TopicClipPublished = "clip.published"
+	// TopicClipEmbedding 是向量生成事件的逻辑类型。
+	TopicClipEmbedding = "clip.embedding"
+)
 
 // Publisher 是事件发布端口，由 infra/mq 实现并经组合根注入；未注入时发布流程跳过投递。
 type Publisher interface {

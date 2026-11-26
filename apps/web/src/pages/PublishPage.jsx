@@ -1,9 +1,9 @@
 // PublishPage.jsx 提供上传到创建内容的完整表单、素材预览与分阶段状态反馈。
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import Icon from '../components/Icon.jsx'
 import Spinner from '../components/Spinner.jsx'
 import Toast from '../components/Toast.jsx'
-import { api, FILE_KIND } from '../lib/api.js'
+import { api, newClientId } from '../lib/api.js'
 import { formatFileSize } from '../lib/format.js'
 
 const STAGE_LABELS = {
@@ -16,15 +16,34 @@ const STAGE_LABELS = {
 // HTML maxLength 取后端列宽 128 作为兜底，保证不会出现前端放行、后端拒绝。
 const TITLE_MAX_CHARS = 120
 const TITLE_HTML_MAX = 128
+// 简介可选，按字符（Unicode 码点）计数，与后端 rune 上限 1000 一致；
+// 不设 HTML maxLength，避免 emoji 被按 UTF-16 单元截断，超限时提交前给出明确错误。
+const DESCRIPTION_MAX_CHARS = 1000
+
+// 与后端 upload handler 的硬上限保持一致：视频 512MB、图片 20MB。
+// 选中文件即校验，避免等整个请求发出后才由后端拒绝。
+const VIDEO_MAX_BYTES = 512 * 1024 * 1024
+const IMAGE_MAX_BYTES = 20 * 1024 * 1024
+
+// oversizeMessage 返回超出上限时的提示；未超限或未选文件时返回空串。
+function oversizeMessage(picked, maxBytes, label) {
+  if (!picked || picked.size <= maxBytes) return ''
+  const limitMB = Math.round(maxBytes / (1024 * 1024))
+  return `${label}文件超过大小上限（${limitMB}MB），当前 ${formatFileSize(picked.size)}`
+}
 
 export default function PublishPage({ onPublished }) {
   const [title, setTitle] = useState('')
+  const [description, setDescription] = useState('')
   const [file, setFile] = useState(null)
   const [cover, setCover] = useState(null)
   const [coverPreview, setCoverPreview] = useState('')
   const [stage, setStage] = useState('')
+  const [uploadProgress, setUploadProgress] = useState(null)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
+  // 发布幂等键按「一次提交」粒度保留：提交失败后手动重试沿用同一个 key，成功后清空。
+  const publishKeyRef = useRef('')
 
   useEffect(() => {
     if (!cover) {
@@ -38,6 +57,34 @@ export default function PublishPage({ onPublished }) {
 
   const submitting = Boolean(stage)
   const titleLength = [...title.trim()].length
+  const descriptionLength = [...description.trim()].length
+
+  // 选文件后立即做大小校验：超限直接清空选择并提示，不进入上传流程。
+  function handleVideoChange(event) {
+    const picked = event.target.files?.[0] || null
+    const message = oversizeMessage(picked, VIDEO_MAX_BYTES, '视频')
+    if (message) {
+      setFile(null)
+      setError(message)
+      event.target.value = ''
+      return
+    }
+    setError('')
+    setFile(picked)
+  }
+
+  function handleCoverChange(event) {
+    const picked = event.target.files?.[0] || null
+    const message = oversizeMessage(picked, IMAGE_MAX_BYTES, '封面')
+    if (message) {
+      setCover(null)
+      setError(message)
+      event.target.value = ''
+      return
+    }
+    setError('')
+    setCover(picked)
+  }
 
   async function handleSubmit(event) {
     event.preventDefault()
@@ -51,14 +98,23 @@ export default function PublishPage({ onPublished }) {
       setError(`标题最多 ${TITLE_MAX_CHARS} 个字符，当前 ${titleLength} 个字符`)
       return
     }
+    if (descriptionLength > DESCRIPTION_MAX_CHARS) {
+      setError(`简介最多 ${DESCRIPTION_MAX_CHARS} 个字符，当前 ${descriptionLength} 个字符`)
+      return
+    }
     if (!file) {
       setError('请选择要上传的素材文件')
       return
     }
 
     try {
+      if (!publishKeyRef.current) {
+        publishKeyRef.current = newClientId('pf')
+      }
       setStage('uploading')
-      const uploaded = await api.uploadFile(file, FILE_KIND)
+      setUploadProgress(null)
+      // 短视频仍走单请求；超过 16MiB 时 uploadVideo 内部切到分片通道并回报进度。
+      const uploaded = await api.uploadVideo(file, { onProgress: setUploadProgress })
 
       // 后端抽帧成功时回传 cover_url，未手动选封面则直接沿用首帧；时长同样透传给创建接口。
       let coverUrl = uploaded.cover_url || ''
@@ -70,8 +126,17 @@ export default function PublishPage({ onPublished }) {
       }
 
       setStage('creating')
-      await api.publishClip({ title: title.trim(), fileUrl: uploaded.url, coverUrl, durationMs })
+      await api.publishClip({
+        title: title.trim(),
+        description: description.trim(),
+        fileUrl: uploaded.url,
+        coverUrl,
+        durationMs,
+        idempotencyKey: publishKeyRef.current,
+      })
+      publishKeyRef.current = ''
       setTitle('')
+      setDescription('')
       setFile(null)
       setCover(null)
       setNotice('发布成功，内容已进入最新流。')
@@ -79,6 +144,7 @@ export default function PublishPage({ onPublished }) {
       setError(err.message)
     } finally {
       setStage('')
+      setUploadProgress(null)
     }
   }
 
@@ -87,7 +153,7 @@ export default function PublishPage({ onPublished }) {
       <h1 id="pf-publish-title" className="pf-page-title">
         发布内容
       </h1>
-      <p className="pf-page-hint">上传素材并补充标题；封面可留空，系统会以暗色首字占位。</p>
+      <p className="pf-page-hint">上传素材并补充标题与简介（可选）；封面可留空，系统会以暗色首字占位。</p>
 
       <form className="pf-form-card" onSubmit={handleSubmit} noValidate>
         <div className="pf-field">
@@ -113,13 +179,35 @@ export default function PublishPage({ onPublished }) {
         </div>
 
         <div className="pf-field">
+          <label htmlFor="pf-publish-description">简介（可选）</label>
+          <textarea
+            id="pf-publish-description"
+            value={description}
+            onChange={(event) => setDescription(event.target.value)}
+            placeholder="补充内容背景、看点或拍摄信息"
+            rows={4}
+            aria-describedby="pf-publish-description-hint"
+            disabled={submitting}
+          />
+          <span
+            id="pf-publish-description-hint"
+            className="pf-field-hint"
+            role="status"
+            aria-live="polite"
+          >
+            {descriptionLength}/{DESCRIPTION_MAX_CHARS} 个字符
+            {descriptionLength > DESCRIPTION_MAX_CHARS ? '，已超出上限' : ''}
+          </span>
+        </div>
+
+        <div className="pf-field">
           <label htmlFor="pf-publish-file">素材文件</label>
           <label className={`pf-file ${file ? 'has-file' : ''}`} htmlFor="pf-publish-file">
             <input
               id="pf-publish-file"
               type="file"
               accept=".mp4,.mov,.webm"
-              onChange={(event) => setFile(event.target.files?.[0] || null)}
+              onChange={handleVideoChange}
               disabled={submitting}
             />
             <span className="pf-file-icon" aria-hidden="true">
@@ -127,7 +215,7 @@ export default function PublishPage({ onPublished }) {
             </span>
             <span className="pf-file-text">
               {file ? file.name : '选择素材文件'}
-              <span className="pf-file-meta">{file ? formatFileSize(file.size) : 'mp4 / mov / webm'}</span>
+              <span className="pf-file-meta">{file ? formatFileSize(file.size) : 'mp4 / mov / webm · 最大 512MB'}</span>
             </span>
           </label>
         </div>
@@ -139,12 +227,12 @@ export default function PublishPage({ onPublished }) {
               id="pf-publish-cover"
               type="file"
               accept=".jpg,.jpeg,.png,.webp"
-              onChange={(event) => setCover(event.target.files?.[0] || null)}
+              onChange={handleCoverChange}
               disabled={submitting}
             />
             <span className="pf-file-text">
               {cover ? cover.name : '选择封面图片'}
-              <span className="pf-file-meta">{cover ? formatFileSize(cover.size) : 'jpg / png / webp'}</span>
+              <span className="pf-file-meta">{cover ? formatFileSize(cover.size) : 'jpg / png / webp · 最大 20MB'}</span>
             </span>
           </label>
           {coverPreview ? (
@@ -167,7 +255,9 @@ export default function PublishPage({ onPublished }) {
 
         {stage ? (
           <p className="pf-note" role="status" aria-live="polite">
-            {STAGE_LABELS[stage]}
+            {stage === 'uploading' && uploadProgress
+              ? `正在上传素材… ${uploadProgress.percent}%（${uploadProgress.partsDone}/${uploadProgress.totalParts} 分片）`
+              : STAGE_LABELS[stage]}
           </p>
         ) : null}
 

@@ -27,8 +27,8 @@ const (
 	publishTimeout = 5 * time.Second
 	// consumePrefetch 限制单个消费者未确认消息的上限，防止一次性拉取过多消息。
 	consumePrefetch = 16
-	// embeddingRouting 是向量生成队列的路由键；配置项仅给出队列名，路由键按命名形态补全。
-	embeddingRouting = "clip.embedding"
+	// EmbeddingRouting 是向量生成队列的路由键；配置项仅给出队列名，路由键按命名形态补全。
+	EmbeddingRouting = "clip.embedding"
 	// MaxDeliveryAttempts 是单条消息可重试次数上限；达到上限仍失败则转入死信队列。
 	MaxDeliveryAttempts = 3
 )
@@ -46,6 +46,9 @@ type Client struct {
 	// publishMu 保护 publishCh：amqp 通道不是并发安全的，发布必须串行化。
 	publishMu sync.Mutex
 	publishCh *amqp.Channel
+
+	// deadRoutes 记录业务队列到死信交换机/路由键的映射，供主动转录死信时使用。
+	deadRoutes map[string]deadRoute
 }
 
 // New 建立连接并声明三组交换机/队列/绑定；url 为空时返回 nil 表示 MQ 链路禁用。
@@ -59,7 +62,7 @@ func New(cfg config.RabbitMQConfig) (*Client, error) {
 		return nil, fmt.Errorf("连接 RabbitMQ 失败: %w", err)
 	}
 
-	client := &Client{cfg: cfg, conn: conn}
+	client := &Client{cfg: cfg, conn: conn, deadRoutes: make(map[string]deadRoute, 4)}
 	if err := client.declareTopology(); err != nil {
 		_ = conn.Close()
 		return nil, err
@@ -105,7 +108,7 @@ func (c *Client) declareTopology() error {
 		routing  string
 	}{
 		{c.cfg.ClipPublishedQueue, c.cfg.ClipExchange, c.cfg.ClipPublishedRouting},
-		{c.cfg.ClipEmbeddingQueue, c.cfg.ClipExchange, embeddingRouting},
+		{c.cfg.ClipEmbeddingQueue, c.cfg.ClipExchange, EmbeddingRouting},
 		{c.cfg.ActionChangedQueue, c.cfg.InteractionExchange, c.cfg.ActionChangedRouting},
 		{c.cfg.PlayEventRecordedQueue, c.cfg.ImpressionExchange, c.cfg.PlayEventRecordedRouting},
 	}
@@ -136,12 +139,20 @@ func (c *Client) declareTopology() error {
 		if err := declareQueue(ch, deadQueue, dlx, deadRouting, nil); err != nil {
 			return err
 		}
+		// 主动转录死信时需要交换机与路由键，按队列名建立映射。
+		c.deadRoutes[b.queue] = deadRoute{exchange: dlx, routing: deadRouting, sourceRouting: b.routing}
 	}
 
 	// 发布通道在拓扑声明完成后保持打开，供后续 Publish* 串行复用。
 	publishCh, err := c.conn.Channel()
 	if err != nil {
 		return fmt.Errorf("创建 RabbitMQ 发布通道失败: %w", err)
+	}
+	// 开启 publisher confirm：broker 返回 ack/nack 后才算投递成功，
+	// 避免“写入连接缓冲区即当成功”导致的静默丢消息。
+	if err := publishCh.Confirm(false); err != nil {
+		_ = publishCh.Close()
+		return fmt.Errorf("开启 publisher confirm 失败: %w", err)
 	}
 	c.publishCh = publishCh
 	return nil
@@ -171,7 +182,7 @@ func (c *Client) PublishClipPublished(ctx context.Context, event appclip.ClipPub
 
 // PublishClipEmbedding 投递 clip.embedding 事件，由 ClipEmbeddingWorker 生成文本向量。
 func (c *Client) PublishClipEmbedding(ctx context.Context, event appclip.ClipPublished) error {
-	return c.publish(ctx, c.cfg.ClipExchange, embeddingRouting, event)
+	return c.publish(ctx, c.cfg.ClipExchange, EmbeddingRouting, event)
 }
 
 // PublishActionChanged 投递 interaction.action_changed 事件，由 ActionWorker 落库。
@@ -193,8 +204,27 @@ func (c *Client) publish(ctx context.Context, exchange, routing string, payload 
 	if err != nil {
 		return fmt.Errorf("序列化事件失败: %w", err)
 	}
+	return c.publishBytes(ctx, exchange, routing, "", body)
+}
 
-	// 单次发布超时：broker 异常时不无限等待，便于上层回退同步链路。
+// PublishRaw 投递已序列化的载荷，供 outbox relay 重放持久化事件。
+// messageID 写入 AMQP MessageId，重复投递时下游可据此识别同一事件。
+func (c *Client) PublishRaw(ctx context.Context, exchange, routing, messageID string, payload []byte) error {
+	if c == nil {
+		return fmt.Errorf("RabbitMQ 未初始化")
+	}
+	return c.publishBytes(ctx, exchange, routing, messageID, payload)
+}
+
+// publishBytes 在发布通道上投递消息并等待 broker 的 publisher confirm：
+// 只有收到 ack 才返回 nil；nack、等待超时或通道异常都会返回错误，由调用方决定重试或标记失败。
+func (c *Client) publishBytes(ctx context.Context, exchange, routing, messageID string, body []byte) error {
+	return c.publishMessage(ctx, exchange, routing, messageID, nil, body)
+}
+
+// publishMessage 投递一条持久化消息并等待 broker 确认；headers 为 nil 时不附加头信息。
+func (c *Client) publishMessage(ctx context.Context, exchange, routing, messageID string, headers amqp.Table, body []byte) error {
+	// 单次发布超时：broker 异常时不无限等待，便于上层回退同步链路或保留 outbox 事件待重试。
 	publishCtx, cancel := context.WithTimeout(ctx, publishTimeout)
 	defer cancel()
 
@@ -203,14 +233,29 @@ func (c *Client) publish(ctx context.Context, exchange, routing string, payload 
 	if c.publishCh == nil || c.publishCh.IsClosed() {
 		return fmt.Errorf("RabbitMQ 发布通道已关闭")
 	}
-	err = c.publishCh.PublishWithContext(publishCtx, exchange, routing, false, false, amqp.Publishing{
+
+	confirmation, err := c.publishCh.PublishWithDeferredConfirmWithContext(publishCtx, exchange, routing, false, false, amqp.Publishing{
 		ContentType:  "application/json",
 		DeliveryMode: amqp.Persistent,
+		MessageId:    messageID,
 		Timestamp:    time.Now(),
+		Headers:      headers,
 		Body:         body,
 	})
 	if err != nil {
 		return fmt.Errorf("投递事件到 %s(%s) 失败: %w", exchange, routing, err)
+	}
+	if confirmation == nil {
+		// 发布通道已开启 confirm，返回 nil 说明通道状态异常，不能当作投递成功。
+		return fmt.Errorf("发布通道未返回确认句柄，无法确认 %s(%s) 的投递结果", exchange, routing)
+	}
+
+	acked, err := confirmation.WaitContext(publishCtx)
+	if err != nil {
+		return fmt.Errorf("等待 %s(%s) 发布确认超时: %w", exchange, routing, err)
+	}
+	if !acked {
+		return fmt.Errorf("broker 拒绝接收 %s(%s) 的消息（nack）", exchange, routing)
 	}
 	return nil
 }
@@ -222,31 +267,11 @@ func (c *Client) Consume(ctx context.Context, queue string, handler func(context
 		return fmt.Errorf("RabbitMQ 未初始化")
 	}
 
-	ch, err := c.conn.Channel()
+	deliveries, closeConsumer, err := c.openConsumer(ctx, queue, consumePrefetch)
 	if err != nil {
-		return fmt.Errorf("创建消费通道失败: %w", err)
+		return err
 	}
-	defer ch.Close()
-
-	if err := ch.Qos(consumePrefetch, 0, false); err != nil {
-		return fmt.Errorf("设置消费预取上限失败: %w", err)
-	}
-
-	deliveries, err := ch.Consume(queue, "", false, false, false, false, nil)
-	if err != nil {
-		return fmt.Errorf("开始消费队列 %q 失败: %w", queue, err)
-	}
-
-	// ctx 取消时关闭通道，让 deliveries 通道关闭从而退出阻塞循环。
-	done := make(chan struct{})
-	go func() {
-		select {
-		case <-ctx.Done():
-			_ = ch.Close()
-		case <-done:
-		}
-	}()
-	defer close(done)
+	defer closeConsumer()
 
 	// attempts 记录本消费循环内每条消息的失败次数；重投消息 body 不变，按内容哈希累计。
 	attempts := make(map[uint64]int)
@@ -263,38 +288,162 @@ func (c *Client) Consume(ctx context.Context, queue string, handler func(context
 				}
 				return fmt.Errorf("队列 %q 消费通道意外关闭", queue)
 			}
-			if err := handler(ctx, delivery.Body); err != nil {
-				key := messageKey(delivery.Body)
-				attempts[key]++
-				permanent := messaging.IsPermanent(err)
-				exhausted := attempts[key] >= MaxDeliveryAttempts
-				if permanent || exhausted {
-					reason := "不可重试"
-					if !permanent {
-						reason = fmt.Sprintf("超过重试上限 %d 次", MaxDeliveryAttempts)
-					}
-					// 不重新入队：broker 按队列的 x-dead-letter-exchange 转入死信队列。
-					log.Printf("warning: 消费队列 %q 消息失败，转入死信队列（%s, delivery_tag=%d）: %v",
-						queue, reason, delivery.DeliveryTag, err)
-					if nackErr := delivery.Nack(false, false); nackErr != nil {
-						log.Printf("warning: 消息转入死信失败 (delivery_tag=%d): %v", delivery.DeliveryTag, nackErr)
-					}
-					delete(attempts, key)
-					continue
+			c.settle(ctx, queue, delivery, handler(ctx, delivery.Body), attempts)
+		}
+	}
+}
+
+// ConsumeBatch 阻塞消费指定队列，收满 maxBatch 条或等待 maxWait 后整批回调 handler，
+// 处理完成后按每条结果单独 ack/nack；handler 必须返回与入参等长的错误切片。
+// 同一条消息的重试次数与死信判定与逐条消费保持一致。
+func (c *Client) ConsumeBatch(ctx context.Context, queue string, maxBatch int, maxWait time.Duration, handler func(context.Context, [][]byte) []error) error {
+	if c == nil {
+		return fmt.Errorf("RabbitMQ 未初始化")
+	}
+	if maxBatch <= 0 {
+		return fmt.Errorf("批量消费大小必须为正数: %d", maxBatch)
+	}
+
+	deliveries, closeConsumer, err := c.openConsumer(ctx, queue, maxBatch)
+	if err != nil {
+		return err
+	}
+	defer closeConsumer()
+
+	attempts := make(map[uint64]int)
+	batch := make([]amqp.Delivery, 0, maxBatch)
+
+	for {
+		// 阻塞等待批次的第一条消息，避免空转。
+		select {
+		case <-ctx.Done():
+			return nil
+		case delivery, ok := <-deliveries:
+			if !ok {
+				if ctx.Err() != nil {
+					return nil
 				}
-				// 可重试错误重新入队，超过 MaxDeliveryAttempts 后由上面的分支转入死信。
-				log.Printf("warning: 消费队列 %q 消息失败，重试 %d/%d 次 (delivery_tag=%d): %v",
-					queue, attempts[key], MaxDeliveryAttempts, delivery.DeliveryTag, err)
-				if nackErr := delivery.Nack(false, true); nackErr != nil {
-					log.Printf("warning: 消息重新入队失败 (delivery_tag=%d): %v", delivery.DeliveryTag, nackErr)
-				}
-				continue
+				return fmt.Errorf("队列 %q 消费通道意外关闭", queue)
 			}
-			delete(attempts, messageKey(delivery.Body))
-			if err := delivery.Ack(false); err != nil {
-				log.Printf("warning: 消息确认失败 (delivery_tag=%d): %v", delivery.DeliveryTag, err)
+			batch = append(batch, delivery)
+		}
+
+		// 收满 maxBatch 或超过 maxWait 即处理，二者取先到者。
+		timer := time.NewTimer(maxWait)
+	collect:
+		for len(batch) < maxBatch {
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return nil
+			case <-timer.C:
+				break collect
+			case delivery, ok := <-deliveries:
+				if !ok {
+					timer.Stop()
+					if ctx.Err() != nil {
+						return nil
+					}
+					return fmt.Errorf("队列 %q 消费通道意外关闭", queue)
+				}
+				batch = append(batch, delivery)
 			}
 		}
+		timer.Stop()
+
+		bodies := make([][]byte, len(batch))
+		for i := range batch {
+			bodies[i] = batch[i].Body
+		}
+		errs := handler(ctx, bodies)
+		for i := range batch {
+			c.settle(ctx, queue, batch[i], errs[i], attempts)
+		}
+		batch = batch[:0]
+	}
+}
+
+// openConsumer 打开独立消费通道、设置预取上限并启动 ctx 取消时关闭通道的协程。
+func (c *Client) openConsumer(ctx context.Context, queue string, prefetch int) (<-chan amqp.Delivery, func(), error) {
+	ch, err := c.conn.Channel()
+	if err != nil {
+		return nil, nil, fmt.Errorf("创建消费通道失败: %w", err)
+	}
+	if err := ch.Qos(prefetch, 0, false); err != nil {
+		_ = ch.Close()
+		return nil, nil, fmt.Errorf("设置消费预取上限失败: %w", err)
+	}
+	deliveries, err := ch.Consume(queue, "", false, false, false, false, nil)
+	if err != nil {
+		_ = ch.Close()
+		return nil, nil, fmt.Errorf("开始消费队列 %q 失败: %w", queue, err)
+	}
+
+	// ctx 取消时关闭通道，让 deliveries 通道关闭从而退出阻塞循环。
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = ch.Close()
+		case <-done:
+		}
+	}()
+	return deliveries, func() {
+		close(done)
+		_ = ch.Close()
+	}, nil
+}
+
+// settle 按单条消息的处理结果执行 ack、重新入队或转入死信；
+// 死信转录失败时先重新入队再退避重试，避免“先 ack 后投递”造成消息丢失。
+func (c *Client) settle(ctx context.Context, queue string, delivery amqp.Delivery, handleErr error, attempts map[uint64]int) {
+	if handleErr == nil {
+		delete(attempts, messageKey(delivery.Body))
+		if ackErr := delivery.Ack(false); ackErr != nil {
+			log.Printf("warning: 消息确认失败 (delivery_tag=%d): %v", delivery.DeliveryTag, ackErr)
+		}
+		return
+	}
+
+	key := messageKey(delivery.Body)
+	attempts[key]++
+	permanent := messaging.IsPermanent(handleErr)
+	exhausted := attempts[key] >= MaxDeliveryAttempts
+	if permanent || exhausted {
+		reasonText := "不可重试"
+		deadReason := DeadReasonPermanent
+		if !permanent {
+			reasonText = fmt.Sprintf("超过重试上限 %d 次", MaxDeliveryAttempts)
+			deadReason = DeadReasonExhausted
+		}
+		// 主动转录到死信队列并补齐诊断头（原队列/原因/重试次数/错误），
+		// 只有 broker 确认接收才 ack 原消息，避免“先 ack 后投递”造成丢失。
+		if deadErr := c.forwardDeadLetter(ctx, queue, delivery, deadReason, attempts[key], handleErr); deadErr != nil {
+			log.Printf("error: 消费队列 %q 消息转入死信失败，重新入队避免丢失（%s, delivery_tag=%d）: %v",
+				queue, reasonText, delivery.DeliveryTag, deadErr)
+			if nackErr := delivery.Nack(false, true); nackErr != nil {
+				log.Printf("warning: 消息重新入队失败 (delivery_tag=%d): %v", delivery.DeliveryTag, nackErr)
+			}
+			select {
+			case <-ctx.Done():
+			case <-time.After(deadLetterRetryDelay):
+			}
+			return
+		}
+		log.Printf("warning: 消费队列 %q 消息已转入死信队列（%s, 处理 %d 次, delivery_tag=%d）: %v",
+			queue, reasonText, attempts[key], delivery.DeliveryTag, handleErr)
+		if ackErr := delivery.Ack(false); ackErr != nil {
+			log.Printf("warning: 消息确认失败 (delivery_tag=%d): %v", delivery.DeliveryTag, ackErr)
+		}
+		delete(attempts, key)
+		return
+	}
+
+	// 可重试错误重新入队，超过 MaxDeliveryAttempts 后由上面的分支转入死信。
+	log.Printf("warning: 消费队列 %q 消息失败，重试 %d/%d 次 (delivery_tag=%d): %v",
+		queue, attempts[key], MaxDeliveryAttempts, delivery.DeliveryTag, handleErr)
+	if nackErr := delivery.Nack(false, true); nackErr != nil {
+		log.Printf("warning: 消息重新入队失败 (delivery_tag=%d): %v", delivery.DeliveryTag, nackErr)
 	}
 }
 

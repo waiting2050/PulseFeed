@@ -6,6 +6,7 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"time"
 
 	appobservability "pulsefeed/internal/application/observability"
@@ -14,10 +15,12 @@ import (
 	"golang.org/x/sync/singleflight"
 )
 
-// FeedRequest 是一次 Feed 读取请求；ViewerID 为 0 表示未登录读者。
+// FeedRequest 是一次 Feed 读取请求；ViewerID 为 0 表示未登录读者，
+// ClientIP 取自 HTTP 层（已按可信代理规则解析），供匿名请求限流使用。
 type FeedRequest struct {
 	Scene    string
 	ViewerID int64
+	ClientIP string
 	Cursor   string
 	Limit    int
 }
@@ -82,10 +85,24 @@ func (s *LatestStrategy) Load(ctx context.Context, _ *FeedRequest, cursor *domfe
 type FeedCache interface {
 	// Enabled 报告缓存是否启用。
 	Enabled() bool
-	// GetPage 按页摘要读取缓存，ok=false 表示未命中。
-	GetPage(ctx context.Context, digest string) (entries []*domfeed.FeedEntry, ok bool)
+	// GetPage 按页摘要读取缓存；ok=false 表示未命中，err 非 nil 表示缓存故障。
+	GetPage(ctx context.Context, digest string) (entries []*domfeed.FeedEntry, ok bool, err error)
 	// SetPage 回填页缓存；firstPage 为 true 使用首页短 TTL。
 	SetPage(ctx context.Context, digest string, entries []*domfeed.FeedEntry, firstPage bool)
+	// SetPageEmpty 为空结果写短 TTL 负标记，避免同一 digest 在回源空页后反复击穿。
+	SetPageEmpty(ctx context.Context, digest string)
+	// FeedVersion 返回页缓存版本号；删除内容后递增版本即可整体失效既有页缓存。
+	// 读取故障返回错误，调用方应跳过页缓存而不是用默认版本构造摘要。
+	FeedVersion(ctx context.Context) (string, error)
+}
+
+// FeedRateLimiter 是 following/hot 的请求级限流端口，由 infra/cache 的 Redis 固定窗口实现。
+// 返回 (allowed, retryAfter, err)：err 非 nil 表示限流后端故障，调用方必须 fail-open。
+type FeedRateLimiter interface {
+	// AllowUser 按读者维度计数。
+	AllowUser(ctx context.Context, viewerID int64) (bool, time.Duration, error)
+	// AllowIP 按来源 IP 维度计数（匿名请求）。
+	AllowIP(ctx context.Context, clientIP string) (bool, time.Duration, error)
 }
 
 // Option 用于装配可选依赖。
@@ -125,24 +142,61 @@ func WithMetrics(metrics appobservability.Metrics) Option {
 	return func(s *Service) { s.metrics = metrics }
 }
 
+// WithCursorCodec 注入带服务端签名的游标编解码器；未注入时保持无签名的旧行为（仅限测试装配）。
+func WithCursorCodec(codec *domfeed.CursorCodec) Option {
+	return func(s *Service) { s.cursors = codec }
+}
+
+// WithFeedRateLimiter 注入 following/hot 的请求级限流器；未注入时不做限流。
+func WithFeedRateLimiter(limiter FeedRateLimiter) Option {
+	return func(s *Service) { s.limiter = limiter }
+}
+
+// WithSharedLoadTimeout 设置 singleflight 共享执行侧的超时上限。
+// 生产配置由 feed.shared_load_timeout 注入；未设置时使用与配置文件一致的兜底值。
+func WithSharedLoadTimeout(timeout time.Duration) Option {
+	return func(s *Service) {
+		if timeout > 0 {
+			s.sharedLoadTimeout = timeout
+		}
+	}
+}
+
+// defaultSharedLoadTimeout 是未显式配置时的兜底值，与 configs 中的
+// feed.shared_load_timeout 保持一致：足够覆盖一次 DB 页查询，又能在首个请求
+// 已断连时尽快结束共享执行，避免长期占用连接。
+const defaultSharedLoadTimeout = 3 * time.Second
+
 // Service 提供 Feed 读取用例。
 type Service struct {
-	repo       domfeed.Repository
-	strategies map[domfeed.Scene]Strategy
-	cache      FeedCache
-	group      singleflight.Group
-	metrics    appobservability.Metrics
+	repo              domfeed.Repository
+	strategies        map[domfeed.Scene]Strategy
+	cache             FeedCache
+	cursors           *domfeed.CursorCodec
+	limiter           FeedRateLimiter
+	sharedLoadTimeout time.Duration
+	group             singleflight.Group
+	metrics           appobservability.Metrics
 }
 
 // New 创建 feed 应用服务，默认注册 latest 策略；其余场景策略随后续阶段接入。
 func New(repo domfeed.Repository, opts ...Option) *Service {
 	latest := NewLatestStrategy(repo)
 	s := &Service{
-		repo:       repo,
-		strategies: map[domfeed.Scene]Strategy{latest.Scene(): latest},
+		repo:              repo,
+		strategies:        map[domfeed.Scene]Strategy{latest.Scene(): latest},
+		sharedLoadTimeout: defaultSharedLoadTimeout,
 	}
 	for _, opt := range opts {
 		opt(s)
+	}
+	// 指标在选项全部应用后统一注入策略，避免选项顺序导致策略拿不到指标。
+	for _, strategy := range s.strategies {
+		if setter, ok := strategy.(interface {
+			setMetrics(appobservability.Metrics)
+		}); ok {
+			setter.setMetrics(s.metrics)
+		}
 	}
 	return s
 }
@@ -174,8 +228,25 @@ func (s *Service) getFeed(ctx context.Context, req *FeedRequest) (*FeedResult, e
 	if limit == 0 {
 		limit = domfeed.DefaultFeedLimit
 	}
-	cursor, err := domfeed.DecodeCursor(req.Cursor)
+	cursor, legacy, err := s.decodeCursor(req.Cursor)
 	if err != nil {
+		return nil, err
+	}
+	if legacy {
+		// 签名上线前的旧游标没有服务端签名，无法纳入受控的页缓存键空间；
+		// 与 Version 过旧一致降级为首屏并记日志，避免旧客户端拿到 500。
+		log.Printf("info: 收到无签名旧游标，重置为首屏")
+		cursor = nil
+	} else if scene == domfeed.SceneFollowing && cursor != nil && cursor.Version < domfeed.CursorVersionMilli {
+		// 旧客户端持有毫秒改造前生成的秒级游标：其时间边界无法与新毫秒边界可靠比较，
+		// 继续使用会漏掉同一秒内更早发布的内容。显式降级为首屏而不是返回错误，
+		// 保证旧游标不会触发 500；客户端会回到第一页重新开始翻页。
+		log.Printf("info: following 游标版本过旧，重置为首屏 (version=%d)", cursor.Version)
+		cursor = nil
+	}
+
+	// following/hot 不走页缓存，每请求恒定多次回源 DB，必须在入口做请求级保护。
+	if err := s.enforceRateLimit(ctx, req, scene); err != nil {
 		return nil, err
 	}
 
@@ -192,8 +263,18 @@ func (s *Service) getFeed(ctx context.Context, req *FeedRequest) (*FeedResult, e
 		result.Items = result.Items[:limit]
 		if result.NextCursor == "" {
 			last := result.Items[len(result.Items)-1]
-			result.NextCursor = domfeed.EncodeCursor(&domfeed.Cursor{PublishedAt: last.PublishedAt, ClipID: last.ClipID})
+			result.NextCursor = s.encodeCursor(&domfeed.Cursor{
+				PublishedAt: last.PublishedAt,
+				ClipID:      last.ClipID,
+				Version:     domfeed.CursorVersionMilli,
+			})
 		}
+	}
+
+	// 策略自行生成的游标（hot/for-you）是未签名载荷，统一在出口补充签名，
+	// 保证客户端拿到的游标只能由本服务生成。
+	if result.NextCursor != "" {
+		result.NextCursor = s.resignCursor(result.NextCursor)
 	}
 
 	if err := s.assembleFeedEntries(ctx, req.ViewerID, result.Items); err != nil {
@@ -210,30 +291,117 @@ func (s *Service) loadFeedPage(ctx context.Context, strategy Strategy, req *Feed
 		return strategy.Load(ctx, req, cursor, count)
 	}
 
+	// 版本号参与摘要，删除内容后递增版本即可让旧页缓存不再命中。
+	// 版本读取失败时无法构造可靠摘要，直接跳过页缓存：若退化为默认版本，
+	// 可能命中删除前写入的版本 0 旧页，导致已删除内容短暂复现。
+	version, err := s.cache.FeedVersion(ctx)
+	if err != nil {
+		log.Printf("warning: 读取 feed 缓存版本失败，跳过页缓存回源 DB: %v", err)
+		s.observeCache("error")
+		return strategy.Load(ctx, req, cursor, count)
+	}
+
 	// count 比页大小多 1，key 还原为页大小以符合 C5 的 limit 语义。
-	digest := pageDigest(strategy.Scene(), req.ViewerID, req.Cursor, count-1)
-	if entries, ok := s.cache.GetPage(ctx, digest); ok {
+	// 摘要用规范化游标而不是 req.Cursor 原文：同一逻辑游标的不同文本编码必须落到同一个键，
+	// 否则任意改写游标字符串都会扩散出新的缓存键。签名校验已在 getFeed 完成。
+	digest := pageDigest(strategy.Scene(), req.ViewerID, domfeed.EncodeCursor(cursor), count-1, version)
+	entries, ok, err := s.cache.GetPage(ctx, digest)
+	if err != nil {
+		// 缓存故障与未命中区分：直接回源且不回填，避免把故障期结果写进缓存。
+		log.Printf("warning: 读取 feed 页缓存失败，回源 DB 且跳过回填: %v", err)
+		s.observeCache("error")
+		return strategy.Load(ctx, req, cursor, count)
+	}
+	if ok {
 		s.observeCache("hit")
 		return &Page{Entries: entries}, nil
 	}
 	s.observeCache("miss")
 
-	value, err, _ := s.group.Do(digest, func() (any, error) {
+	// 共享执行绑定在执行侧自有 ctx 上，而不是首个请求的 ctx：首个请求断连时
+	// 不能把 context.Canceled 广播给所有健康等待者。执行上限由 feed.shared_load_timeout
+	// 控制；超时后所有等待者收到同一个错误（通常是 context.DeadlineExceeded），
+	// 下一次请求会重新发起回源。
+	shared := s.group.DoChan(digest, func() (any, error) {
+		execCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.sharedLoadTimeout)
+		defer cancel()
+
 		// 单飞窗口内二次读缓存：等待期间可能已有并发请求回填。
-		if entries, ok := s.cache.GetPage(ctx, digest); ok {
+		cacheFault := false
+		if entries, ok, err := s.cache.GetPage(execCtx, digest); err != nil {
+			log.Printf("warning: 读取 feed 页缓存失败，回源 DB 且跳过回填: %v", err)
+			cacheFault = true
+		} else if ok {
 			return &Page{Entries: entries}, nil
 		}
-		page, err := strategy.Load(ctx, req, cursor, count)
+		page, err := strategy.Load(execCtx, req, cursor, count)
 		if err != nil {
 			return nil, err
 		}
-		s.cache.SetPage(ctx, digest, page.Entries, cursor == nil)
+		if !cacheFault {
+			// 空页写短 TTL 负标记而不是普通页：既吸收同一 key 的连续重放，
+			// 又避免空结论按翻页 TTL 挡住之后发布的新内容。
+			if len(page.Entries) == 0 {
+				s.cache.SetPageEmpty(execCtx, digest)
+			} else {
+				s.cache.SetPage(execCtx, digest, page.Entries, cursor == nil)
+			}
+		}
 		return page, nil
 	})
-	if err != nil {
-		return nil, err
+
+	select {
+	case <-ctx.Done():
+		// 等待者自己断连：立即退出，不阻塞在共享执行上；其他等待者不受影响。
+		return nil, ctx.Err()
+	case result := <-shared:
+		if result.Err != nil {
+			return nil, result.Err
+		}
+		return clonePage(result.Val.(*Page)), nil
 	}
-	return value.(*Page), nil
+}
+
+// clonePage 让每个等待者拿到独立的条目切片：singleflight 的所有等待者共享同一个 Page，
+// 后续 assembleFeedEntries 会就地替换 entries[i]，共享同一底层数组会并发写同一槽位。
+// 条目结构体本身只读（assembler 会按请求克隆），因此浅拷贝切片即可。
+func clonePage(page *Page) *Page {
+	if page == nil {
+		return nil
+	}
+	entries := make([]*domfeed.FeedEntry, len(page.Entries))
+	copy(entries, page.Entries)
+	cloned := *page
+	cloned.Entries = entries
+	return &cloned
+}
+
+// decodeCursor 按装配情况解析游标：注入签名器时校验签名并识别无签名旧游标；
+// 未注入时保持原来的无签名解析（单元测试与内部装配）。
+func (s *Service) decodeCursor(token string) (*domfeed.Cursor, bool, error) {
+	if s.cursors == nil {
+		cursor, err := domfeed.DecodeCursor(token)
+		return cursor, false, err
+	}
+	return s.cursors.Decode(token)
+}
+
+// encodeCursor 按装配情况编码游标，保证出口游标与入口校验使用同一把密钥。
+func (s *Service) encodeCursor(cursor *domfeed.Cursor) string {
+	if s.cursors == nil {
+		return domfeed.EncodeCursor(cursor)
+	}
+	return s.cursors.Encode(cursor)
+}
+
+// resignCursor 把策略产出的（未签名）游标统一重新编码，使出口游标始终带签名；
+// 已签名的游标解码后再签名结果不变，因此可安全重复调用。
+func (s *Service) resignCursor(token string) string {
+	cursor, _, err := s.decodeCursor(token)
+	if err != nil || cursor == nil {
+		return token
+	}
+	return s.encodeCursor(cursor)
 }
 
 // observeCache 记录一次页缓存访问结果；未注入指标时静默跳过。
@@ -243,23 +411,99 @@ func (s *Service) observeCache(result string) {
 	}
 }
 
-// pageDigest 按 C5 约定计算页缓存键摘要：sha1(scene|viewer|cursor|limit) 取前 16 位 hex。
-func pageDigest(scene domfeed.Scene, viewerID int64, cursor string, limit int) string {
-	sum := sha1.Sum([]byte(fmt.Sprintf("%s|%d|%s|%d", scene, viewerID, cursor, limit)))
+// needsFeedRateLimit 报告场景是否需要请求级限流：
+// following 与 hot 均不走页缓存，每请求会有多次 DB 查询，是唯一需要入口保护的场景。
+func needsFeedRateLimit(scene domfeed.Scene) bool {
+	return scene == domfeed.SceneFollowing || scene == domfeed.SceneHot
+}
+
+// enforceRateLimit 对 following/hot 做请求级限流：登录读者按用户计数，匿名请求按 IP 计数。
+// 与登录限流一致，Redis 故障时 fail-open 放行并记录日志与指标，避免限流成为可用性单点。
+func (s *Service) enforceRateLimit(ctx context.Context, req *FeedRequest, scene domfeed.Scene) error {
+	if s.limiter == nil || !needsFeedRateLimit(scene) {
+		return nil
+	}
+	// following 未登录会在策略层返回 401，这里不计数，避免把匿名请求当作已授权流量。
+	if scene == domfeed.SceneFollowing && req.ViewerID <= 0 {
+		return nil
+	}
+
+	scope := "ip"
+	var (
+		allowed    bool
+		retryAfter time.Duration
+		err        error
+	)
+	if req.ViewerID > 0 {
+		scope = "user"
+		allowed, retryAfter, err = s.limiter.AllowUser(ctx, req.ViewerID)
+	} else {
+		allowed, retryAfter, err = s.limiter.AllowIP(ctx, req.ClientIP)
+	}
+	if err != nil {
+		log.Printf("warning: feed 限流降级（Redis 故障，fail-open, scope=%s）: %v", scope, err)
+		if s.metrics != nil {
+			s.metrics.ObserveFeedLimiterError(scope)
+		}
+		return nil
+	}
+	if !allowed {
+		return &domfeed.ErrFeedRateLimited{RetryAfter: retryAfter}
+	}
+	return nil
+}
+
+// pageDigest 按 C5 约定计算页缓存键摘要：sha1(scene|viewer|cursor|limit|version) 取前 16 位 hex。
+func pageDigest(scene domfeed.Scene, viewerID int64, cursor string, limit int, version string) string {
+	sum := sha1.Sum([]byte(fmt.Sprintf("%s|%d|%s|%d|%s", scene, viewerID, cursor, limit, version)))
 	return hex.EncodeToString(sum[:])[:16]
 }
 
-// assembleFeedEntries 填充条目的读者互动状态：每次请求实时读库，未登录读者直接跳过。
+// assembleFeedEntries 填充条目的作者摘要与读者互动状态：每次请求实时读库；
+// 作者昵称/头像对未登录读者也补齐，关注标记仅在有读者身份时读取。
 func (s *Service) assembleFeedEntries(ctx context.Context, viewerID int64, entries []*domfeed.FeedEntry) error {
 	// 页缓存与 singleflight 会在并发请求间共享同一批条目指针，
-	// 组装前逐个拷贝并清空读者状态，避免把某个读者的 liked/saved 写进共享数据。
+	// 组装前逐个拷贝并清空读者相关状态，避免把某个读者的 liked/saved/following 写进共享数据。
 	for i, entry := range entries {
 		clone := *entry
 		clone.Viewer = domfeed.ViewerState{}
+		clone.Creator = domfeed.CreatorSummary{UserID: entry.CreatorID}
 		entries[i] = &clone
 	}
 
-	if viewerID == 0 || len(entries) == 0 {
+	if len(entries) == 0 {
+		return nil
+	}
+
+	creatorIDs := make([]int64, 0, len(entries))
+	seenCreators := make(map[int64]struct{}, len(entries))
+	for _, entry := range entries {
+		if _, ok := seenCreators[entry.CreatorID]; ok {
+			continue
+		}
+		seenCreators[entry.CreatorID] = struct{}{}
+		creatorIDs = append(creatorIDs, entry.CreatorID)
+	}
+	profiles, err := s.repo.BatchGetCreatorProfiles(ctx, creatorIDs)
+	if err != nil {
+		return err
+	}
+	followed := map[int64]bool{}
+	if viewerID != 0 {
+		followed, err = s.repo.BatchGetFollowedCreatorIDs(ctx, viewerID, creatorIDs)
+		if err != nil {
+			return err
+		}
+	}
+	for _, entry := range entries {
+		if profile, ok := profiles[entry.CreatorID]; ok {
+			entry.Creator.Nickname = profile.Nickname
+			entry.Creator.AvatarURL = profile.AvatarURL
+		}
+		entry.Creator.Following = followed[entry.CreatorID]
+	}
+
+	if viewerID == 0 {
 		return nil
 	}
 	ids := make([]int64, 0, len(entries))

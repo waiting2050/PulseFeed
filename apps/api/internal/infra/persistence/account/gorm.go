@@ -75,6 +75,19 @@ func (r *Repository) FindByAccount(ctx context.Context, name string) (*domainacc
 	return domainaccount.RestoreAccount(user.ID, user.Account, user.PasswordHash, user.Role, user.Status), nil
 }
 
+// FindByID 按用户 ID 查找凭证与权限字段，刷新令牌时读取最新角色与状态。
+func (r *Repository) FindByID(ctx context.Context, userID int64) (*domainaccount.Account, error) {
+	var user UserModel
+	err := r.db.WithContext(ctx).Where("id = ?", userID).Take(&user).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, domainaccount.ErrAccountNotFound
+		}
+		return nil, err
+	}
+	return domainaccount.RestoreAccount(user.ID, user.Account, user.PasswordHash, user.Role, user.Status), nil
+}
+
 // GetProfile 按用户 ID 读取展示资料。
 func (r *Repository) GetProfile(ctx context.Context, userID int64) (*domainaccount.UserProfile, error) {
 	var profile UserProfileModel

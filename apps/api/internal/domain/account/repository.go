@@ -9,6 +9,8 @@ type Repository interface {
 	Create(ctx context.Context, account *Account, profile *UserProfile) error
 	// FindByAccount 按规范化账号名查找账号，登录流程使用；不存在时返回 ErrAccountNotFound。
 	FindByAccount(ctx context.Context, name string) (*Account, error)
+	// FindByID 按用户 ID 查找账号，刷新令牌时用于读取最新角色与状态。
+	FindByID(ctx context.Context, userID int64) (*Account, error)
 	// GetProfile 按用户 ID 读取资料；不存在时返回 ErrAccountNotFound。
 	GetProfile(ctx context.Context, userID int64) (*UserProfile, error)
 	// UpdateProfile 只更新资料展示字段；目标不存在时返回 ErrAccountNotFound。

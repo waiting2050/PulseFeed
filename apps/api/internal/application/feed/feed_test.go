@@ -17,9 +17,13 @@ import (
 type feedFakeRepo struct {
 	entries      []*domfeed.FeedEntry
 	viewerStates map[int64]map[int64]*domfeed.ViewerState
+	profiles     map[int64]*domfeed.CreatorProfile
+	followed     map[int64]bool
 	listCalls    int
 	lastLimit    int
 	viewerCalls  int
+	profileCalls int
+	followCalls  int
 	listErr      error
 	viewerErr    error
 }
@@ -45,6 +49,8 @@ func newFeedFakeRepo(count int) *feedFakeRepo {
 	return &feedFakeRepo{
 		entries:      entries,
 		viewerStates: make(map[int64]map[int64]*domfeed.ViewerState),
+		profiles:     make(map[int64]*domfeed.CreatorProfile),
+		followed:     make(map[int64]bool),
 	}
 }
 
@@ -95,7 +101,7 @@ func (f *feedFakeRepo) ListCreatorRecentClips(_ context.Context, _ int64, _ int)
 	return nil, nil
 }
 
-func (f *feedFakeRepo) ListLatestClipIDs(_ context.Context, _ int) ([]int64, error) {
+func (f *feedFakeRepo) ListLatestClipMedia(_ context.Context, _ int) ([]domfeed.PreloadClip, error) {
 	return nil, nil
 }
 
@@ -105,6 +111,29 @@ func (f *feedFakeRepo) BatchGetEntries(_ context.Context, _ []int64) (map[int64]
 
 func (f *feedFakeRepo) BatchGetStats(_ context.Context, _ []int64) (map[int64]*domfeed.EntryStats, error) {
 	return map[int64]*domfeed.EntryStats{}, nil
+}
+
+func (f *feedFakeRepo) BatchGetCreatorProfiles(_ context.Context, creatorIDs []int64) (map[int64]*domfeed.CreatorProfile, error) {
+	f.profileCalls++
+	result := make(map[int64]*domfeed.CreatorProfile, len(creatorIDs))
+	for _, id := range creatorIDs {
+		if profile, ok := f.profiles[id]; ok {
+			clone := *profile
+			result[id] = &clone
+		}
+	}
+	return result, nil
+}
+
+func (f *feedFakeRepo) BatchGetFollowedCreatorIDs(_ context.Context, _ int64, creatorIDs []int64) (map[int64]bool, error) {
+	f.followCalls++
+	result := make(map[int64]bool, len(creatorIDs))
+	for _, id := range creatorIDs {
+		if f.followed[id] {
+			result[id] = true
+		}
+	}
+	return result, nil
 }
 
 func (f *feedFakeRepo) BatchGetViewerStates(_ context.Context, viewerID int64, clipIDs []int64) (map[int64]*domfeed.ViewerState, error) {
@@ -126,16 +155,25 @@ func (f *feedFakeRepo) BatchGetViewerStates(_ context.Context, viewerID int64, c
 type feedFakeCache struct {
 	enabled       bool
 	pages         map[string][]*domfeed.FeedEntry
+	empty         map[string]bool
 	preset        []*domfeed.FeedEntry
 	getCalls      int
 	hitCalls      int
 	setCalls      int
+	emptyCalls    int
 	lastFirstPage bool
+	// getErr / versionErr 模拟 Redis 故障，用于验证故障与未命中的区分。
+	getErr     error
+	versionErr error
 }
 
 // newFeedFakeCache 构造指定启用状态的页缓存。
 func newFeedFakeCache(enabled bool) *feedFakeCache {
-	return &feedFakeCache{enabled: enabled, pages: make(map[string][]*domfeed.FeedEntry)}
+	return &feedFakeCache{
+		enabled: enabled,
+		pages:   make(map[string][]*domfeed.FeedEntry),
+		empty:   make(map[string]bool),
+	}
 }
 
 // feedFakeCloneEntries 返回条目副本，模拟缓存序列化后每次读出独立对象。
@@ -153,24 +191,42 @@ func feedFakeCloneEntries(entries []*domfeed.FeedEntry) []*domfeed.FeedEntry {
 
 func (f *feedFakeCache) Enabled() bool { return f.enabled }
 
-func (f *feedFakeCache) GetPage(_ context.Context, digest string) ([]*domfeed.FeedEntry, bool) {
+func (f *feedFakeCache) GetPage(_ context.Context, digest string) ([]*domfeed.FeedEntry, bool, error) {
 	f.getCalls++
+	if f.getErr != nil {
+		return nil, false, f.getErr
+	}
 	if f.preset != nil {
 		f.hitCalls++
-		return feedFakeCloneEntries(f.preset), true
+		return feedFakeCloneEntries(f.preset), true, nil
+	}
+	if f.empty[digest] {
+		f.hitCalls++
+		return nil, true, nil
 	}
 	entries, ok := f.pages[digest]
 	if !ok {
-		return nil, false
+		return nil, false, nil
 	}
 	f.hitCalls++
-	return feedFakeCloneEntries(entries), true
+	return feedFakeCloneEntries(entries), true, nil
 }
 
 func (f *feedFakeCache) SetPage(_ context.Context, digest string, entries []*domfeed.FeedEntry, firstPage bool) {
 	f.setCalls++
 	f.lastFirstPage = firstPage
 	f.pages[digest] = feedFakeCloneEntries(entries)
+}
+
+// SetPageEmpty 记录空页负标记，使后续相同 digest 直接命中空页。
+func (f *feedFakeCache) SetPageEmpty(_ context.Context, digest string) {
+	f.emptyCalls++
+	f.empty[digest] = true
+}
+
+// FeedVersion 返回固定版本号；本测试不验证删除失效。
+func (f *feedFakeCache) FeedVersion(_ context.Context) (string, error) {
+	return "", f.versionErr
 }
 
 // TestFeedLatestPaginationIsStableAcrossPages 验证 5 条数据按 2 条/页翻页不重不漏且游标正确收尾。
@@ -338,6 +394,50 @@ func TestFeedAnonymousSkipsViewerState(t *testing.T) {
 	}
 	if repo.viewerCalls != 0 {
 		t.Fatalf("匿名读者不应查询状态, 实际 %d 次", repo.viewerCalls)
+	}
+}
+
+// TestFeedEnrichesCreatorProfile 验证每条 Feed 都补齐作者昵称/头像，并按读者回显是否已关注作者。
+func TestFeedEnrichesCreatorProfile(t *testing.T) {
+	ctx := context.Background()
+	repo := newFeedFakeRepo(3)
+	repo.profiles[1] = &domfeed.CreatorProfile{Nickname: "创作者一", AvatarURL: "/uploads/avatar/1.png"}
+	repo.followed[1] = true
+	svc := appfeed.New(repo)
+
+	result, err := svc.GetFeed(ctx, &appfeed.FeedRequest{Scene: "latest", ViewerID: 7, Limit: 3})
+	if err != nil {
+		t.Fatalf("读取失败: %v", err)
+	}
+	for _, item := range result.Items {
+		if item.Creator.UserID != 1 {
+			t.Fatalf("作者 ID = %d, 期望 1", item.Creator.UserID)
+		}
+		if item.Creator.Nickname != "创作者一" || item.Creator.AvatarURL != "/uploads/avatar/1.png" {
+			t.Fatalf("作者资料未补齐: %+v", item.Creator)
+		}
+		if !item.Creator.Following {
+			t.Fatalf("读者已关注作者，应回显 Following=true: %+v", item.Creator)
+		}
+	}
+	if repo.profileCalls != 1 || repo.followCalls != 1 {
+		t.Fatalf("作者资料与关注态应各批量查询一次: profile=%d follow=%d", repo.profileCalls, repo.followCalls)
+	}
+
+	anonymous, err := svc.GetFeed(ctx, &appfeed.FeedRequest{Scene: "latest", Limit: 3})
+	if err != nil {
+		t.Fatalf("匿名读取失败: %v", err)
+	}
+	for _, item := range anonymous.Items {
+		if item.Creator.Nickname != "创作者一" {
+			t.Fatalf("匿名读者也应获得作者资料: %+v", item.Creator)
+		}
+		if item.Creator.Following {
+			t.Fatalf("匿名读者关注态应恒为 false: %+v", item.Creator)
+		}
+	}
+	if repo.followCalls != 1 {
+		t.Fatalf("匿名读者不应查询关注态, 实际 %d 次", repo.followCalls)
 	}
 }
 

@@ -66,7 +66,7 @@ func (f *fanoutWFakeRepo) ListCreatorRecentClips(_ context.Context, _ int64, _ i
 	return nil, nil
 }
 
-func (f *fanoutWFakeRepo) ListLatestClipIDs(_ context.Context, _ int) ([]int64, error) {
+func (f *fanoutWFakeRepo) ListLatestClipMedia(_ context.Context, _ int) ([]domfeed.PreloadClip, error) {
 	return nil, nil
 }
 
@@ -96,6 +96,14 @@ func (f *fanoutWFakeRepo) BatchGetStats(_ context.Context, clipIDs []int64) (map
 		}
 	}
 	return result, nil
+}
+
+func (f *fanoutWFakeRepo) BatchGetCreatorProfiles(_ context.Context, _ []int64) (map[int64]*domfeed.CreatorProfile, error) {
+	return map[int64]*domfeed.CreatorProfile{}, nil
+}
+
+func (f *fanoutWFakeRepo) BatchGetFollowedCreatorIDs(_ context.Context, _ int64, _ []int64) (map[int64]bool, error) {
+	return map[int64]bool{}, nil
 }
 
 func (f *fanoutWFakeRepo) BatchGetViewerStates(_ context.Context, _ int64, _ []int64) (map[int64]*domfeed.ViewerState, error) {
@@ -141,7 +149,7 @@ func (f *fanoutWFakeCache) AddInboxEntries(_ context.Context, userID int64, entr
 	return nil
 }
 
-func (f *fanoutWFakeCache) ListInbox(_ context.Context, userID int64) ([]domfeed.InboxEntry, error) {
+func (f *fanoutWFakeCache) ListInbox(_ context.Context, userID int64, _ *domfeed.Cursor, _ int) ([]domfeed.InboxEntry, error) {
 	return f.inbox[userID], nil
 }
 
@@ -155,18 +163,22 @@ func (f *fanoutWFakeCache) AddOutboxEntries(_ context.Context, creatorID int64, 
 	return nil
 }
 
-func (f *fanoutWFakeCache) ListOutbox(_ context.Context, creatorID int64) ([]domfeed.InboxEntry, error) {
-	return f.outbox[creatorID], nil
+func (f *fanoutWFakeCache) ListOutboxes(_ context.Context, creatorIDs []int64, _ *domfeed.Cursor, _ int) ([]domfeed.InboxEntry, error) {
+	var entries []domfeed.InboxEntry
+	for _, creatorID := range creatorIDs {
+		entries = append(entries, f.outbox[creatorID]...)
+	}
+	return entries, nil
 }
 
-func (f *fanoutWFakeCache) GetCards(_ context.Context, clipIDs []int64) map[int64]*domfeed.FeedEntry {
+func (f *fanoutWFakeCache) GetCards(_ context.Context, clipIDs []int64) (map[int64]*domfeed.FeedEntry, map[int64]bool, error) {
 	result := make(map[int64]*domfeed.FeedEntry, len(clipIDs))
 	for _, id := range clipIDs {
 		if entry, ok := f.cards[id]; ok {
 			result[id] = entry
 		}
 	}
-	return result
+	return result, map[int64]bool{}, nil
 }
 
 func (f *fanoutWFakeCache) SetCards(_ context.Context, entries []*domfeed.FeedEntry) {
@@ -176,14 +188,17 @@ func (f *fanoutWFakeCache) SetCards(_ context.Context, entries []*domfeed.FeedEn
 	}
 }
 
-func (f *fanoutWFakeCache) GetStats(_ context.Context, clipIDs []int64) map[int64]*domfeed.EntryStats {
+// MarkCardsMissing 在扇出测试中无意义，仅满足接口。
+func (f *fanoutWFakeCache) MarkCardsMissing(context.Context, []int64) {}
+
+func (f *fanoutWFakeCache) GetStats(_ context.Context, clipIDs []int64) (map[int64]*domfeed.EntryStats, map[int64]bool, error) {
 	result := make(map[int64]*domfeed.EntryStats, len(clipIDs))
 	for _, id := range clipIDs {
 		if stats, ok := f.stats[id]; ok {
 			result[id] = stats
 		}
 	}
-	return result
+	return result, map[int64]bool{}, nil
 }
 
 func (f *fanoutWFakeCache) SetStats(_ context.Context, stats map[int64]*domfeed.EntryStats) {
@@ -192,6 +207,9 @@ func (f *fanoutWFakeCache) SetStats(_ context.Context, stats map[int64]*domfeed.
 		f.stats[id] = value
 	}
 }
+
+// MarkStatsMissing 在扇出测试中无意义，仅满足接口。
+func (f *fanoutWFakeCache) MarkStatsMissing(context.Context, []int64) {}
 
 // fanoutWNewFixture 构造 clip_id=42、creator_id=7 的 Worker 测试夹具。
 func fanoutWNewFixture() (*fanoutWFakeRepo, *fanoutWFakeCache, []byte, time.Time) {

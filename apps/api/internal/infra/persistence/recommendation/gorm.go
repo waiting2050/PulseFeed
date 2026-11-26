@@ -8,6 +8,7 @@ import (
 
 	domclip "pulsefeed/internal/domain/clip"
 	domembedding "pulsefeed/internal/domain/embedding"
+	dominteraction "pulsefeed/internal/domain/interaction"
 	domrecommendation "pulsefeed/internal/domain/recommendation"
 
 	"gorm.io/gorm"
@@ -61,8 +62,10 @@ func New(db *gorm.DB) *Repository {
 	return &Repository{db: db}
 }
 
-// ListCandidates 按 snapshotAt 固定候选池：排除快照前已发布之外的 clip、排除最近 7 天曝光，
-// 并按快照基准热度降序召回；向量缺失的候选仍参与排序，兴趣分按 0 处理。
+// ListCandidates 按 snapshotAt 固定候选池：只取快照前发布的 clip，
+// 候选阶段即排除本人作品、已点赞/已收藏的作品与最近 7 天曝光过的 clip，
+// 再按快照基准热度降序召回；排除发生在截断之前，避免无效项占用候选池额度。
+// 已取消的点赞/收藏不参与排除，保证读者取消行为后作品可重新进入推荐。
 func (r *Repository) ListCandidates(ctx context.Context, viewerID int64, snapshotAt time.Time, limit int) ([]domrecommendation.Candidate, error) {
 	impressionSince := snapshotAt.Add(-time.Duration(domrecommendation.ImpressionWindowDays) * 24 * time.Hour)
 
@@ -77,6 +80,12 @@ func (r *Repository) ListCandidates(ctx context.Context, viewerID int64, snapsho
 		Joins("LEFT JOIN pf_clip_embeddings e ON e.clip_id = c.id").
 		Where("c.status = ?", domclip.StatusPublished).
 		Where("c.published_at <= ?", snapshotAt).
+		// 排除本人作品：读者自己的内容不进入 for-you 候选。
+		Where("c.creator_id <> ?", viewerID).
+		// 排除已点赞/已收藏的作品；uk_user_clip_type(user_id, clip_id, action_type) 支撑该子查询。
+		Where("NOT EXISTS (SELECT 1 FROM pf_actions a WHERE a.user_id = ? AND a.clip_id = c.id "+
+			"AND a.action_type IN (?, ?) AND a.status = ?)",
+			viewerID, dominteraction.ActionLike, dominteraction.ActionSave, dominteraction.StatusActive).
 		Where("NOT EXISTS (SELECT 1 FROM pf_impressions i WHERE i.viewer_id = ? AND i.clip_id = c.id "+
 			"AND i.last_played_at >= ? AND i.last_played_at <= ?)", viewerID, impressionSince, snapshotAt).
 		Order("hot_score DESC, c.published_at DESC, c.id DESC").
