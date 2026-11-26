@@ -1,4 +1,6 @@
 // api.js 收口所有 HTTP 访问：统一信封解析、Bearer 注入、幂等键、401 单飞刷新与挂起重放。
+import { clearAllFeedProgress } from './feedProgress.js'
+
 const ACCESS_KEY = 'pulsefeed.token'
 const REFRESH_KEY = 'pulsefeed.refresh'
 
@@ -61,6 +63,7 @@ function applyPair(data) {
 
 // clearSession 清空两个令牌并通知订阅者；刷新失败与主动登出共用。
 export function clearSession() {
+  clearAllFeedProgress()
   localStorage.removeItem(ACCESS_KEY)
   localStorage.removeItem(REFRESH_KEY)
   emitSession('')
@@ -578,6 +581,7 @@ export const api = {
       body: { account, password },
       skipAuth: true,
     })
+    clearAllFeedProgress()
     applyPair(data)
     return data
   },

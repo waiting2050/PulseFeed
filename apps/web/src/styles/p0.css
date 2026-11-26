@@ -42,7 +42,7 @@ body {
   position: sticky;
   top: 0;
   z-index: var(--z-sticky);
-  background: rgba(0, 0, 0, 0.82);
+  background: rgba(16, 19, 27, 0.94);
   backdrop-filter: blur(14px);
   border-bottom: 1px solid var(--line);
 }
@@ -1041,4 +1041,48 @@ body {
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
   }
+}
+
+/* 首页导览：保持原有场景和卡片布局，为恢复进度提供显式刷新入口。 */
+.pf-feed-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 20px 0 24px;
+}
+.pf-feed-heading h1 {
+  margin: 4px 0;
+  font-size: clamp(24px, 4vw, 36px);
+  letter-spacing: -0.035em;
+  line-height: 1.2;
+}
+.pf-feed-eyebrow {
+  margin: 0;
+  color: var(--cyan);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+}
+.pf-feed-description {
+  margin: 8px 0 0;
+  color: var(--text-2);
+  font-size: var(--fs-body);
+}
+.pf-feed-refresh {
+  background: var(--surface-1);
+  color: var(--text-1);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-sm);
+  padding: 10px 14px;
+  white-space: nowrap;
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+}
+.pf-feed-refresh:hover:not(:disabled) { background: var(--surface-3); }
+.pf-feed-refresh:disabled { opacity: 0.55; cursor: default; }
+@media (max-width: 560px) {
+  .pf-feed-heading { padding: 14px 0 18px; gap: 10px; }
+  .pf-feed-description { font-size: 12px; }
 }

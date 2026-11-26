@@ -21,7 +21,7 @@ interfaces/http  →  application  →  domain
 ### 2.1 发布与扇出
 
 1. `POST /api/clips` 校验登录、标题、可选简介与媒体地址，按 `Idempotency-Key` 幂等写入 `pf_clips` 与 `pf_clip_stats`。简介为 `TEXT` 列，去首尾空白后按码点上限 1000 校验，超限返回 400 且不截断。
-2. 发布成功后投递 `clip.published`（含 `clip_id`、`creator_id`、`published_at`）。
+2. 启用事务 Outbox 时，发布与向量事件随作品在同一数据库事务中写入，Relay 负责确认投递；未启用时沿用直接投递。
 3. `FanoutWorker` 读取创作者粉丝数：达到大 V 阈值只写创作者 outbox（拉模型）；否则按 500/批写入粉丝 inbox（推模型），并预热卡片与计数缓存。
 4. 关注类 Feed 优先读 inbox/outbox，未命中时回源 DB 并按游标分页。
 
@@ -45,7 +45,7 @@ interfaces/http  →  application  →  domain
 
 1. `POST /api/clip-play-events` 接受四类 `event_type`：`exposed`（卡片进入视口）、`play`（开始播放）、`complete`（播放到结尾）、`skip`（展示后未播放即划走）；空值与旧客户端语义一致，按 `play` 处理，其余未知值返回 400。`scene` 必须属于 Feed 场景或为空，`request_id` 上限 128 字符，`watch_ms` 取值 0–24 小时。
 2. `event_id` 全局唯一，重复上报不二次写入 `pf_play_events`；`play_count` 只在 `event_type=play` 且首次插入时累加，并与 `pf_playback_qos_reports` 按同一 `event_id` 跨表去重。`exposed` / `skip` / `complete` 只 upsert 当日展示聚合，其中 `complete` 额外累加完播数，不影响 `play_count`。
-3. 事件投递 `impression.play_recorded`；`PlayEventWorker`（D7 修正）消费后完成展示聚合补偿，避免“只发不收”。
+3. 展示聚合、事件及符合条件的播放计数由 API 在同一个数据库事务中写入；可选 Outbox 记录也同事务保存。当前 `PlayEventWorker` 仅确认并排空 `impression.play_recorded` 队列，不再执行 synced 补偿或修改事件。
 4. `POST /api/playback-qos-reports` 按 `event_id` 幂等写入 QoS 表；仅首次插入参与采样与延迟/卡顿/完播聚合。
 5. 播放配置按用户持久化 `preload_count`（默认 8，上限 32）、`qos_sample_rate`（默认 0.1，上限 1）、`buffer_ms`（默认 2000，夹取到 500–10000，越界按边界值落库）。`buffer_ms` 目前只有全局维度，平台/网络维度细分需要调整配置表主键，本轮未做。
 6. `GET /api/preload-clips` 按用户 `preload_count` 返回最新 N 条可见内容的 `clip_id`、`media_url`、`cover_url`、`duration_ms`。前端在首屏数据就绪后调用该接口，以并发 3 的队列预取封面并读取媒体元信息；媒体元信息使用游离的媒体元素（`preload="metadata"`）拉取，5 秒超时兜底。场景切换或离开页面时通过 `AbortController` 统一取消，单个条目失败静默跳过，不阻塞渲染。
@@ -63,7 +63,7 @@ interfaces/http  →  application  →  domain
 | hot | 热度分数（点赞/收藏/评论/播放加权） | 复合游标 `(score, clip_id)`，窗口为最近 60 个分钟桶 |
 | for-you | 推荐候选 → 兴趣向量与热度加权 → 按创作者交错 | 携带 `snapshot_at`，交错后按最后实际输出条目生成 |
 
-分页统一 `limit+1` 判断 `has_more`，响应返回 Base64 `next_cursor`；跨页按 `clip_id` 去重。for-you 的 `snapshot_at` 保证翻页期间候选池不随新发布漂移。
+分页统一 `limit+1` 判断 `has_more`，响应返回 Base64 `next_cursor`；跨页按 `clip_id` 去重。for-you 的 `snapshot_at` 限制候选时间范围，减少新发布造成的翻页漂移；动态信号仍可能变化。
 
 ### 2.5 上传与媒体探测
 
